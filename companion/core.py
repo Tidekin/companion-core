@@ -55,6 +55,7 @@ from companion.model import (
     MEMORY_RULES,
     PRINCIPLES,
     RECALL_RULES,
+    principles,
 )
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
@@ -383,7 +384,8 @@ class Core(Runtime):
                                 current_request=current_request)
         for snapshot in snapshots:
             try:
-                purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
+                purpose = {"memory": "memory", "character": "expression",
+                           "growth": "expression", "affect": "affect",
                            "mood": "expression", "watch": "exploration", "interest": "memory",
                            "voice": "voice", "diary": "diary", "images": "image",
                            "style_observation": "expression"}.get(
@@ -392,6 +394,10 @@ class Core(Runtime):
                     raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
                 if snapshot["kind"] == "memory":
                     self.memory_context.revalidate(snapshot["proof"], self.clock())
+                elif snapshot["kind"] == "character":
+                    from companion.history_import import revalidate_character
+
+                    revalidate_character(self, job, snapshot["proof"])
                 elif snapshot["kind"] == "growth":
                     self.expression_learning.revalidate_reply(
                         self.settings, job, self._affect_context(authority), snapshot["proof"])
@@ -556,14 +562,22 @@ class Core(Runtime):
         body, text, authority, followup = turn.body, turn.text, turn.authority, turn.followup
         expression_rules, expression_data = self.expression.instruction_parts(job["event_id"]) if (
             turn.permits("expression")) else ("", "")
-        rules = PRINCIPLES + (MEMORY_RULES if cfg.memory_enabled and turn.permits("memory")
-                              else "") + expression_rules
+        policy = (cfg.conversation_policy if job["kind"] == "chat" or followup
+                  else conversation_policy.ConversationPolicyConfig(mode="OFF"))
+        rules = principles(character_expression=(
+            policy.mode == "ENABLED" and policy.strategy == "character_v1")) + (
+            MEMORY_RULES if cfg.memory_enabled and turn.permits("memory") else ""
+        ) + expression_rules
+        if turn.permits("expression") and not private_life.strict(s, cfg):
+            from companion.history_import import CHARACTER_RULES, active_character
+
+            if active_character(s):
+                rules += CHARACTER_RULES
         if followup:
             rules += "\n" + turn_taking.FOLLOW_UP_RULES
         affect = self._affect_context(authority)
         rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
-            rules, cfg.conversation_policy if job["kind"] == "chat" or followup
-            else conversation_policy.ConversationPolicyConfig(mode="OFF"),
+            rules, policy,
             current_text=text, affect=affect,
             guidance=cfg.conversation_guidance if job["kind"] == "chat" or followup else None,
         )
@@ -675,6 +689,14 @@ class Core(Runtime):
                          memories, memory_paused, mark):
         s, cfg, job, text = self.store, turn.settings, turn.job, turn.text
         authority = turn.authority
+        if turn.permits("expression") and not bounded_text:
+            from companion.history_import import character_context
+
+            # An explicitly configured character is the starting point of every turn.
+            if character := character_context(self, job):
+                selection.include(character["message"], character["source_event_ids"],
+                                  proof={"kind": "character", "proof": character["proof"]})
+                selection.required.add(id(character["message"]))
         if turn.permits("goals"):
             self.life.add_reply_references(selection, related)
         if cfg.watch_ledger.enabled and job["kind"] == "chat" and turn.permits("exploration"):

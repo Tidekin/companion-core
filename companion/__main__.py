@@ -113,6 +113,23 @@ def main():
     diagnostic.add_argument("--integrity", action="store_true")
     inspector = sub.add_parser("inspect-context")
     inspector.add_argument("--trace-id", required=True)
+    for name in ("preview-history", "import-history"):
+        importer = sub.add_parser(name)
+        importer.add_argument("--source", required=True)
+        importer.add_argument("--images-dir")
+        importer.add_argument("--request", required=True)
+        importer.add_argument("--request-sha256", required=True)
+    for name in ("preview-character", "set-character"):
+        character = sub.add_parser(name)
+        character.add_argument("--request", required=True)
+        character.add_argument("--request-sha256", required=True)
+    sub.add_parser("clear-character")
+    for name in ("export-history", "forget-history"):
+        history = sub.add_parser(name)
+        history.add_argument("--archive-event-id", required=True)
+        if name == "export-history":
+            history.add_argument("--output", required=True)
+            history.add_argument("--image-sha256")
     observation = sub.add_parser("observe")
     observation.add_argument("--output", required=True)
     observation.add_argument("--samples", type=int, default=3)
@@ -196,6 +213,42 @@ def main():
             from companion.beta_observation import inspect_context
 
             print(encode(inspect_context(settings, args.trace_id)))
+        elif args.command in {"preview-history", "import-history"}:
+            from companion import history_import
+
+            request = history_import.HistoryRequest.model_validate(
+                history_import.load_json(args.request, args.request_sha256))
+            raw = Path(args.source).read_bytes()
+            images = history_import.load_images(request, args.images_dir)
+            if args.command == "preview-history":
+                print(encode(history_import.preview(request, raw, images)))
+            else:
+                with Runtime(settings) as runtime:
+                    print(encode(history_import.apply(runtime, request, raw,
+                                                      args.request_sha256, images)))
+        elif args.command in {"preview-character", "set-character"}:
+            from companion import history_import
+
+            character = history_import.InitialCharacter.model_validate(
+                history_import.load_json(args.request, args.request_sha256))
+            if args.command == "preview-character":
+                print(encode(character.model_dump(mode="json")))
+            else:
+                with Runtime(settings) as runtime:
+                    print(encode(history_import.set_character(runtime, character)))
+        elif args.command in {"clear-character", "export-history", "forget-history"}:
+            from companion import history_import
+
+            with Runtime(settings) as runtime:
+                if args.command == "clear-character":
+                    print(encode(history_import.clear_character(runtime)))
+                elif args.command == "forget-history":
+                    print(encode(history_import.forget(runtime, args.archive_event_id)))
+                else:
+                    raw = history_import.export(runtime, args.archive_event_id, args.image_sha256)
+                    with Path(args.output).open("xb") as stream:
+                        stream.write(raw)
+                    print(encode({"source_sha256": history_import.digest(raw), "bytes": len(raw)}))
         elif args.command == "observe":
             from companion.observe import http_collector, observe
             from companion.ops_status import snapshot
