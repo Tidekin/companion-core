@@ -105,3 +105,42 @@ def test_projection_is_validated_once_per_identical_content(core, tmp_path, monk
     with pytest.raises(CoreError):
         owner_authority.current(core.store, core.settings, core.clock)
     assert len(calls) == 2
+
+
+def _scoped_service(monkeypatch, result):
+    service = mood.MoodService.__new__(mood.MoodService)
+    seen = []
+
+    def snapshot(*, at=None, allowed=None, only=None):
+        seen.append(only)
+        return result
+
+    monkeypatch.setattr(service, "snapshot", snapshot)
+    return service, seen
+
+
+def test_revalidate_reads_only_the_proof_events(monkeypatch):
+    proof = {"evaluated_at": "2026-11-11T00:00:00+00:00", "allowed": None, "truncated": False,
+             "signals": [{"event_id": "evt_b"}, {"event_id": "evt_a"}, {"event_id": "evt_b"}]}
+    service, seen = _scoped_service(monkeypatch, proof)
+    service.revalidate(proof)
+    assert seen == [["evt_a", "evt_b"]]
+
+
+def test_revalidate_rebuilds_a_truncated_proof_in_full(monkeypatch):
+    proof = {"evaluated_at": "2026-11-11T00:00:00+00:00", "allowed": None, "truncated": True,
+             "signals": [{"event_id": "evt_a"}]}
+    service, seen = _scoped_service(monkeypatch, proof)
+    service.revalidate(proof)
+    assert seen == [None]
+
+
+def test_revalidate_rejects_any_difference(monkeypatch):
+    from companion.contracts import CoreError
+
+    proof = {"evaluated_at": "2026-11-11T00:00:00+00:00", "allowed": None, "truncated": False,
+             "signals": []}
+    service, _ = _scoped_service(monkeypatch, {**proof, "paused": True})
+    with pytest.raises(CoreError) as error:
+        service.revalidate(proof)
+    assert error.value.code == "PRIVACY_CHANGED"
