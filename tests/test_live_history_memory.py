@@ -539,7 +539,10 @@ def test_soft_capacity_keeps_current_input_and_native_fact_without_rewriting_fac
             tmp_path,
             queries=texts,
             options=combined_options(),
-            core_options={"max_recent_messages": 4, "context_soft_tokens": 1},
+            # Exercise ordinary history pruning; source-bound raw recall is a
+            # separate representation that can retain this exact owner turn.
+            core_options={"max_recent_messages": 4, "context_soft_tokens": 1,
+                          "turn_recall_limit": 0},
         ) as (_, _, capture, send, calls, _, _, memory_id, _):
             await capture()
             assert await core.run_once()

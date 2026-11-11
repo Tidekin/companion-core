@@ -90,8 +90,9 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
                 actual = core.mood.snapshot()
                 same_snapshot = not transactional or core.store.change_token() == before
         if transactional == "read_transaction":
-            # Borrowed transactions keep the original independent checks per source.
-            assert len(calls) == 3 + 2 * len(recalls)
+            # Borrowed transactions keep one independent custody check per source;
+            # the source then reuses that freshly checked view in the same scope.
+            assert len(calls) == 3 + len(recalls)
         elif same_snapshot:
             assert len(calls) <= 4
         else:

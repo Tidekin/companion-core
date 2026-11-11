@@ -16,11 +16,53 @@ from companion.core import Core
 from tests.sdk_reader_fixture import answer
 
 
-def run_worker(settings_path, now):
+def run_worker(settings_path, now, mode="normal"):
     settings = Settings.model_validate_json(Path(settings_path).read_text("utf-8"))
     assert settings.model_url == "https://synthetic.invalid/v1"
     original_client, original_run = httpx.AsyncClient, Core.run_once
     calls = []
+    selected, retrieval = [], []
+    provider_returned = [False]
+    if mode == "post_model_source_budget":
+        from companion import retrieval_work
+
+        original_read = retrieval_work.Work._read
+
+        def source_read(self, operation, statement, parameters, *, limit):
+            store = getattr(operation, "__self__", None)
+            if (provider_returned[0] and store is not None and store.in_transaction
+                and not store.in_read_snapshot and not getattr(self, "_post_source_seeded", False)):
+                # Other source material has already spent this required proof's
+                # allowance. Keep the same ledger and the 60,000-byte remainder.
+                amount = max(0, retrieval_work.LIMITS["text_bytes"] - 60000
+                             - self.counts["text_bytes"])
+                assert self.take("text_bytes", amount)
+                self._post_source_seeded = True
+                retrieval.append(self)
+            return original_read(self, operation, statement, parameters, limit=limit)
+
+        retrieval_work.Work._read = source_read
+    if mode == "exhaust_turn_budget":
+        from companion import retrieval_work, turn_recall
+        from companion.memory_context import MemoryContext
+
+        original_recall, original_prefetch = MemoryContext.recall_async, turn_recall.prefetch
+
+        async def recall(self, *args, **kwargs):
+            result = await original_recall(self, *args, **kwargs)
+            selected.append(len(result["rows"]))
+            return result
+
+        async def prefetch(*args, **kwargs):
+            result = await original_prefetch(*args, **kwargs)
+            assert selected and selected[-1] > 0
+            work = retrieval_work.current()
+            assert work.take("sql_milliseconds", work.remaining("sql_milliseconds"))
+            assert not work.take("sql_milliseconds")
+            retrieval.append(work)
+            return result
+
+        MemoryContext.recall_async, turn_recall.prefetch = recall, prefetch
 
     class Finished(BaseException):
         pass
@@ -37,6 +79,7 @@ def run_worker(settings_path, now):
             text = json.dumps({"relevant": [row["ref"] for row in data["memories"]]})
         else:
             text = "星光资料的旧判断仍有依据，光谱标注的疑问也记着。"
+            provider_returned[0] = True
         return httpx.Response(200, json=answer(text))
 
     def client(**kwargs):
@@ -47,6 +90,8 @@ def run_worker(settings_path, now):
         await original_run(self, *args, **kwargs)
         print(json.dumps({"pid": os.getpid(), "calls": calls, "jobs": self.store.rows(
             'SELECT job_id,state,last_error_code FROM jobs ORDER BY record_sequence'),
+            "recalled_facts": selected,
+            "retrieval_work": [work.receipt() for work in retrieval],
             "usage": self.store.rows(
                 'SELECT scenario,state FROM model_usage ORDER BY '
                 'record_sequence'

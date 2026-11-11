@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
@@ -248,3 +249,72 @@ def test_bounded_read_retains_timeout_and_snapshot_after_optional_error(database
             assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
         assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 7}
         assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
+
+
+@pytest.mark.parametrize("outcome", ["commit", "rollback", "error"])
+def test_read_transaction_uses_native_begin_and_restores_connection_settings(
+    database, monkeypatch, outcome,
+):
+    commands = []
+    execute = psycopg.Connection._exec_command
+
+    def observed(connection, command, *args, **kwargs):
+        commands.append(command)
+        return execute(connection, command, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Connection, "_exec_command", observed)
+    with database.session() as reader:
+        connection = reader._connection
+        previous = connection.isolation_level, connection.read_only
+        problem = (pytest.raises(psycopg.errors.DivisionByZero)
+                   if outcome == "error" else nullcontext())
+        with problem:
+            with reader.transaction(readonly=True, rollback=outcome == "rollback"):
+                assert any(command.startswith(
+                    b"BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") for command in commands
+                    if isinstance(command, bytes))
+                assert reader.one("SHOW transaction_read_only")["transaction_read_only"] == "on"
+                assert reader.one("SHOW transaction_isolation") == {
+                    "transaction_isolation": "repeatable read"}
+                if outcome == "error":
+                    reader.one("SELECT 1/0")
+        assert (connection.isolation_level, connection.read_only) == previous
+        with reader.transaction():
+            assert reader.one("SHOW transaction_read_only")["transaction_read_only"] == "off"
+            assert reader.one("SHOW transaction_isolation") == {
+                "transaction_isolation": "read committed"}
+            assert reader.execute("UPDATE items SET value=6 WHERE id=1") == 1
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_bounded_read_cannot_extend_an_existing_shorter_server_timeout(database, active):
+    with database.session() as reader:
+        reader.execute("SET statement_timeout='20ms'")
+        with reader.transaction(readonly=True) if active else nullcontext():
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                reader.bounded_read("SELECT pg_sleep(.1)", (), limit=1, timeout_ms=500)
+            assert reader.one("SHOW statement_timeout") == {"statement_timeout": "20ms"}
+            assert reader.one("SELECT 1 AS ready") == {"ready": 1}
+
+
+def test_read_transaction_refuses_an_expired_scope_before_any_business_query(database):
+    with database.session() as reader:
+        with reader.deadline(.01):
+            sleep(.02)
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                with reader.transaction(readonly=True):
+                    pass
+        assert not reader.in_transaction
+        assert reader.one("SELECT 1 AS ready") == {"ready": 1}
+
+
+def test_bounded_read_preserves_parameter_bytes_arrays_and_the_result_limit(database):
+    value = "'; SELECT pg_sleep(100); -- %s \\ 中文"
+    blob = b"\x00\xff';--"
+    with database.session() as reader, reader.transaction(readonly=True):
+        assert reader.bounded_read(
+            "SELECT value,%s::bytea AS blob FROM unnest(%s::text[]) WITH ORDINALITY "
+            "AS source(value,position) ORDER BY position", (blob, [value, None, "tail"]),
+            limit=2, timeout_ms=500) == [{"value": value, "blob": blob},
+                                       {"value": None, "blob": blob}]
+        assert reader.one("SHOW statement_timeout") == {"statement_timeout": "0"}

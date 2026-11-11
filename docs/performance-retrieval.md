@@ -427,3 +427,164 @@ context priority even when topic retrieval found the same fact. Topic references
 duplicates. Current input and full paid admission keep their existing budget rules. Memory
 permission is still required, and signed bounded-text windows keep only their reviewed facts.
 Erasure, expiry and source changes invalidate the same native proof before generation/delivery.
+
+### Foreground CPU and raw-turn materialization
+
+The pinned FastEmbed encoder uses one inference thread. A foreground worker shares its CPU
+quota with SQL and source validation, so an additional ONNX spinning thread can consume that
+quota while no inference is running. The model revision, tokenization, vectors and ranking
+rules are unchanged. A local comparison of 46 documents and four queries produced identical
+vectors and semantic order with one and two threads; multicore batch throughput can differ.
+This uses FastEmbed's existing public `threads` option, following
+[ONNX Runtime thread and spinning guidance](https://onnxruntime.ai/docs/performance/tune-performance/threading.html)
+and [FastEmbed's ONNX session implementation](https://github.com/qdrant/fastembed/blob/main/fastembed/common/onnx_model.py).
+
+After asynchronous raw-turn ranking, an owned immutable read snapshot materializes only the
+valid prefixes needed by the existing first-hop/second-hop merge. Missing or denied sources
+refill from the original ranking, and the result keeps the same chronological order, source
+checks, byte allowance and replay limits. The local materialization map ends with that
+synchronous snapshot. Mutable or unowned transactions retain the complete fresh-read path.
+Attachment presence nomination uses bounded native `EXISTS` queries for the finite owner set;
+actual attachment headers and bodies still consume their original work allowances.
+
+Latency acceptance uses real TCP admission and an independent persistent CLI worker with
+mock provider transport. The Core measurement ends at durable outbox completion; model
+generation and QQ transport are measured separately. Results must state source revision,
+CPU/memory limits, cold and warm samples, mean and P95. Profiling runs and unrestricted
+desktop timings do not establish the server latency target.
+
+### Extracted long-history evidence and shared work
+
+Foreground ranking projects salience from bounded batches of the existing importance records,
+positive evidence pairs and extraction usage receipts. It validates the original proofs against
+one immutable `MemorySources` view; missing, stale or unaffordable ranking metadata uses neutral
+importance. Ranking no longer rewrites derived importance for every nominee. Extraction retains
+the existing recording/refresh path. Fact eligibility and source provenance remain authoritative.
+
+Automatic recall leaves part of the same reply-local allowance for raw turns and later lookup.
+Candidate proof preparation and encoder validation leave SQL allowance for final source checks.
+These are nested phase ceilings on one `Work`, inherited across awaits and worker-thread context;
+they never reset its totals. Final async result assembly uses the fresh post-await source view
+within its synchronous snapshot. Permission checks and external erasure-ledger bytes remain fresh.
+Hard exhaustion returns an explicit terminal tool result with the actual coverage receipt; a
+partial search cannot establish that the owner has no record. The 1,000ms SQL allowance measures
+bounded client read wall time, including native transport/control, rather than server execution
+alone; see [PostgreSQL timeout semantics](https://www.postgresql.org/docs/16/runtime-config-client.html).
+
+Temporal questions can include the existing supported revision chain in the initial context,
+with a separate historical proof and newest-to-oldest replacement order. History reads fact
+bodies and source roots in batches in one immutable snapshot; truncation remains explicit.
+Original speaker and source dates govern interpretation. Upload, recording and real effective
+dates are distinct, and uncertain ASR names remain candidates rather than confirmed identities.
+
+Regression fixtures use actual EXTRACT/REVIEW salience and native proofs, asynchronous retrieval,
+real TCP ingress and independent CLI workers. At 48 and 480 admitted source events, the needed
+original text must appear in the actual final provider request. Provider transport is mocked;
+this checks evidence delivery, separately from model reading quality, consistent with the
+[LongMemEval retrieval/reading distinction](https://arxiv.org/html/2410.10813v2).
+
+#### Targeted v6 evidence, 2026-11-09
+
+The isolated native run froze `d0f1b6c7` and answered 25 original v6 questions selected for
+likely failures, with the original evidence cutoffs and criteria. All 25 executions succeeded.
+All first provider requests contained facts and raw turns; all 16 questions after corpus turn
+200 contained facts. This establishes evidence delivery on these cases, not semantic completeness.
+First-provider preparation averaged 5.36s (P95 7.26s); complete answers averaged 12.42s.
+These timings do not establish the separate full Core 4–6s or QQ latency target.
+
+Automated grading failed anchor calibration, including one independent replacement vote;
+the gate was retained and no formal score was published. A separate Codex paired diagnostic
+review gave 23/25 for this candidate, 8/25 for a007 and 18/25 for the historical 85.61% run.
+This review is not independent human adjudication or an estimate of full v6 accuracy.
+Archived answers and scores remain unchanged. Uniform ASR candidate handling and the
+advice-initiation boundary account for explicitly recorded differences from archived decisions.
+
+Generic prompt follow-ups culminated in `d7c0d412`. Four frozen-evidence reading checks passed
+the requested date, food and time/place items; three met all stricter preregistered conditions.
+The remaining ASR answer still mislabeled candidate spellings as transcript text. At this
+intermediate revision that reading limitation remained open. These calls changed instructions only and used
+[`tool_choice=none`](https://api-docs.deepseek.com/api/create-chat-completion/); they are not
+native v6 reruns and do not replace the original 25 answers. Total new inference and grading
+cost was CNY 1.30727328, within the CNY 2 cap, with no new UNKNOWN reservations.
+
+The final verification receipt reuses 179 distinct successful local regression cases, including
+real ingress/independent-worker evidence checks at 48 and 480 admitted events, plus the Linux
+qualification and native lifecycle checks. Prompt-only changes passed the final 29 related
+checks. The evidence package retains frozen source, raw calls, every failed grading gate,
+fee ledgers, paired review decisions and log-normalization hashes; it excludes credentials.
+
+#### ASR provenance follow-up, 2026-11-09
+
+Product revision `41cd21bc` distinguishes the native machine transcript, earlier assistant
+interpretations and owner confirmation. Unconfirmed transcript observations display the native
+quote when it fits the existing 500-character fact allowance; longer transcripts retain the
+selected summary instead of cropping away relevant detail. Stored facts and proof bytes remain
+unchanged. Projection and pinning reuse one owned immutable read snapshot and its materialized
+source view; later validation still reads fresh sources. Images and other source kinds retain
+their original display path.
+
+Private context labels earlier ASR replies as `prior_assistant_interpretation`, preserving the
+reply text, and labels observed-source message dates as `source_message_on`. A source message
+date does not override a date stated inside the utterance. A short source interpretation rule
+also occupies the existing dynamic system tail so normal context fitting retains it.
+
+The last eight frozen-evidence reading checks met their preregistered ASR, delayed date, plan
+state, speaker and revision-order conditions. The delayed date answer still included an
+unnecessary upload-date remark, but asserted neither a source-date error nor an alternative
+answer date. Earlier failed attempts, the interrupted two-call stage and its six-call cached
+continuation remain in the evidence. These are diagnostic reading calls with tools disabled,
+not another native 25-question run or a full v6 score; the earlier native paired result stays
+23/25 and the automated calibration failure stays authoritative.
+
+All new inference and grading now totals CNY 1.66944300 under the unchanged CNY 2 cap, with no
+new UNKNOWN or RESERVED entries. The final local receipt covers 299 distinct successful cases
+across related verification layers, including real entrypoint/independent-worker checks and
+ASR proof, erasure, long-transcript and other-media regressions. It records the two corrected
+fixture preconditions and reuses unaffected passing checks. No production change or CI run
+was performed by this repair. Median/P95/max measured answer time on the earlier native 25
+was 10.98/19.85/24.98 seconds; QQ queue/send time and full Core 4–6-second acceptance remain
+unmeasured. The updated package corrects the prior README's separator description: original
+reading JSONL uses valid LF lines; normalized derivatives use Windows CRLF.
+
+#### Nested reservations and final source assembly
+
+Nested `Work.stage` reservations subtract from the inherited effective ceiling, not from
+the global limit. With an outer 850ms ceiling and 600ms already used, reserving 83ms inside
+permits 167ms of inner work and leaves 83ms for the outer phase, plus the original 150ms
+outside it. Await/thread context propagation keeps the same ledger and never resets counts.
+
+Automatic memory and turn nomination both leave the same final-source allowance: 150ms of
+bounded SQL reads, 64KiB of text, 64 source nodes and 16 attachment rows. Their stages end
+before final assembly, which spends that allowance on the same reply-local Work. Pinning
+and ASR projection retain one source view; a mutable fallback also keeps the same Work.
+An exhausted final proof is returned as an optional limit without a write/fresh-budget
+retry. Its unverified selected claims are omitted and the existing coverage warning remains;
+privacy/source failures still cancel rather than becoming empty successful evidence.
+
+A regression first reproduced a real TCP/independent-worker failure after a nonempty ASR
+recall and optional turn work exhaustion. With the reservation it completes and includes
+the exact native transcript in the final provider request, preserving stored fact bytes.
+Direct hard-exhaustion checks require no write fallback or unverified memory display.
+The 48/480 extracted-history checks and saved-resume/withdrawal paths also pass. Providers
+are mocked for these boundary checks; full v6.1 answer accuracy is measured separately.
+
+#### ASR proof material inside checkpoint writers
+
+An early result in the frozen `8480209a` v6.1 round received HTTP 200 but then failed
+with `MEMORY_RETRIEVAL_LIMIT` while `after_model_request` rolled back its checkpoint.
+The native response and settled usage remain in that round; the failed instance stays
+in its denominator. The running candidate is unchanged.
+
+Currentness validation already reads and validates an observed fact's native reference.
+Pinning now retains that returned material for the rest of the same synchronous pin,
+instead of reading and validating the receipt a second time inside a mutable writer.
+Later guards, later calls, and writes inside the transaction still recheck the source.
+Source-byte/SQL ceilings, privacy cancellation and received-response accounting remain
+unchanged; no permission verdict is cached across an await.
+
+The regression covers six facts backed by a large native receipt, verifies one read per
+fact, and requires a later deletion in the same writer to cancel validation. A real HTTP
+entrypoint with an independent worker also spends source allowance after the mocked
+provider response: the original implementation fails its checkpoint, while the repaired
+implementation must finish with one provider call, settled usage and the original ASR
+quote. These are offline boundary checks; they do not replace the frozen full-round result.
