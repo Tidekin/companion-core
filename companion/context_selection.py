@@ -15,6 +15,8 @@ MOOD, BACKGROUND, OLD_HISTORY, RELATED, TOPIC = range(5)
 _FILLER = {"这个", "那个", "什么", "怎么", "一下", "今天", "最近", "觉得", "看看", "内容"}
 _CONTINUATION = re.compile(
     r"^(嗯+|哈哈+|哦+|好[的吧]?|继续[说呢]?|然后呢|你觉得呢|这个呢)[。！？!? ]*$")
+_QUESTION = re.compile(
+    r"[？?]|什么|哪[天里个儿些位]|谁|几[点号天个次岁]|多少|怎么|为什么|是否|吗[。！!]*$")
 _SHARE_BACKREF = re.compile(
     r"刚才|刚刚|之前|以前|以往|先前|前面|上次|上一[张条个幅]|接着|继续|再看|换了|"
     r"还记得|对比|比较|就是|那[件个张]事?|这个呢|然后呢|"
@@ -126,10 +128,15 @@ def protected_recent(settings, sources, turns, current_input, scenario, *, query
     retained, messages = set(), list(current_input)
     continuation = not query.strip() or bool(_CONTINUATION.fullmatch(query.strip()))
     topic = focus(query, sources)
+    # An explicit, self-contained question may skip unrelated recent chatter; a
+    # statement or a question that points back ("刚才", "之前") keeps the floor.
+    selective = bool(_QUESTION.search(query)) and not _SHARE_BACKREF.search(query)
     for source, turn in reversed(pairs[-settings.recent_protected_turns:]):
         if len(turn) == 2:
-            # The plain recent-pair floor does not depend on the topic: the latest
-            # complete dialogue stays alongside the current input whenever it fits.
+            if selective and relevance(topic, history_text(source, turn)) != RELATED:
+                continue
+            # Otherwise the latest complete plain pairs stay alongside the current
+            # input whenever they fit.
             fits = (measure_request(settings, [*turn, *messages], scenario)
                     .reserved_input_tokens <= settings.context_soft_tokens)
         else:
