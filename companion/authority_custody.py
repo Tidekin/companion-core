@@ -6,6 +6,8 @@ Financial append/settlement and operator reconciliation retain the full validato
 
 import json
 import marshal
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -131,6 +133,40 @@ def check_admissions(store, view, admissions):
         raise CoreError("OWNER_DELIVERY_MODEL_EVIDENCE_CHANGED", 403) from error
 
 
+# (folded journal chain, journal path, projection digest) -> projection journal
+# paths. A hit means the same journal bytes were already validated against a
+# byte-identical DB projection; it is not a permission. Current state, expiry,
+# purpose and file aliases are still checked on every call.
+_projections = OrderedDict()
+_projections_lock = threading.Lock()
+_PROJECTION_ENTRIES = 4
+
+
+def _check_projection(store, material, authority, journal_id, path, digest):
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise ValueError("authority projection digest")
+    key = (material.chain, str(path), digest)
+    with _projections_lock:
+        saved_paths = _projections.get(key)
+        if saved_paths is not None:
+            _projections.move_to_end(key)
+    if saved_paths is None:
+        row = store.one(owner_authority.CUSTODY_PROJECTION_SQL, (owner_authority.CURRENT,))
+        if row is None or row["digest"] != digest:
+            raise ValueError("authority projection changed during check")
+        owner_authority._validate_projection(authority, journal_id, path, row["projection"])
+        saved_paths = frozenset(item["journal_path"] for item in row["projection"])
+        with _projections_lock:
+            _projections[key] = saved_paths
+            while len(_projections) > _PROJECTION_ENTRIES:
+                _projections.popitem(last=False)
+        return
+    # Same rule as _validate_projection: every saved path still names this journal.
+    current = path.resolve()
+    if any(Path(value).resolve() != current for value in saved_paths):
+        raise ValueError("authority projection mismatch")
+
+
 def check(store, revision, *, historical=False):
     if not store.in_transaction:
         raise RuntimeError("AUTHORITY_CUSTODY_REQUIRES_TRANSACTION")
@@ -146,10 +182,10 @@ def check(store, revision, *, historical=False):
         authority, lifecycle, managed = marshal.loads(material.chain)
         if journal_id is None:
             raise ValueError("journal header required")
-        projection = revision["custody_projection"]
         if revision["custody_journal_id"] != journal_id:
             raise ValueError("journal identity")
-        owner_authority._validate_projection(authority, journal_id, path, projection)
+        _check_projection(store, material, authority, journal_id, path,
+                          revision["custody_digest"])
         stored = revision["custody_lifecycle"]
         if (managed or stored is not None) and (
             (json.loads(stored) if stored is not None else None) != lifecycle
@@ -165,5 +201,7 @@ def check(store, revision, *, historical=False):
             raise ValueError("journal changed during authority check")
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         _material.cache_clear()
+        with _projections_lock:
+            _projections.clear()
         paid_budget._clear_codec()
         raise CoreError("OWNER_AUTHORITY_CUSTODY_REQUIRED", 503) from error

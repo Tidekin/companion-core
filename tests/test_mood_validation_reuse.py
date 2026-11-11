@@ -76,3 +76,32 @@ def test_mood_lineage_memo_returns_fresh_lists(monkeypatch):
 def _clear_material():
     yield
     authority_custody._material.cache_clear()
+    authority_custody._projections.clear()
+
+
+def test_projection_is_validated_once_per_identical_content(core, tmp_path, monkeypatch):
+    from companion.contracts import CoreError
+    from tests.support.owner_input import captured
+
+    captured(core, tmp_path)
+    authority_custody._projections.clear()
+    original, calls = owner_authority._validate_projection, []
+
+    def validate(*args):
+        calls.append(None)
+        return original(*args)
+
+    monkeypatch.setattr(owner_authority, "_validate_projection", validate)
+    expected = owner_authority.current(core.store, core.settings, core.clock)
+    for _ in range(3):
+        assert owner_authority.current(core.store, core.settings, core.clock) == expected
+    assert owner_authority.evidence(core.store, core.settings,
+                                    expected.authority.as_dict()).authority == expected.authority
+    assert len(calls) == 1
+
+    # Changed DB content changes the digest and is fully validated again.
+    core.store.execute("UPDATE owner_authority_revisions SET request_sha256=%s "
+                       "WHERE revision=1", ("0" * 64,))
+    with pytest.raises(CoreError):
+        owner_authority.current(core.store, core.settings, core.clock)
+    assert len(calls) == 2
