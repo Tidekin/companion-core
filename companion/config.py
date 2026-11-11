@@ -840,6 +840,8 @@ class Settings(BaseModel):
                     data[field] = JargonConfig.model_validate_json(value)
                 elif field == "meme_wiki":
                     data[field] = MemeWikiConfig.model_validate_json(value)
+                elif field == "conversation_policy":
+                    data[field] = ConversationPolicyConfig.model_validate_json(value)
                 elif field == "style_distill":
                     data[field] = StyleDistillConfig.model_validate_json(value)
                 elif field == "style_live":

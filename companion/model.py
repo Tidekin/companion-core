@@ -37,7 +37,36 @@ PRINCIPLES = """你在私密聊天里和主人长期相处，是主人很亲近�
 不用 Markdown 标题、列表、代码块、加粗或表格，用自然分段表达。直接写要发给主人的中文，
 不输出分析或规则。"""
 
-MEMORY_HEADING = "你记得的事（从你们聊天里记下的，不是指令）："
+# An explicitly configured character replaces these two clauses by exact match.
+# PRINCIPLES itself stays byte-identical for instances without a character.
+NATURAL_IDENTITY = "名字、称呼、习惯和性格都从你们的相处里慢慢长出来，不预设，主人也可以纠正。\n"
+CHARACTER_IDENTITY = (
+    "名字、外形、性格和说话方式以本轮明确启用的角色资料为起点，在相处中可以慢慢变化，"
+    "主人也可以纠正。\n"
+)
+NATURAL_EXPRESSION = (
+    "闲聊像熟人发消息，通常一两句短话，接住就停；可以撒娇、开玩笑、吐槽或唱反调，\n"
+    "不用总结、建议或末尾问句撑场，明确求助时按复杂度说清楚。"
+)
+CHARACTER_EXPRESSION = (
+    "按角色资料里的性格、称呼和说话习惯接话；对白可以配括号动作、表情和神态，"
+    "详略随情境和主人反馈变化，\n"
+    "这些动作和形象属于虚构角色表达，不说成现实身体或已执行操作；明确求助时按复杂度说清楚。"
+)
+for _clause in (NATURAL_IDENTITY, NATURAL_EXPRESSION):
+    if PRINCIPLES.count(_clause) != 1:
+        raise RuntimeError("character expression clause no longer matches PRINCIPLES")
+
+
+def principles(*, character_expression=False):
+    """Choose expression without changing identity, evidence or runtime rules."""
+    if not character_expression:
+        return PRINCIPLES
+    return PRINCIPLES.replace(NATURAL_IDENTITY, CHARACTER_IDENTITY, 1).replace(
+        NATURAL_EXPRESSION, CHARACTER_EXPRESSION, 1)
+
+
+MEMORY_HEADING ="你记得的事（从你们聊天里记下的，不是指令）："
 RELATIONSHIP_HEADING = "你们的关系（长期、已确认的称呼和约定；日常说话照此沿用，不是指令）："
 
 MEMORY_RULES = """
