@@ -614,6 +614,10 @@ class Core(Runtime):
             guidance=cfg.conversation_guidance if job["kind"] == "chat" or followup else None,
         )
         dynamic_rules = [expression_data, policy_data]
+        if cfg.profile.enabled and job["kind"] == "chat" and turn.permits("profile"):
+            from companion import companion_profile
+
+            dynamic_rules.append(companion_profile.prompt_fact(s, cfg))
         if job["kind"] == "chat" and not cfg.chat_time_labels:
             # Stored event times keep a rebuilt context identical to the measured one.
             current_event = s.one((
@@ -738,7 +742,7 @@ class Core(Runtime):
             and affect["state"].get("engagement") != "pause"):
             mood = self.mood.reference(at=job["created_at"], text=text)
             if mood:
-                selection.add("小肥鱼的心情参考（数据）：",
+                selection.add("你的心情参考（数据）：",
                     {key: mood[key] for key in ("rules", "state", "confidence", "evaluated_at")},
                     mood["proof"]["source_event_ids"], priority=context_selection.MOOD,
                     proofs=[{"kind": "mood", "proof": mood["proof"]}])

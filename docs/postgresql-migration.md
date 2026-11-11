@@ -6,11 +6,11 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0006_job_event_lookup`。迁移链先应用既有的
-`pg0002_relationship_standing`、`pg0003_native_chat` 和 `pg0004_native_stream`，
-再由 `pg0005_fact_key_ascii` 将 fact-key 索引
+当前新建与离线导入目标为 `pg0007_job_event_lookup`。迁移链先应用既有的
+`pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
+再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
-`pg0006_job_event_lookup` 为 `jobs(event_id,kind)` 添加普通 B-tree 索引，避免原任务
+`pg0007_job_event_lookup` 为 `jobs(event_id,kind)` 添加普通 B-tree 索引，避免原任务
 来源绑定校验随无关历史任务增长而扫描整表。真实原生查询计划的合成回归覆盖 1 万条
 无关任务；没有放宽来源、任务唯一绑定或检索 SQL 工作预算。外键不会自动给引用列
 建索引，见 [PostgreSQL 18 外键文档](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)。

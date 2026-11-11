@@ -86,7 +86,7 @@ def test_benchmark_cases_cannot_contaminate_the_shared_empty_schema(evidence, na
     cases = native_snapshots["cases"]
     assert len(cases) == len({row["database"] for row in cases}) == 24
     template = native_snapshots["template"]
-    assert template["revision"] == {"version_num": "pg0006_job_event_lookup"}
+    assert template["revision"] == {"version_num": "pg0007_job_event_lookup"}
     assert len(template["counts"]) >= 100
     assert all(count == 0 for name, count in template["counts"].items()
                if name not in {"alembic_version", "runtime_meta"})

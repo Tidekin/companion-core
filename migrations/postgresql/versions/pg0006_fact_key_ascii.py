@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "pg0005_fact_key_ascii"
-down_revision = "pg0004_native_stream"
+revision = "pg0006_fact_key_ascii"
+down_revision = "pg0005_companion_profile"
 branch_labels = None
 depends_on = None
 

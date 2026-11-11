@@ -37,7 +37,10 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
         target = [row["table_name"] for row in session.rows(
             "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() "
             "AND table_type='BASE TABLE' AND table_name!='alembic_version' ORDER BY table_name")]
-        assert target == source
+        from companion.legacy_import import NATIVE_ONLY_TABLES
+
+        assert set(NATIVE_ONLY_TABLES) <= set(target)
+        assert [name for name in target if name not in NATIVE_ONLY_TABLES] == source
         column_types = {}
         for row in session.rows(
             "SELECT table_name,column_name,data_type FROM information_schema.columns "
@@ -66,7 +69,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
         )["n"] == foreign_keys
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0006_job_event_lookup"}
+            "version_num": "pg0007_job_event_lookup"}
 
 
 def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
@@ -92,12 +95,12 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
         with psycopg.connect(info.get_secret_value()) as db:
             assert directions(db) == expected
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0006_job_event_lookup",)
+                "pg0007_job_event_lookup",)
 
 
 def test_job_event_index_upgrades_existing_fact_key_database_without_changing_jobs():
     with isolated_database() as info:
-        migrate(info, revision="pg0005_fact_key_ascii")
+        migrate(info, revision="pg0006_fact_key_ascii")
         with psycopg.connect(info.get_secret_value()) as db:
             db.execute("INSERT INTO jobs(job_id,kind,state,idempotency_key,created_at,updated_at) "
                        "VALUES ('original','memory_extract','SUCCEEDED','original','t','t')")
@@ -126,7 +129,7 @@ def test_fact_key_index_upgrades_from_relationship_revision():
             assert "translate(" in expression
             assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" in expression
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0006_job_event_lookup",)
+                "pg0007_job_event_lookup",)
 
 
 def audit(session, document):

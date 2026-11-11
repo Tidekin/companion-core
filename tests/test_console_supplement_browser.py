@@ -83,7 +83,7 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
             await page.evaluate("location.hash = 'self'")
             await page.locator("#page[aria-busy=false]").wait_for()
             card = page.locator(".sheet").filter(has=page.get_by_role(
-                "heading", name="小肥鱼的心情", exact=True))
+                "heading", name="伙伴的心情", exact=True))
             await card.wait_for()
             assert "半衰期 3 小时" in await card.inner_text()
             await card.get_by_text("最近趋势与变化来源", exact=True).click()

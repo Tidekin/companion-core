@@ -14,7 +14,10 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0006_job_event_lookup"
+TARGET_REVISION = "pg0007_job_event_lookup"
+# Native-only tables created after the SQLite era; an offline import leaves them empty.
+NATIVE_ONLY_TABLES = frozenset({"companion_profile", "companion_profile_settings",
+                                "companion_profile_changes"})
 
 
 def migrate_sqlite(path, revision="head"):
@@ -64,6 +67,8 @@ def import_sqlite_backup(path, conninfo: SecretStr):
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema=current_schema() AND table_type='BASE TABLE' "
                 "AND table_name!='alembic_version' ORDER BY table_name")]
+            native_only = [name for name in actual if name in NATIVE_ONLY_TABLES]
+            actual = [name for name in actual if name not in NATIVE_ONLY_TABLES]
             if actual != tables:
                 raise RuntimeError("SQLITE_IMPORT_TABLE_SET_MISMATCH")
             # This is an offline import, not a lock used by the running Core.
@@ -71,7 +76,7 @@ def import_sqlite_backup(path, conninfo: SecretStr):
             target.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(
                 sql.SQL(",").join(sql.Identifier(name) for name in tables)))
             target.execute("SET CONSTRAINTS ALL DEFERRED")
-            _require_empty(target, tables)
+            _require_empty(target, [*tables, *native_only])
             columns_by_table = {}
             for table, column in target.execute(
                 "SELECT table_name,column_name FROM information_schema.columns "

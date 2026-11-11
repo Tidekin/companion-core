@@ -114,7 +114,7 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             assert "主人发给你后你决定去看的" in prompt
             assert "光谱标注那个疑问还没解释清楚" in prompt
             assert '"negative"' in prompt
-            assert "小肥鱼的心情参考" not in prompt
+            assert "你的心情参考" not in prompt
             job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s', (event["event_id"],))
             frozen = json.loads(core.store.one(
                 'SELECT snapshots_json FROM agent_conversations WHERE job_id=%s', (job["job_id"],)

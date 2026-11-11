@@ -30,7 +30,7 @@ def run_worker(settings_path, now):
         messages = json.loads(request.content)["messages"]
         refs = [json.loads(m["content"].split("\n", 1)[1]) for m in messages
                 if isinstance(m.get("content"), str)
-                and m["content"].startswith("小肥鱼的心情参考（数据）：\n")]
+                and m["content"].startswith("你的心情参考（数据）：\n")]
         states.append(refs)
         return httpx.Response(200, json=answer("刚才那件事还记着，我们接着聊。"))
 

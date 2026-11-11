@@ -33,6 +33,7 @@ from companion.meme_wiki_config import MemeWikiConfig
 from companion.operator_config import ConsoleConfig
 from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.poke_protocol import PokePolicy
+from companion.profile_config import ProfileConfig
 from companion.rem_protocol import RemConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
@@ -404,6 +405,10 @@ class Settings(BaseModel):
     # Owner private jargon, learned for understanding only; see companion/jargon.py.
     jargon: JargonConfig = Field(
         default_factory=JargonConfig, exclude_if=lambda value: value == JargonConfig(),
+    )
+    # Companion self-updated display name; see companion/companion_profile.py.
+    profile: ProfileConfig = Field(
+        default_factory=ProfileConfig, exclude_if=lambda value: value == ProfileConfig(),
     )
     # Bundled read-only meme glossary for chat; see companion/meme_wiki.py.
     meme_wiki: MemeWikiConfig = Field(
@@ -842,6 +847,8 @@ class Settings(BaseModel):
                     data[field] = JargonConfig.model_validate_json(value)
                 elif field == "meme_wiki":
                     data[field] = MemeWikiConfig.model_validate_json(value)
+                elif field == "profile":
+                    data[field] = ProfileConfig.model_validate_json(value)
                 elif field == "conversation_policy":
                     data[field] = ConversationPolicyConfig.model_validate_json(value)
                 elif field == "style_distill":
