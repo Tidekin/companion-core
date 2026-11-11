@@ -38,4 +38,4 @@ PostgreSQL 的 [事务隔离](https://www.postgresql.org/docs/current/transactio
 
 Mood 复验改为按 proof 范围执行（主人已确认语义变化，设计见 [单轮聊天延迟重构](plans/2026-11-11-turn-latency-refactor.md)）：只读取 proof 列出的候选，并用原 validator 重建、要求完全一致；truncated 的 proof 仍完整重建。生产数据只读对照：复验从 2095 ms 降到 709 ms，篡改 fingerprint、delta、paused 或加入外来 signal 都返回 `PRIVACY_CHANGED`。
 
-后续：每轮仍有约 15 次上下文复验，后台单元也和聊天共用同一个事件循环。这两项需要新机制（撤销日志式复验、聊天优先调度），按 AGENTS.md 先单独讨论设计。
+后续：每轮仍有约 15 次上下文复验，每次的剩余成本主要在来源校验和历史授权 evidence 的逐条查询。`Core.run_once` 是串行的，后台单元不会在一轮聊天中途插入，只影响下一条消息的领取时间。撤销日志式复验（B2）暂不实施。
