@@ -854,9 +854,15 @@ class Core(Runtime):
         mark("context_history")
         image_review_target, image_review_proofs = None, []
         if authority and job["kind"] == "chat" and turn.permits("image"):
-            image_review_target = image_review.target(self, job, turn.body, sources)
+            # Recalled turns left the ordinary window but stay in the authorized
+            # source set: an explicit objection may still target their images.
+            window = sorted([*zip(sources, turns, strict=True), *recalled_history],
+                            key=lambda pair: original_order.get(pair[0]["event_id"], -1))
+            window_sources = [source for source, _ in window]
+            image_review_target = image_review.target(self, job, turn.body, window_sources)
             if turn.permits("memory"):
-                image_review_proofs = image_review.annotate(self, job, sources, turns)
+                image_review_proofs = image_review.annotate(
+                    self, job, window_sources, [group for _, group in window])
         return dialogue_history.ReplyHistory(sources, turns, continuation, image_review_target,
             image_review_proofs, recalled=recalled, recalled_reference=recalled_reference,
             recalled_history=recalled_history, original_order=original_order)

@@ -127,10 +127,19 @@ def protected_recent(settings, sources, turns, current_input, scenario, *, query
     continuation = not query.strip() or bool(_CONTINUATION.fullmatch(query.strip()))
     topic = focus(query, sources)
     for source, turn in reversed(pairs[-settings.recent_protected_turns:]):
-        if not continuation and relevance(topic, history_text(source, turn)) != RELATED:
-            continue
-        measured = measure_request(settings, [*required, *turn, *messages], scenario)
-        if pressure(settings, measured, scenario=scenario) is None:
+        if len(turn) == 2:
+            # The plain recent-pair floor does not depend on the topic: the latest
+            # complete dialogue stays alongside the current input whenever it fits.
+            fits = (measure_request(settings, [*turn, *messages], scenario)
+                    .reserved_input_tokens <= settings.context_soft_tokens)
+        else:
+            # Richer groups (attachments, quotes, observations) are protected only
+            # when relevant and the complete required request still admits them.
+            if not continuation and relevance(topic, history_text(source, turn)) != RELATED:
+                continue
+            fits = pressure(settings, measure_request(
+                settings, [*required, *turn, *messages], scenario), scenario=scenario) is None
+        if fits:
             retained.add(source["event_id"])
             messages = [*turn, *messages]
     return retained
