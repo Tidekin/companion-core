@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../chat/core_backend.dart';
@@ -81,5 +83,20 @@ final profileChangesProvider =
             .profileChanges();
       } on BackendError {
         return const [];
+      }
+    });
+
+/// Bytes of one immutable avatar asset; null when Core no longer has it, so the
+/// avatar falls back to the initial instead of showing an error.
+final avatarImageProvider =
+    FutureProvider.family<Uint8List?, (BotProfile, String)>((ref, key) async {
+      try {
+        return await ref
+            .watch(registryProvider)
+            .session(key.$1)
+            .backend
+            .avatarImage(key.$2);
+      } on BackendError {
+        return null;
       }
     });

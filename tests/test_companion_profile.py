@@ -57,7 +57,7 @@ def test_companion_renames_itself_once_per_call_and_keeps_identity(core):
     assert identity.startswith("cmp_")
     result = companion_update(core, " 小满 ", 1, call="call-2", note="想换个新名字")
     assert result["status"] == "confirmed" and result["new_revision"] == 2
-    assert result["profile"] == {"revision": 2, "display_name": "小满"}
+    assert result["profile"] == {"revision": 2, "display_name": "小满", "avatar_asset_id": None}
     # Retrying the same tool call returns the committed result without a second write.
     assert companion_update(core, "别的名字", 1, call="call-2") == result
     current = profile.current(core.store, core.settings)
@@ -83,7 +83,7 @@ def test_owner_switch_rate_limit_and_validation_never_commit(core):
                                 auto_name=False)
     disabled = companion_update(core, "小雨", 2, call="c-off")
     assert disabled == {"status": "disabled_by_user", "field": "display_name",
-                        "profile": {"revision": 2, "display_name": "小满"}}
+                        "profile": {"revision": 2, "display_name": "小满", "avatar_asset_id": None}}
     assert [entry[2] for entry in audit(core)] == ["伙伴", "小满"]
 
 

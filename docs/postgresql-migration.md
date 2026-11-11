@@ -6,7 +6,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0007_job_event_lookup`。迁移链先应用既有的
+当前新建与离线导入目标为 `pg0008_companion_avatar`。迁移链先应用既有的
 `pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
 再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
@@ -14,6 +14,8 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 来源绑定校验随无关历史任务增长而扫描整表。真实原生查询计划的合成回归覆盖 1 万条
 无关任务；没有放宽来源、任务唯一绑定或检索 SQL 工作预算。外键不会自动给引用列
 建索引，见 [PostgreSQL 18 外键文档](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)。
+`pg0008_companion_avatar` 新增 `companion_avatar_assets`，只记录主人上传头像的哈希、尺寸和状态；
+图片字节在状态目录 `profile-assets/`，离线导入时该表为空。
 
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
 `pg0003_native_chat`，保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite

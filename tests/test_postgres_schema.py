@@ -69,7 +69,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
         )["n"] == foreign_keys
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0007_job_event_lookup"}
+            "version_num": "pg0008_companion_avatar"}
 
 
 def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
@@ -95,7 +95,7 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
         with psycopg.connect(info.get_secret_value()) as db:
             assert directions(db) == expected
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0007_job_event_lookup",)
+                "pg0008_companion_avatar",)
 
 
 def test_job_event_index_upgrades_existing_fact_key_database_without_changing_jobs():
@@ -129,7 +129,7 @@ def test_fact_key_index_upgrades_from_relationship_revision():
             assert "translate(" in expression
             assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" in expression
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0007_job_event_lookup",)
+                "pg0008_companion_avatar",)
 
 
 def audit(session, document):

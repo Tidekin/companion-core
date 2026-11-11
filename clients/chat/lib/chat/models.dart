@@ -224,6 +224,8 @@ class ProfileChange {
     this.oldName,
     this.note,
     this.restoredFromChangeId,
+    this.oldAvatarAssetId,
+    this.newAvatarAssetId,
   });
   final String changeId;
   final int? oldRevision;
@@ -234,9 +236,13 @@ class ProfileChange {
   final String actorType;
   final String? note;
   final String? restoredFromChangeId;
+  final String? oldAvatarAssetId;
+  final String? newAvatarAssetId;
   final DateTime createdAt;
 
   bool get initial => fields == 'initial';
+  bool get nameChanged => fields == 'name' || fields == 'both';
+  bool get avatarChanged => fields == 'avatar' || fields == 'both';
 
   /// Real source labels; demonstrations never pose as the companion.
   String get actorLabel => switch (actorType) {
@@ -255,6 +261,8 @@ class ProfileChange {
     actorType: value['actor_type'] as String,
     note: value['note'] as String?,
     restoredFromChangeId: value['restored_from_change_id'] as String?,
+    oldAvatarAssetId: value['old_avatar_asset_id'] as String?,
+    newAvatarAssetId: value['new_avatar_asset_id'] as String?,
     createdAt: DateTime.parse(value['created_at'] as String),
   );
 }

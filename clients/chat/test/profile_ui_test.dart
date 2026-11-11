@@ -62,7 +62,7 @@ void main() {
     expect(find.text('小满'), findsOneWidget);
     expect(find.text('鱼鱼'), findsOneWidget);
     expect(find.byKey(const ValueKey('profile_auto_name')), findsOneWidget);
-    expect(find.text('Core 尚未开启伙伴自行改名。'), findsNothing);
+    expect(find.text('Core 尚未开启伙伴自行更新资料。'), findsNothing);
   });
 
   testWidgets('without the Core capability the switch is not offered', (
@@ -76,7 +76,7 @@ void main() {
       find.byKey(const ValueKey('profile_auto_name')),
     );
     expect(toggle.onChanged, isNull);
-    expect(find.text('Core 尚未开启伙伴自行改名。'), findsOneWidget);
+    expect(find.text('Core 尚未开启伙伴自行更新资料。'), findsOneWidget);
   });
 
   testWidgets('before login the panel claims nothing', (tester) async {
