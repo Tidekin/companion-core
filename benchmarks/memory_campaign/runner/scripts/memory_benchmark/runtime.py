@@ -65,6 +65,8 @@ def native_settings(directory):
             sort_keys=True,
         ).encode()
     ).hexdigest()
+    # Native approval owns resource limits; the campaign's Budget transport still
+    # enforces the user's cumulative CNY cap and retains uncertain liabilities.
     paid = PaidModelApproval(
         live_approved=True,
         window_id="memory-benchmark-" + config["run_id"],

@@ -25,7 +25,9 @@ PER_CATEGORY = 3
 
 
 def main():
+    assert not OUT.exists(), "Preserve existing anchors; choose a new output file"
     grading = R.root / "grading"
+    questions = {q["id"]: q for q in R.questions}
     reviewed = {r["key"]: r for r in read_rows(grading / "review.jsonl")}
     overridden = {r["key"] for r in read_rows(grading / "overrides.jsonl")}
     assert reviewed, "the source round has no review"
@@ -53,6 +55,7 @@ def main():
         chosen.append({"question": row["question"], "answer": v["answer"],
                        "required": row["criteria"]["required"],
                        "forbidden": row["criteria"].get("forbidden", []), "pass": v["passed"],
+                       "context": R.judging_context(questions[row["id"]]),
                        "source": {"round": R.name, "id": row["id"], "arm": arm,
                                   "kind": ("override", "split_vote", "unanimous")[rank],
                                   "review_reason": reviewed[v["key"]]["reason"]}})

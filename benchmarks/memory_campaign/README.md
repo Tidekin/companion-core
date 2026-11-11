@@ -119,6 +119,19 @@ python diagnose.py --round R                  # evidence chain by required field
 `grade.py --rubric v2 --out grading-v2` regrades a finished round into a new directory;
 `report.py --grading grading-v2` and `diagnose.py --grading grading-v2` read it.
 
+An attempted judge batch without a saved response stops ordinary resume before any new
+provider request. After inspecting the original request, response and usage files,
+`grade.py --round R --close-interrupted` can continue only never-attempted keys. It preserves
+all original usage and UNKNOWN holds, records recovery hashes, and marks every incomplete
+key for explicit review. A missing minority vote still requires review when the other votes
+determine the majority. Reporting requires an override for each such key, including a
+reviewed failure. This option neither repeats an attempted key nor creates budget authority.
+
+Native Core approval uses the current resource policy. The campaign transport retains its
+separate cumulative CNY cap and UNKNOWN liabilities; `campaign_budget_cny` records that
+outer limit. Before synthetic question erasure, `context-plans.jsonl` exports the original
+planner receipt by case and event. Actual provider payloads remain in `requests.jsonl`.
+
 ### Frozen scoring and denominators
 
 Before judging or reporting, the toolkit checks the answer-file inventory and hashes,
@@ -160,3 +173,63 @@ Native arms and personas execute serially so their local pre-provider timings do
 include competition from other arms/personas in this harness. The CLI accepts an explicitly
 authorized provider total up to80CNY. For a separate smoke ledger, reserve its full cap
 outside the main ledger cap so their sum stays within the user's provider allowance.
+
+The bundled runner and native Core tools share the `scripts` namespace through the
+standard library's [pkgutil.extend_path](https://docs.python.org/3.12/library/pkgutil.html#pkgutil.extend_path).
+Loading campaign configuration first keeps the native SDK probe available in the same
+interpreter. Fresh-process checks cover both import orders and bind each imported module
+to its expected checkout path; no provider call is needed for these checks.
+
+`python repair_v6_bank.py ORIGINAL_BANK NEW_BANK` creates a separately labeled
+`v6.1-evidence-ambiguities` scoring bank. It retains original source bytes, excludes C21 items
+whose differently named letters have no supported co-reference, and removes a C03 requirement
+to repeat a workplace already supplied in the question. `corrections.json` records every change
+and original file hash. The destination must be new. Original v6 questions, scores and evidence
+remain immutable. Apply the derived bank uniformly to both old and new answers, and report that
+score separately; an original-v6 targeted run continues to use its original criteria.
+
+For new rounds, rubric `v4` supplies original question and source-message clocks to the
+judge for both candidate cases and anchors. Generate anchors into a new file with
+`make_anchors.py`; v4 refuses anchors without timezone-aware clocks. `question_at` anchors
+relative dates in an answer; source-message times do not override an explicit date inside
+the utterance. Review verdicts, source arm labels and review explanations remain hidden.
+Existing v1/v2/v3 grading archives retain their original payloads and semantics.
+
+V4 clarifies semantic entailment and requires the boolean verdict to agree with the
+required/forbidden annotations. An unexplained false or an invalid criterion index is an
+unresolved judge response, subject to the existing bounded recovery and review rules.
+It is never silently counted as an answer failure or converted into a pass. The existing
+anchor gate margin, majority baseline, batch rejection and publication restrictions stay
+unchanged. A preflight calibration on the complete frozen anchor pool qualifies a judge
+configuration for a new run; actual mixed-batch gates and review still apply to that run.
+
+The 2026-11-09 preflight froze scorer `3334b5a0` and preserved all 40 historical anchors,
+their labels and answer text (20 positive, 20 negative), adding only original clocks.
+One Qwen pass and two DeepSeek passes each judged the complete pool under shuffled blind
+keys, without replacement votes. The existing gates passed at 82.5%, 82.5% and 77.5%
+against a 50% majority baseline plus the unchanged 15-point margin. These are preflight
+results on anchor-only batches, not a new v6/v6.1 score or permission to bypass actual
+mixed-batch gates. Raw wrong judgments and the previous failed calibration remain intact.
+The preflight cost CNY 0.22995828, bringing this targeted repair's cumulative cost to
+CNY 1.89940128 under its CNY 2 cap, with no new UNKNOWN or RESERVED entries.
+
+The v6.1 follow-up uses rubric `v5`: an answer that lists the correct value among alternatives
+but refuses the required final conclusion has not supplied that conclusion. Exact identifiers
+cannot be obtained by deleting or guessing noisy characters to fit a criterion. Legal equivalent
+number/unit formats remain acceptable. V4 and its preflight receipts stay unchanged.
+
+One historical anchor describing a duration as "两个多小时四十五分钟" has an ambiguous failed
+label despite correct endpoints and midnight crossing. The v6.1 run records that adjudication
+in a new anchor audit and omits this one item from its scored anchor pool; the original40 remain
+immutable. The other39 keep their original labels (20 positive/19 negative), including the hard
+undecided-conclusion and noisy-identifier negatives. The existing majority-baseline-plus-0.15
+gate is retained. Formal mixed-batch checks cover the normal eight-candidate/two-anchor shape,
+rejection of a misjudged anchor batch, bounded recovery, and mandatory unresolved-item review.
+
+Named archived native cohorts can use the existing `references` list. Their original answers
+live under `arms/<name>/results/<persona>/answers.jsonl`, with a completed collection manifest
+at `<name>/manifest.json`. Preparation binds the copied source hashes and original provenance;
+the execution freeze includes those files before new provider calls. Missing or incomplete
+native references stop the runner instead of generating replacement answers. Final freezing,
+grading and report integrity use the same native answer paths. RAG and zero-material controls
+retain their existing paths and meaning.

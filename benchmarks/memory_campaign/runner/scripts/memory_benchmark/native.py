@@ -312,6 +312,18 @@ class Harness:
             "usage": usages,
             "event_id": event_id,
         }
+        # Export the existing planner receipt before synthetic exam erasure clears
+        # its conversation. requests.jsonl remains the actual provider payload log.
+        conversation = s.one("SELECT phase,snapshots_json FROM agent_conversations "
+                             "WHERE job_id=%s", (job["job_id"],))
+        append(self.directory / "context-plans.jsonl", {
+            "case": q["id"], "event_id": event_id, "status": job["state"],
+            "error": job["last_error_code"],
+            "conversation_phase": conversation["phase"] if conversation else None,
+            "plans": [item["metadata"]["core_context"]
+                      for item in json.loads(conversation["snapshots_json"]) if
+                      item["kind"] == "context_plan"] if conversation else [],
+        })
         skipped = job["state"] not in {"SUCCEEDED", "FAILED", "CANCELLED"} and (
             job["last_error_code"] in {"MODEL_RETRYABLE", "MODEL_OUTCOME_UNKNOWN"}
             and unknown_locally_closed(core, usages)

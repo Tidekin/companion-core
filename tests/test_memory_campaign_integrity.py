@@ -6,80 +6,12 @@ import importlib
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import httpx
 import pytest
 
-TOOLS = Path(__file__).resolve().parents[1] / "benchmarks/memory_campaign"
-
-
-@pytest.fixture
-def campaign(tmp_path, monkeypatch, request):
-    monkeypatch.syspath_prepend(str(TOOLS))
-    for name in ("roundcfg", "rubrics", "integrity", "grade", "report"):
-        monkeypatch.delitem(sys.modules, name, raising=False)
-    if "scripts" in sys.modules:
-        monkeypatch.setattr(sys.modules["scripts"], "__path__",
-                            list(sys.modules["scripts"].__path__))
-    monkeypatch.setenv("MEMORY_ROUND", str(tmp_path))
-    monkeypatch.setattr(sys, "argv", ["grade.py"])
-    rc = importlib.import_module("roundcfg")
-    controls = getattr(request, "param", [])
-    rc.save(tmp_path / "round.json", {"name": "offline", "arms": {"old": {}, "new": {}},
-                                     "controls": controls})
-    suite = tmp_path / "bank/suite-v1"
-    (suite / "review-only").mkdir(parents=True)
-    (suite / "inputs").mkdir()
-    questions = [dict(id=f"P1-Q/d{d:02}", persona="P1", group_id="Q", question="喜欢什么茶？",
-                      source_ids=["P1-S1"], category_id="C", category="偏好", family="基本",
-                      delay_days=d, now="2026-01-01T00:00:00+08:00", cutoff_turn=1,
-                      input_modalities=["text"]) for d in (0, 3, 15)]
-
-    def rows(path, data):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in data), "utf-8")
-
-    rows(suite / "questions.jsonl", questions)
-    rows(suite / "review-only/criteria.jsonl",
-         [dict(id=q["id"], required=["绿茶"], forbidden=[]) for q in questions])
-    rows(suite / "inputs/P1.jsonl", [dict(id="P1-S1", text="喜欢绿茶。")])
-    rc.save(tmp_path / "bank/bundle-manifest.json", {
-        "files_sha256": {p.relative_to(tmp_path / "bank").as_posix(): rc.sha(p)
-                         for p in suite.rglob("*") if p.is_file()}})
-    rc.save(tmp_path / "corpus-freeze.json", {
-        "bundle_manifest_sha256": rc.sha(tmp_path / "bank/bundle-manifest.json"),
-        "questions_sha256": rc.sha(suite / "questions.jsonl"),
-        "criteria_sha256": rc.sha(suite / "review-only/criteria.jsonl")})
-    files = []
-    for arm in rc.Round(tmp_path).graded_arms:
-        path = (tmp_path / arm / "answers.jsonl" if arm == "rag" or arm in controls else
-                tmp_path / "arms" / arm / "results/P1/answers.jsonl")
-        rows(path, [dict(id=q["id"], answer="绿茶", status="SUCCEEDED", elapsed_seconds=1)
-                    for q in questions])
-        files.append(path)
-    rc.save(tmp_path / "all-answers-frozen.json", {
-        "status": "ALL_ANSWERS_CLOSED_BEFORE_GOLD_READ", "answers": len(questions) * len(files),
-        "corpus_freeze_sha256": rc.sha(tmp_path / "corpus-freeze.json"),
-        "files_sha256": {p.relative_to(tmp_path).as_posix(): rc.sha(p) for p in files}})
-    grade = importlib.import_module("grade")
-    monkeypatch.setattr(grade, "validate_run", lambda _: {})
-    grade.prepare()
-    report = importlib.import_module("report")
-
-    def complete():
-        mapping = json.loads((tmp_path / "grading/blind-mapping.json").read_text("utf-8"))
-        rows(tmp_path / "grading/grades.jsonl",
-             [dict(key=m["key"], **{"pass": True}) for m in mapping])
-        rc.save(tmp_path / "grading/manifest.json", {
-            "status": "AUTO_COMPLETE_REVIEW_PENDING", "anchor_gates": {},
-            "grading_freeze_sha256": rc.sha(tmp_path / "grading/grading-freeze.json"),
-            "raw_grades_sha256": rc.sha(tmp_path / "grading/grades.jsonl")})
-
-    complete()
-    yield tmp_path, grade, report, rc, rows, complete
-    for name in ("roundcfg", "rubrics", "integrity", "grade", "report"):
-        sys.modules.pop(name, None)
+from tests.support.memory_campaign import TOOLS
+from tests.support.memory_campaign import campaign as campaign
 
 
 @pytest.mark.parametrize("change", ["rules", "criteria", "question", "settings", "votes", "judge"])
@@ -217,6 +149,42 @@ def test_unresolved_judgments_require_an_explicit_review_verdict(campaign, flag)
     assert len(report.load()[0]) == 3
 
 
+@pytest.mark.parametrize("campaign", [{"references": ["historical"]}], indirect=True)
+def test_archived_native_reference_freezes_original_paths_without_inference(campaign, monkeypatch):
+    root, _, _, rc, _, _ = campaign
+    spec = importlib.util.spec_from_file_location("campaign_run", TOOLS / "run.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    (root / "historical").mkdir(exist_ok=True)
+    rc.save(root / "historical/manifest.json", {"status": "COMPLETED"})
+    budget = runner.Budget(root / "replay-usage.jsonl", base_url="https://offline.invalid",
+                           pricing=dict(input_rate=1, cached_input_rate=1,
+                                        output_rate=1, safety_factor=1),
+                           total_cny=1, inference_cny=1)
+    monkeypatch.setattr(runner.Budget, "from_context", lambda _: budget)
+    runner.freeze_answers({"old": {}, "new": {}})
+    frozen = json.loads((root / "all-answers-frozen.json").read_text("utf8"))
+    assert frozen["answers"] == 9
+    assert "arms/historical/results/P1/answers.jsonl" in frozen["files_sha256"]
+    assert not (root / "historical/answers.jsonl").exists()
+    assert importlib.import_module("integrity").answer_freeze(rc.Round(root))
+    assert not list(root.glob("*-usage.jsonl"))
+
+
+@pytest.mark.parametrize("campaign", [{"references": ["historical"]}], indirect=True)
+def test_missing_archived_reference_stops_before_any_native_provider_attempt(campaign, monkeypatch):
+    root, _, _, rc, _, _ = campaign
+    spec = importlib.util.spec_from_file_location("campaign_run", TOOLS / "run.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    rc.save(root / "execution-freeze.json", {"files_sha256": {}})
+    attempts = []
+    monkeypatch.setattr(runner, "native", lambda _: attempts.append(True))
+    with pytest.raises(AssertionError, match="Archived reference incomplete"):
+        runner.main()
+    assert not attempts and not (root / "run-started.json").exists()
+
+
 @pytest.mark.parametrize("campaign", [["closed"]], indirect=True)
 @pytest.mark.parametrize("arm", ["old", "closed"])
 def test_unresolved_verdicts_are_selected_for_review_including_controls(campaign, monkeypatch, arm):
@@ -327,3 +295,183 @@ def test_judging_entrypoint_freezes_metered_mock_results_and_resumes(campaign, m
     usage = rc.read_rows(root / "mock-usage.jsonl")
     assert len(usage) == count * 2
     assert sum(r["state"] == "SETTLED" for r in usage) == count
+
+
+@pytest.mark.parametrize("positive_only", [False, True])
+@pytest.mark.parametrize("version", ["v4", "v5"])
+def test_v4_real_judging_entrypoint_preserves_clocks_and_blinds_anchors(
+        campaign, monkeypatch, positive_only, version):
+    root, grade, report, rc, _, _ = campaign
+    rules, normalize, _ = importlib.import_module("rubrics").rubric(version)
+    monkeypatch.setattr(grade, "VERSION", version)
+    monkeypatch.setattr(grade, "RULES", rules)
+    monkeypatch.setattr(grade, "NORMALIZE", normalize)
+    monkeypatch.setattr(grade, "OUT", root / "with-context")
+    monkeypatch.setattr(grade, "ARGS", ["--votes", "1"])
+    monkeypatch.setattr(report, "GRADING", grade.OUT)
+    context = dict(question_at="2026-01-01T00:00:00+08:00",
+                   source_message_ats=["2025-12-31T20:00:00+08:00"])
+    anchor = dict(question="回想昨天喜欢什么？", answer="绿茶", required=["绿茶"],
+                  forbidden=[], context=context, source={"review_reason": "hidden review"},
+                  **{"pass": True})
+    anchors = [anchor] if positive_only else [anchor, {
+        **anchor, "answer": "红茶", "forbidden": ["红茶"], "pass": False}]
+    monkeypatch.setattr(grade, "ANCHORS", anchors)
+    calls = []
+
+    def respond(request):
+        cases = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        calls.append(cases)
+        assert all(c["context"] == context for c in cases)
+        assert all(set(c) == {"key", "question", "answer", "required", "forbidden", "context"}
+                   for c in cases)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+            "grades": [dict(key=c["key"], missing=[] if c["answer"] == "绿茶" else [0],
+                            violations=[] if c["answer"] == "绿茶" else [0], unsupported=[],
+                            **{"pass": c["answer"] == "绿茶"}) for c in cases]})}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10}, "model": "offline"})
+
+    def client(_config, _name):
+        budget = grade.Budget(root / "context-usage.jsonl", base_url="https://offline.invalid",
+                              pricing=dict(input_rate=1, cached_input_rate=1,
+                                           output_rate=1, safety_factor=1),
+                              total_cny=1, inference_cny=1)
+        return budget.base_url, {}, grade.MeteredTransport(
+            budget, "judge", inner=httpx.MockTransport(respond)), {}, "offline"
+
+    monkeypatch.setattr(grade, "judge_client", client)
+    asyncio.run(grade.main())
+    assert calls and any(c["question"] == anchor["question"] for call in calls for c in call)
+    manifest = json.loads((grade.OUT / "manifest.json").read_text("utf8"))
+    assert manifest["anchor_gates"]["with-context"]["passed"] is (not positive_only)
+    # An all-positive anchor pool has baseline 1.0: do not weaken the gate to pass it.
+    if positive_only:
+        with pytest.raises(AssertionError, match="Anchor gate"):
+            report.load()
+    else:
+        assert len(report.load()[0]) == 3
+
+
+@pytest.mark.parametrize("context", [None, {}, {"question_at": "2026-01-01",
+                                               "source_message_ats": ["2025-12-31"]}])
+def test_v4_rejects_incomplete_anchor_clocks_before_judging(campaign, monkeypatch, context):
+    root, grade, _, _, _, _ = campaign
+    monkeypatch.setattr(grade, "VERSION", "v4")
+    monkeypatch.setattr(grade, "OUT", root / "invalid-context")
+    monkeypatch.setattr(grade, "ANCHORS", [dict(context=context)])
+    with pytest.raises(AssertionError):
+        grade.prepare()
+    assert not grade.OUT.exists()
+
+
+@pytest.mark.parametrize("missing,violations,verdict", [([], [], False), ([0], [], True),
+                                                       ([], [0], True), ([99], [], False)])
+def test_v4_does_not_turn_malformed_verdicts_into_semantic_failures(
+        campaign, missing, violations, verdict):
+    _, grade, _, _, _, _ = campaign
+    _, normalize, _ = importlib.import_module("rubrics").rubric("v4")
+    case = dict(key="opaque", required=["绿茶"], forbidden=["红茶"])
+    row = dict(key="opaque", missing=missing, violations=violations, unsupported=[],
+               **{"pass": verdict})
+    with pytest.raises(AssertionError):
+        normalize(json.loads(json.dumps(row)), case)
+    response = dict(status=200, keys=["opaque"], response={"choices": [{"message": {
+        "content": json.dumps({"grades": [row]})}}]})
+    grade.NORMALIZE = normalize
+    assert grade.parse(response, {"opaque": case}) == []
+
+
+def test_anchor_export_preserves_original_question_clocks_and_existing_file(campaign):
+    root, _, report, rc, rows, _ = campaign
+    results, _ = report.load()
+    rc.save(root / "results.json", results)
+    rows(root / "grading/review.jsonl", [dict(key=v["key"], review_pass=v["passed"],
+                                             reason="offline agreed")
+                                        for row in results for v in row["arms"].values()])
+    target = root / "anchors-context.jsonl"
+    command = [sys.executable, "-B", str(TOOLS / "make_anchors.py"), "--round", str(root),
+               "--out", str(target), "--n", "3"]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf8", timeout=30)
+    assert result.returncode == 0, result.stderr
+    anchors = rc.read_rows(target)
+    assert anchors and all(a["context"] == {
+        "question_at": "2026-01-01T00:00:00+08:00",
+        "source_message_ats": ["2025-12-31T20:00:00+08:00"]} for a in anchors)
+    before = target.read_bytes()
+    again = subprocess.run(command, capture_output=True, text=True, encoding="utf8", timeout=30)
+    assert again.returncode != 0 and target.read_bytes() == before
+
+
+def test_formal_mixed_batch_discards_bad_anchor_and_requires_unresolved_review(
+        campaign, monkeypatch):
+    root, grade, report, rc, write_rows, _ = campaign
+    rules, normalize, _ = importlib.import_module("rubrics").rubric("v5")
+    monkeypatch.setattr(grade, "VERSION", "v5")
+    monkeypatch.setattr(grade, "RULES", rules)
+    monkeypatch.setattr(grade, "NORMALIZE", normalize)
+    monkeypatch.setattr(grade, "OUT", root / "mixed")
+    monkeypatch.setattr(grade, "ARGS", ["--votes", "1"])
+    monkeypatch.setattr(report, "GRADING", grade.OUT)
+    context = dict(question_at="2026-01-01T00:00:00+08:00",
+                   source_message_ats=["2025-12-31T20:00:00+08:00"])
+    anchors = [dict(question="锚题", answer=answer, required=["绿茶"], forbidden=["红茶"],
+                    context=context, **{"pass": verdict})
+               for answer, verdict in [("绿茶", True), ("红茶", False)]]
+    anchor_path = root / "mixed-anchors.jsonl"
+    write_rows(anchor_path, anchors)
+    monkeypatch.setattr(grade, "ANCHORS", anchors)
+    monkeypatch.setitem(grade.G, "anchors", str(anchor_path))
+    monkeypatch.setitem(grade.G, "concurrency", 1)
+    config = json.loads((root / "round.json").read_text("utf8"))
+    config["grading"] = grade.G
+    rc.save(root / "round.json", config)
+    monkeypatch.setattr(report, "R", rc.Round(root))
+    calls, target = [], []
+
+    def respond(request):
+        cases = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        calls.append(cases)
+        assert all(c["context"] == context and "pass" not in c for c in cases)
+        if not target:
+            assert len(cases) == 10  # Eight real candidates and the normal two hidden anchors.
+            target.append(next(c["key"] for c in cases if c["question"] != "锚题"))
+        grades = []
+        for c in cases:
+            positive = c["answer"] == "绿茶"
+            if c["key"] == target[0]:
+                positive, missing, violations = False, [], []  # Unexplained, unresolved.
+            elif c["answer"] == "红茶" and len(calls) == 1:
+                positive, missing, violations = True, [], []  # First batch must be discarded.
+            else:
+                missing, violations = ([] if positive else [0]), ([] if positive else [0])
+            grades.append(dict(key=c["key"], missing=missing, violations=violations,
+                               unsupported=[], **{"pass": positive}))
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": json.dumps({"grades": grades})}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10}, "model": "offline"})
+
+    def client(_config, _name):
+        budget = grade.Budget(root / "mixed-usage.jsonl", base_url="https://offline.invalid",
+                              pricing=dict(input_rate=1, cached_input_rate=1,
+                                           output_rate=1, safety_factor=1),
+                              total_cny=1, inference_cny=1)
+        return budget.base_url, {}, grade.MeteredTransport(
+            budget, "judge", inner=httpx.MockTransport(respond)), {}, "offline"
+
+    monkeypatch.setattr(grade, "judge_client", client)
+    asyncio.run(grade.main())
+    manifest = json.loads((grade.OUT / "manifest.json").read_text("utf8"))
+    assert manifest["anchor_gates"]["mixed"]["discarded_batches"] == 1
+    assert 1 < len(calls) <= 6
+    raw = rc.read_rows(grade.OUT / "grades.jsonl")
+    unsettled = next(row for row in raw if row["key"] == target[0])
+    assert unsettled["judge_unresolved"] and not unsettled["pass"]
+    with pytest.raises(AssertionError, match="Unresolved"):
+        report.load()
+    loaded, grades = report.load(allow_failed_gate=True)
+    selection = report.prepare_review(loaded, grades)
+    chosen = next(r for r in selection if r["key"] == target[0])
+    assert chosen["auto_grade"]["judge_unresolved"]
+    write_rows(grade.OUT / "overrides.jsonl", [dict(key=target[0], original_grade=unsettled,
+        reason="Offline fixture reviewed: this answer says green tea.", **{"pass": True})])
+    assert len(report.load()[0]) == 3

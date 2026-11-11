@@ -7,6 +7,8 @@
 
 Answers must be frozen (run.py). Keys are SHA256(freeze + arm + id), so every rubric
 grades the same keys. A sent batch without a saved response is never replayed.
+After inspection, --close-interrupted retains attempted keys for explicit review and
+continues only previously unattempted keys, without changing usage ledgers.
 
 Anchors (grading.anchors): answers with known verdicts, built from an earlier round's
 review by make_anchors.py. Each batch carries a few under random keys; a batch that
@@ -34,7 +36,7 @@ from scripts.memory_benchmark.cli import validate_run  # noqa: E402
 from scripts.memory_benchmark.runtime import credential  # noqa: E402
 
 from integrity import check_grading_freeze, grading_identity, vote_settings  # noqa: E402
-from roundcfg import Round, read_rows, save, sha  # noqa: E402
+from roundcfg import Round, read_rows, save, sha, validate_judging_context  # noqa: E402
 from rubrics import rubric  # noqa: E402
 
 R = Round()
@@ -57,6 +59,9 @@ def append(path, value):
 
 
 def prepare():
+    if VERSION in {"v4", "v5"}:
+        for anchor in ANCHORS:
+            validate_judging_context(anchor.get("context"))
     OUT.mkdir(exist_ok=True)
     votes = int(ARGS[ARGS.index("--votes") + 1]) if "--votes" in ARGS else None
     identity = grading_identity(R, VERSION, RULES, votes)
@@ -84,9 +89,12 @@ def prepare():
                                    status=a["status"], error=a.get("error"), **{"pass": False}))
             else:
                 c = R.criteria[a["id"]]
-                cases.append(dict(key=key, question=questions[a["id"]]["question"],
-                                  answer=a["answer"], required=c["required"],
-                                  forbidden=c.get("forbidden", [])))
+                case = dict(key=key, question=questions[a["id"]]["question"],
+                            answer=a["answer"], required=c["required"],
+                            forbidden=c.get("forbidden", []))
+                if VERSION in {"v4", "v5"}:
+                    case["context"] = R.judging_context(questions[a["id"]])
+                cases.append(case)
     mapping.sort(key=lambda r: r["key"])
     cases.sort(key=lambda r: r["key"])
     if (OUT / "blind-mapping.json").exists():
@@ -103,7 +111,8 @@ def prepare():
 
 def anchor_cases(response):
     """{key: (anchor case, expected verdict)} for the anchors a saved batch carried."""
-    return {key: (dict(key=key, **{f: ANCHORS[i].get(f, []) for f in ANCHOR_FIELDS}),
+    fields = ANCHOR_FIELDS + (("context",) if VERSION in {"v4", "v5"} else ())
+    return {key: (dict(key=key, **{f: ANCHORS[i].get(f, []) for f in fields}),
                   ANCHORS[i]["pass"]) for key, i in response.get("anchors", {}).items()}
 
 
@@ -185,14 +194,40 @@ async def judge(config, cases, failures, lookup, out, seed, name="deepseek"):
 
     for response in read_rows(out / "responses.jsonl"):
         recover(response)
-    sent = {r["batch_id"] for r in read_rows(out / "requests.jsonl")}
+    requests = read_rows(out / "requests.jsonl")
+    sent = {r["batch_id"] for r in requests}
     answered = {r["batch_id"] for r in read_rows(out / "responses.jsonl")}
-    assert sent <= answered, "Attempted batch lacks a saved response; inspect, never replay"
+    if "--close-interrupted" in ARGS:
+        done = {r["key"] for r in read_rows(out / "grades.jsonl")}
+        attempted = {key for request in requests for key in request["keys"]}
+        left = sorted(attempted - done)
+        if left:
+            append(out / "recovery.jsonl", dict(
+                at=datetime.now(UTC).isoformat(), method="ATTEMPTED_KEYS_NOT_REPLAYED",
+                keys=left, missing_response_batches=sorted(sent - answered),
+                requests_sha256=sha(out / "requests.jsonl"),
+                responses_sha256=sha(out / "responses.jsonl")
+                if (out / "responses.jsonl").exists() else None,
+                fees_unchanged=True))
+        for key in left:
+            assert key in lookup, "Attempted key is outside the frozen candidates"
+            if key in pending:
+                row = {**pending[key], "anchor_failed": True}
+            else:
+                row = dict(key=key, **{"pass": False}, missing=[], violations=[],
+                           judge_unresolved=True, rubric=VERSION)
+            append(out / "grades.jsonl", {**row, "interrupted_review_required": True})
+    else:
+        assert sent <= answered, "Attempted batch lacks a saved response; inspect, never replay"
     done = {r["key"] for r in read_rows(out / "grades.jsonl")}
     for row in failures:
         if row["key"] not in done:
             append(out / "grades.jsonl", {**row, "rubric": VERSION})
     rows = [r for r in cases if r["key"] not in done]
+    if not rows:
+        grades = read_rows(out / "grades.jsonl")
+        assert len(grades) == len({r["key"] for r in grades}) == R.answers_total
+        return {r["key"]: r for r in grades}
     random.Random(seed).shuffle(rows)
     base, headers, transport, extra, model = judge_client(config, name)
     async with httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False,
@@ -297,6 +332,14 @@ def majority(passes):
         chosen = next(v for v in votes if v["pass"] == verdict)
         final.append({**chosen, "pass": verdict, "votes": [v["pass"] for v in votes],
                       "agreement": sum(v["pass"] == verdict for v in votes) / len(votes)})
+        # A missing vote is not a semantic failure; publication requires an explicit
+        # review even when the other two votes already determine the majority.
+        if any(v.get("judge_unresolved") for v in votes):
+            final[-1]["judge_unresolved"] = True
+            final[-1]["votes"] = [None if v.get("judge_unresolved") else v["pass"] for v in votes]
+        for flag in ("anchor_failed", "interrupted_review_required"):
+            if any(v.get(flag) for v in votes):
+                final[-1][flag] = True
     return final
 
 

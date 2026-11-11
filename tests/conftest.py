@@ -18,6 +18,35 @@ from companion.store import migrate
 from companion.turn_taking import TurnTakingConfig
 
 
+@pytest.fixture
+def campaign_runner(monkeypatch):
+    """Scope campaign imports so later native SDK probes keep the root scripts package."""
+    import sys
+    from pathlib import Path
+
+    import scripts
+
+    root = Path(__file__).resolve().parents[1]
+    runner = root / "benchmarks/memory_campaign/runner"
+    prefix = "scripts.memory_benchmark"
+    previous = {name: module for name, module in sys.modules.items()
+                if name == prefix or name.startswith(prefix + ".")}
+    absent = object()
+    attribute = getattr(scripts, "memory_benchmark", absent)
+    monkeypatch.setattr(scripts, "__path__", [str(root / "scripts"), str(runner / "scripts")])
+    for name in previous:
+        monkeypatch.delitem(sys.modules, name)
+    yield runner
+    for name in tuple(sys.modules):
+        if name == prefix or name.startswith(prefix + "."):
+            sys.modules.pop(name, None)
+    if attribute is absent:
+        if hasattr(scripts, "memory_benchmark"):
+            del scripts.memory_benchmark
+    else:
+        scripts.memory_benchmark = attribute
+
+
 class Clock:
     def __init__(self):
         self.now = datetime.fromisoformat("2026-10-19T04:00:00+00:00")
