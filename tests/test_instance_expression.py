@@ -11,7 +11,7 @@ from companion.contracts import CoreError
 from companion.conversation_policy import CHARACTER_V1, PARTICIPATION_V2, ConversationPolicyConfig
 from companion.model import NATURAL_EXPRESSION
 from tests.conftest import ingest
-from tests.test_history_import import package
+from tests.support.history_import_package import package
 
 COMMON = "不推断健康、身份等敏感属性，遵守主人提出的边界。"
 

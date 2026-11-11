@@ -15,8 +15,8 @@ from companion.conversation_policy import ConversationPolicyConfig
 from companion.store import utcnow
 from tests.support.core_http import real_core_http
 from tests.support.evaluation_process import process_config
+from tests.support.history_import_package import package
 from tests.support.owner_memory import environment
-from tests.test_history_import import package
 
 
 def toml(value):
