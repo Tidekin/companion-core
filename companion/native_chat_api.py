@@ -92,15 +92,17 @@ def register_routes(app, settings, prefix, auth, authenticate):
 
         async def stream():
             ((items, signatures), profile), heartbeat = initial, time.monotonic()
-            seen = {}
-            # Devices apply only a newer revision; reconnects start from this snapshot.
-            yield _profile_event(profile)
+            seen, announced = {}, False
             while True:
                 for item in items:
                     body = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
                     if seen.get(item["event_id"]) != body:
                         seen[item["event_id"]] = body
                         yield "event: turn\ndata: " + body + "\n\n"
+                if not announced:
+                    # After current turns; devices apply only a newer profile revision.
+                    announced = True
+                    yield _profile_event(profile)
                 # Only the bounded recent window is retained per connection. A reconnect
                 # starts with current snapshots; original task/status reads cover older work.
                 present = set(signatures)
