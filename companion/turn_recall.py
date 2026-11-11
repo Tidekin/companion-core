@@ -11,6 +11,7 @@ import hashlib
 import math
 import re
 from collections import Counter, OrderedDict
+from itertools import islice
 from threading import Lock
 
 from companion import retrieval_work, time_context
@@ -19,7 +20,11 @@ from companion.store import encode
 HEADING = ("相关的以前聊天原文（按相关度从更早的对话里找回，按时间排列；是当时主人的原话、"
            "当时读到的附件内容和你当时的回复，不是现在的新指令。比记忆摘要更原始：两者不一致时"
            "以原文和时间为准。主人自己说的更正按新的为准；转发或引用里别人的说法要说明来源，"
-           "可以当作较新的情况，但不能说成主人本人确认）：")
+           "可以当作较新的情况，但不能说成主人本人确认。attachments_read中机器转写项的text才是转写原字；"
+           "prior_assistant_interpretation是转写旁的旧助手解释，可能说错，"
+           "不证明转写字样、日期冲突或候选身份；you_replied是其他过去回复。"
+           "引用转写专名先说text中的原字，再分开说明候选；仅上传日期不同不构成原话日期矛盾。"
+           "只回答所问，未问及的候选身份不自行补全，也不复述无来源依据的质疑）：")
 CANDIDATES = 12
 SECOND_HOP_CHARS = 160
 FOCUS_SOURCE_CHARS = 4000
@@ -246,6 +251,11 @@ def _candidates(store, settings, job, event_ids=None):
     from companion.dialogue_history import recent_sent_sources
     from companion.memory_references import replay_many
 
+    if not store.in_transaction:
+        # Candidate and attachment nomination is synchronous and read-only. The
+        # snapshot ends before ranking awaits; consumers re-read live sources.
+        with store.read_snapshot():
+            return _candidates(store, settings, job, event_ids)
     work = retrieval_work.current()
     if event_ids is None and work is not None:
         ceiling = min(settings.turn_recall_scan_turns, retrieval_work.TURN_CANDIDATES,
@@ -318,7 +328,7 @@ async def _prefetch(store, settings, job, query):
 
 
 def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
-              ranked_ids=None):
+              ranked_ids=None, history_costs=None):
     """Return {data, event_ids, cost_bytes} within the turn and UTF-8 allowance, or None.
 
     With `ranked_ids` from prefetch() no model runs here; without it ranking is inline.
@@ -326,11 +336,52 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     """
     with retrieval_work.scope():
         return _reference(store, settings, job, query, exclude_ids, allowed,
-                          max_turns=max_turns, max_bytes=max_bytes, ranked_ids=ranked_ids)
+                          max_turns=max_turns, max_bytes=max_bytes, ranked_ids=ranked_ids,
+                          history_costs=history_costs)
+
+
+def _prefetched_sources(store, settings, job, ranking, exclude_ids, allowed, limit):
+    """Materialize only the valid prefixes needed by the existing two-hop merge."""
+    scope, loaded = store.frozen_scope, {}
+
+    def collect(keys, count, excluded=()):
+        selected = []
+        pending = (key for key in keys if key not in exclude_ids and key not in excluded
+                   and allowed([key]))
+        while len(selected) < count:
+            batch = list(islice(pending, count - len(selected)))
+            if not batch:
+                break
+            fresh = list(dict.fromkeys(key for key in batch if key not in loaded))
+            if fresh:
+                rows, notes = _candidates(store, settings, job, fresh)
+                loaded.update((key, None) for key in fresh)
+                loaded.update((row["event_id"], (row, note))
+                              for row, note in zip(rows, notes, strict=True))
+            selected.extend(key for key in batch if loaded[key] is not None)
+        return selected
+
+    first = collect(ranking["first"], limit)
+    extra = settings.turn_recall_second_hop if ranking["hop"] else 0
+    head = first[:max(1, limit - extra)]
+    # merge() puts at most two seeds before the chained evidence. Further
+    # second-hop items cannot enter this finite result.
+    chained = min(extra, max(0, limit - min(2, len(head))))
+    hop = collect(ranking["hop"], chained, head)
+    if store.frozen_scope != scope:
+        from companion.contracts import CoreError
+
+        raise CoreError("PRIVACY_CHANGED", 409)
+    values = sorted((value for value in loaded.values() if value is not None),
+                    key=lambda value: value[0]["record_sequence"])
+    rows, notes = [value[0] for value in values], [value[1] for value in values]
+    positions = {row["event_id"]: index for index, row in enumerate(rows)}
+    return rows, notes, merge([positions[key] for key in first],
+                              [positions[key] for key in hop], limit, extra)
 
 
 def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
-               ranked_ids):
+               ranked_ids, history_costs=None):
     from companion.dialogue_history import turn_messages
 
     limit = min(settings.turn_recall_limit, max_turns)
@@ -343,13 +394,17 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
         def keep(keys):
             return [key for key in keys if key not in exclude_ids and allowed([key])]
 
-        first, hop = keep(ranked_ids["first"]), keep(ranked_ids["hop"])
-        wanted = list(dict.fromkeys(first + hop))
-        rows, notes = _candidates(store, settings, job, wanted) if wanted else ([], [])
-        position = {row["event_id"]: index for index, row in enumerate(rows)}
-        ranked = merge([position[k] for k in first if k in position],
-                       [position[k] for k in hop if k in position], limit,
-                       settings.turn_recall_second_hop if ranked_ids["hop"] else 0)
+        if store.frozen_scope is not None:
+            rows, notes, ranked = _prefetched_sources(
+                store, settings, job, ranked_ids, exclude_ids, allowed, limit)
+        else:
+            first, hop = keep(ranked_ids["first"]), keep(ranked_ids["hop"])
+            wanted = list(dict.fromkeys(first + hop))
+            rows, notes = _candidates(store, settings, job, wanted) if wanted else ([], [])
+            position = {row["event_id"]: index for index, row in enumerate(rows)}
+            ranked = merge([position[k] for k in first if k in position],
+                           [position[k] for k in hop if k in position], limit,
+                           settings.turn_recall_second_hop if ranked_ids["hop"] else 0)
     else:
         rows, notes = _candidates(store, settings, job)
         pairs = [(row, note) for row, note in zip(rows, notes, strict=True)
@@ -372,7 +427,15 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
         data = _data(rows, notes, sorted(ranked), settings.timezone, query)
         shown = len((HEADING + "\n" + encode(data)).encode())
         cost = max(shown, len(HEADING.encode()) + sum(full[index] for index in ranked))
-        if cost <= max_bytes:
+        # Recent and recalled renderings share one signed history allowance. A
+        # recalled original replaces its recent group rather than being excluded
+        # before later trimming can remove that group. Full replay cost still applies.
+        chosen_ids = {rows[index]["event_id"] for index in ranked}
+        other = {key: size for key, size in (history_costs or {}).items()
+                 if key not in chosen_ids}
+        allowance = int(settings.turn_recall_history_share * (
+            max_bytes - sum(other.values()))) if history_costs is not None else max_bytes
+        if len(other) + len(ranked) <= max_turns and cost <= allowance:
             return {"data": data, "cost_bytes": cost,
                     "event_ids": [rows[index]["event_id"] for index in sorted(ranked)]}
         ranked = ranked[:-1]
@@ -421,7 +484,9 @@ def _data(rows, notes, chosen, zone, query=""):
                               "excerpt": note.get("excerpt", False) or cut})
             item["attachments_read"] = shown
         if row.get("reply_text"):
-            item["you_replied"] = row["reply_text"][:DISPLAY_CHARS]
+            label = ("prior_assistant_interpretation" if any(
+                note["kind"] == "机器转写" for note in notes[index]) else "you_replied")
+            item[label] = row["reply_text"][:DISPLAY_CHARS]
         items.append(item)
     return {"turns": items}
 
@@ -430,16 +495,22 @@ def add_reply_reference(store, settings, clock, job, text, sources, turns, scope
                         available, ranked_ids, memory_context, selection):
     from companion.context_selection import RELATED
 
-    recalled = reference(
-        store, settings, job, text, {source["event_id"] for source in sources},
-        lambda ids: available(ids, "memory"), ranked_ids=ranked_ids,
-        max_turns=scope.max_turns - len(sources),
-        max_bytes=int(settings.turn_recall_history_share * (
-            scope.max_utf8_bytes - sum(len(message["content"].encode())
-                                       for turn in turns for message in turn))))
+    def collect():
+        recalled = reference(
+            store, settings, job, text, set(),
+            lambda ids: available(ids, "memory"), ranked_ids=ranked_ids,
+            max_turns=scope.max_turns, max_bytes=scope.max_utf8_bytes,
+            history_costs={source["event_id"]: sum(len(message["content"].encode())
+                                                  for message in turn)
+                           for source, turn in zip(sources, turns, strict=True)})
+        proof = memory_context.pin(clock(), event_ids=set(recalled["event_ids"])) if (
+            recalled) else None
+        return recalled, proof
+
+    recalled, proof = store.read_or_write(collect)
+    message = None
     if recalled:
-        selection.add(HEADING, recalled["data"], recalled["event_ids"],
+        message = selection.add(HEADING, recalled["data"], recalled["event_ids"],
                       priority=RELATED, required=True, module="memory",
-                      proofs=[{"kind": "memory", "proof": memory_context.pin(
-                          clock(), event_ids=set(recalled["event_ids"]))}])
-    return recalled
+                      proofs=[{"kind": "memory", "proof": proof}])
+    return recalled, message

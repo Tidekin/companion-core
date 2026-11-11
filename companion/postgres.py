@@ -6,6 +6,8 @@ parameters. This module neither translates SQLite SQL nor performs external work
 """
 
 import hashlib
+import math
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -120,6 +122,53 @@ class Session:
         self._connection = connection
         self._closed = False
         self._ledger_locks = None
+        self._deadline = None
+        self._timeout_limit = 0
+
+    def _remaining_timeout(self, timeout_ms=None):
+        if self._deadline is None:
+            return None
+        remaining = math.ceil((self._deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            raise psycopg.errors.QueryCanceled("local SQL deadline exceeded")
+        if self._timeout_limit:
+            remaining = min(remaining, self._timeout_limit)
+        return min(remaining, timeout_ms) if timeout_ms is not None else remaining
+
+    def _execute(self, cursor, statement, parameters=(), *, timeout_ms=None):
+        remaining = self._remaining_timeout(timeout_ms)
+        if remaining is not None:
+            # SET TRANSACTION must precede every SELECT in a fresh transaction.
+            if not (isinstance(statement, str) and statement.startswith("SET TRANSACTION ")):
+                cursor.execute("SELECT set_config('statement_timeout',%s,false)",
+                               (f"{remaining}ms",))
+        cursor.execute(statement, parameters)
+
+    @contextmanager
+    def deadline(self, seconds):
+        """Apply one absolute operation deadline to each native SQL statement.
+
+        An inner scope cannot extend its parent or an existing server timeout.
+        Transaction owners still roll back cancellation; no query or effect is retried here.
+        """
+        if seconds <= 0:
+            raise psycopg.errors.QueryCanceled("local SQL deadline exceeded")
+        previous_deadline, previous_limit = self._deadline, self._timeout_limit
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT setting FROM pg_settings WHERE name='statement_timeout'")
+            previous = int(cursor.fetchone()["setting"])
+        self._deadline = min(previous_deadline or float("inf"), time.monotonic() + seconds)
+        self._timeout_limit = previous
+        try:
+            yield
+        finally:
+            self._deadline, self._timeout_limit = previous_deadline, previous_limit
+            # An aborted enclosing transaction must roll back before further SQL;
+            # that rollback also restores any timeout set within the transaction.
+            if self._connection.info.transaction_status != TransactionStatus.INERROR:
+                with self._connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('statement_timeout',%s,false)",
+                                   (f"{previous}ms",))
 
     @property
     def backend_pid(self):
@@ -136,24 +185,24 @@ class Session:
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         with self._connection.cursor() as cursor:
-            cursor.execute(statement, parameters)
+            self._execute(cursor, statement, parameters)
             return cursor.rowcount
 
     def one(self, statement, parameters=()):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         with self._connection.cursor() as cursor:
-            cursor.execute(statement, parameters)
+            self._execute(cursor, statement, parameters)
             return cursor.fetchone()
 
     def rows(self, statement, parameters=()):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         with self._connection.cursor() as cursor:
-            cursor.execute(statement, parameters)
+            self._execute(cursor, statement, parameters)
             return cursor.fetchall()
 
-    def bounded_read(self, statement, parameters, *, limit, timeout_ms):
+    def bounded_read(self, statement, parameters, *, limit, timeout_ms, readonly=True):
         """Materialize a finite optional SELECT without aborting its caller's snapshot.
 
         Psycopg creates a savepoint inside an existing transaction. Read-only mode
@@ -164,22 +213,33 @@ class Session:
         if type(limit) is not int or limit < 1 or type(timeout_ms) is not int or timeout_ms < 1:
             raise ValueError("invalid bounded read limits")
         active = self.in_transaction
-        with self._connection.transaction():
-            if not active:
-                self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        scope = self._connection.transaction() if active else self.transaction(readonly=True)
+        with scope:
             settings = self.one(
                 "SELECT current_setting('transaction_read_only') AS readonly, "
-                "current_setting('statement_timeout') AS timeout"
+                "(EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval)*1000)"
+                "::bigint AS timeout"
             )
-            if settings["readonly"] != "on":
+            if readonly and settings["readonly"] != "on":
                 raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
-            self.execute("SELECT set_config('statement_timeout',%s,true)", (f"{timeout_ms}ms",))
-            with self._connection.cursor() as cursor:
-                cursor.execute(sql.SQL("SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
-                    statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
-                    (*parameters, limit))
+            timeout_ms = min(timeout_ms, settings["timeout"] or timeout_ms)
+            with psycopg.ClientCursor(self._connection) as cursor:
+                # Psycopg quotes every value and sends these native statements in
+                # one simple-Query message. A failed SELECT still rolls back this
+                # savepoint. Re-read the live timeout so the absolute deadline set
+                # by _execute cannot be widened by the first statement.
+                self._execute(cursor, sql.SQL(
+                    "SELECT set_config('statement_timeout',LEAST(%s,COALESCE(NULLIF("
+                    "(EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval)*1000)"
+                    "::bigint,0),%s))::text||'ms',true);"
+                    "SELECT * FROM ({}) AS bounded_result LIMIT %s;"
+                    "SELECT set_config('statement_timeout',%s,true)").format(
+                        statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
+                    (timeout_ms, timeout_ms, *parameters, limit, f"{settings['timeout']}ms"),
+                    timeout_ms=timeout_ms)
+                cursor.nextset()
                 result = cursor.fetchmany(limit)
-            self.execute("SELECT set_config('statement_timeout',%s,true)", (settings["timeout"],))
+                cursor.nextset()
             return result
 
     @contextmanager
@@ -188,14 +248,30 @@ class Session:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         if self._connection.info.transaction_status != TransactionStatus.IDLE:
             raise RuntimeError("POSTGRES_TRANSACTION_ALREADY_ACTIVE")
-        with self._connection.transaction(force_rollback=rollback):
-            self._ledger_locks = {}
-            try:
-                if readonly:
-                    self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-                yield self
-            finally:
-                self._ledger_locks = None
+        previous = self._connection.isolation_level, self._connection.read_only
+        try:
+            if readonly:
+                self._remaining_timeout()
+                # Psycopg includes these public characteristics in native BEGIN,
+                # avoiding a separate SET TRANSACTION send for every read scope.
+                self._connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+                self._connection.read_only = True
+            with self._connection.transaction(force_rollback=rollback):
+                self._ledger_locks = {}
+                try:
+                    if readonly:
+                        self._remaining_timeout()
+                    yield self
+                finally:
+                    self._ledger_locks = None
+        finally:
+            if readonly and not self._connection.closed:
+                if self._connection.info.transaction_status == TransactionStatus.IDLE:
+                    self._connection.isolation_level, self._connection.read_only = previous
+                else:
+                    # An uncertain teardown must not return temporary BEGIN
+                    # characteristics to another pool borrower.
+                    self._connection.close()
 
     def custody_lock(self, key, *, shared=False):
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:

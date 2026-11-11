@@ -1,6 +1,7 @@
 """Native fixtures separate bounded work, recall quality and source authority."""
 
 import asyncio
+from contextlib import nullcontext
 
 import numpy as np
 import psycopg
@@ -170,19 +171,79 @@ def test_vector_warmer_is_one_bounded_unit_and_rejects_withdrawal(core, monkeypa
     assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] == 8
 
 
-def test_transcript_nomination_is_indexed_bounded_and_preserves_excerpt(core, monkeypatch):
+@pytest.mark.parametrize("snapshot,count,queries", [(True, 40, 1), (False, 2, 4)])
+def test_empty_attachment_checks_batch_only_in_an_owned_snapshot(
+    core, monkeypatch, snapshot, count, queries,
+):
+    ids = [f"empty_source_{number}" for number in range(count)]
+    calls = []
+    original = core.store.bounded_read
+
+    def read(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(core.store, "bounded_read", read)
+    with (core.store.read_snapshot() if snapshot else nullcontext()):
+        with retrieval_work.scope() as work:
+            assert memory_references.replay_many(core.store, ids, work=work) == {
+                key: [] for key in ids}
+            assert work.counts["attachment_rows"] == work.counts["text_bytes"] == 0
+            assert len(calls) == queries
+
+
+def test_attachment_presence_is_rechecked_after_the_snapshot(core, monkeypatch):
+    ingest(core, 1, "合成附件消息")
+    core.settings.memory_enabled = True
+    value = memory_references.capture(core.memory, "evt_test_1", "transcript",
+        "synthetic late transcript", {"fixture": "late-replay"}, core.clock())
+    key = memory_references.INPUT + value["reference_id"]
+    saved = core.store.one("SELECT value FROM runtime_meta WHERE key=%s", (key,))["value"]
+    core.store.execute("DELETE FROM runtime_meta WHERE key=%s", (key,))
+    original, committed = core.store.bounded_read, []
+
+    def read(statement, parameters, **kwargs):
+        rows = original(statement, parameters, **kwargs)
+        if "AS transcript FROM unnest" in str(statement) and not committed:
+            with psycopg.connect(
+                core.settings.database.get_secret_value(), autocommit=True,
+            ) as other:
+                other.execute("INSERT INTO runtime_meta VALUES (%s,%s)", (key, saved))
+            committed.append(1)
+        return rows
+
+    monkeypatch.setattr(core.store, "bounded_read", read)
+    with core.store.read_snapshot(), retrieval_work.scope() as work:
+        assert memory_references.replay_many(core.store, ["evt_test_1"], work=work) == {
+            "evt_test_1": []}
+    assert committed
+    with core.store.read_snapshot(), retrieval_work.scope() as work:
+        notes = memory_references.replay_many(core.store, ["evt_test_1"], work=work)
+        assert notes["evt_test_1"][0]["text"] == value["text"]
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_transcript_nomination_is_indexed_bounded_and_preserves_excerpt(
+    core, monkeypatch, snapshot,
+):
     ingest(core, 1, "附件内容")
     core.settings.memory_enabled = True
     value = memory_references.capture(core.memory, "evt_test_1", "transcript",
         "转写内容" * 500, {"fixture": "bounded-replay"}, core.clock())
     assert value
-    with retrieval_work.scope() as work:
+    with (
+        core.store.read_snapshot() if snapshot else nullcontext(),
+        retrieval_work.scope() as work,
+    ):
         notes = memory_references.replay_many(core.store, ["evt_test_1"], work=work)
         assert len(notes["evt_test_1"]) == 1 and notes["evt_test_1"][0]["excerpt"]
         assert work.counts["attachment_rows"] == 1
         assert_bounded(work.receipt())
     monkeypatch.setitem(retrieval_work.LIMITS, "text_bytes", 10)
-    with retrieval_work.scope() as work:
+    with (
+        core.store.read_snapshot() if snapshot else nullcontext(),
+        retrieval_work.scope() as work,
+    ):
         assert memory_references.replay_many(core.store, ["evt_test_1"], work=work) == {
             "evt_test_1": []}
         assert work.receipt()["coverage_limited"]

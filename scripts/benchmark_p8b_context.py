@@ -315,10 +315,16 @@ async def _one_case(work, variant, case, catalog, database):
                       "evidence_ids": list(row["evidence_ids"])} for row in hits]
         core.memory.search = lambda *args, **kwargs: retrieved
 
-        async def fixture_search(*args, source_check=None, **kwargs):
+        async def fixture_search(*args, source_check=None, _consume=None, now=None, **kwargs):
             if source_check:
                 source_check()
-            return retrieved
+            if _consume is None:
+                return retrieved
+            from companion.memory_context import MemorySources
+
+            # Native recall consumes candidates against its own bounded source view.
+            return _consume(retrieved, MemorySources(
+                core.memory, now or core.clock(), bounded=True))
 
         core.memory.search_async = fixture_search
         start, cpu = time.perf_counter_ns(), time.process_time_ns()

@@ -239,6 +239,40 @@ def test_source_tracking_fences_a_reply_without_linking_independent_owner_inputs
     assert core.store.rows("SELECT * FROM outbox") == []
 
 
+def test_source_tracking_batches_checks_and_rechecks_revocation(core, monkeypatch):
+    for number in range(1, 10):
+        accept(core, number)
+    job = core.claim_job("batch-source-worker")
+    keys = {f"evt_test_{number}" for number in range(1, 10)}
+    reads, inserts = [], []
+    original_rows, original_execute = core.store.rows, core.store.execute
+
+    def rows(statement, parameters=()):
+        if "SELECT e.event_id FROM events AS e WHERE e.event_id=ANY" in str(statement):
+            reads.append(list(parameters[0]))
+        return original_rows(statement, parameters)
+
+    def execute(statement, parameters=()):
+        if "INSERT INTO job_sources" in str(statement):
+            inserts.append(statement)
+        return original_execute(statement, parameters)
+
+    monkeypatch.setattr(core.store, "rows", rows)
+    monkeypatch.setattr(core.store, "execute", execute)
+    with core.store.transaction():
+        reply_revision.remember_sources(core.store, job, keys)
+        reply_revision.remember_sources(core.store, job, keys)
+        assert len(reads) == 2 and all(set(batch) == keys for batch in reads)
+        assert len(inserts) == 1
+        core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
+        with pytest.raises(CoreError, match=reply_revision.SOURCE_RECALLED):
+            reply_revision.remember_sources(core.store, job, keys)
+    assert {row["event_id"] for row in core.store.rows(
+        "SELECT event_id FROM job_sources WHERE job_id=%s", (job["job_id"],))} == keys
+    assert core.store.rows("SELECT * FROM event_dependencies") == []
+    assert not reply_revision.source_active(core.store, "missing-source")
+
+
 def test_unadmitted_provider_slot_race_waits_without_spending_retry_or_stopping(core, monkeypatch):
     first = accept(core)
     job = core.claim_job("racing-worker")

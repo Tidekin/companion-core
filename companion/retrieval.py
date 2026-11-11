@@ -96,7 +96,9 @@ def encoder(cache_dir, *, local_only=False):
         MODEL,
         specific_model_path=path,
         cache_dir=cache_dir,
-        threads=2,
+        # The foreground encoder shares the worker's CPU quota with SQL and
+        # source checks. One inference thread avoids a competing spinning pool.
+        threads=1,
         providers=["CPUExecutionProvider"],
         local_files_only=True,
     )

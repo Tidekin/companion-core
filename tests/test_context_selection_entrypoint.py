@@ -10,6 +10,7 @@ import pytest
 
 from companion.contracts import Candidate
 from companion.goals import GoalProposal, GoalScope
+from companion.model import SOURCE_RULES
 from companion.store import encode
 from tests.conftest import run
 from tests.support.goals import result_for
@@ -60,8 +61,9 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             purposes=("chat", "memory", "history", "goals", "exploration", "expression"),
             core_options={"operator_hot_reload": hot_reload, "goals_enabled": True,
                           "exploration_enabled": True, "mood_enabled": True,
-                          "context_soft_tokens": type(core.settings).model_fields[
-                              "context_soft_tokens"].default,
+                          # Keep the latest related turn source-bound while leaving
+                          # older turns as ordinary history to exercise pruning.
+                          "turn_recall_limit": 1,
                           "watch_ledger": core.settings.watch_ledger.model_copy(
                               update={"enabled": True})},
             history_bytes=64000) as (entry, sends):
@@ -99,6 +101,10 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             core.clock.advance(1)
             event = await entry.admit(6, "继续说说天文光谱，你当时的判断是什么？")
             messages = await worker("selected")
+            # Transcript/date source guidance is added only for turns carrying such
+            # material; this ordinary recall turn keeps the base prompt size.
+            assert messages[0]["role"] == "system"
+            assert SOURCE_RULES not in messages[0]["content"]
             prompt = "\n".join(m["content"] for m in messages)
             # Exclude the raw original owner utterance: reference copies occur once.
             refs = [m for m in messages if m["role"] == "user" and any(
@@ -123,3 +129,12 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == len(calls)
 
     run(scenario())
+
+
+def test_source_rules_follow_only_transcript_or_dated_source_material():
+    from companion.model import needs_source_rules
+
+    assert not needs_source_rules('{"role":"user","content":"天文光谱"}')
+    for marker in ('"transcripts"', '"attachments_read"', '"prior_assistant_interpretation"',
+                   '"source_message_on"'):
+        assert needs_source_rules('{"x":1,' + marker + ':[]}')

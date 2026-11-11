@@ -271,15 +271,18 @@ def _current_query():
     )
 
 
-def current(store, settings, clock, *, purpose=None, authority=None):
+def current(store, settings, clock, *, purpose=None, authority=None, read=None):
     """Current policy plus original journal custody; never returns a synthetic window."""
+    if read is not None:
+        read.require(store)
     if settings.owner_runtime.mode != "ENABLED":
         raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
     if not store.in_transaction:
         return store.read_or_write(lambda: current(
             store, settings, clock, purpose=purpose, authority=authority))
     _lock_current(store)
-    row = store.one(_current_query(), (CURRENT, GENERATION, MODE))
+    row = (read.one if read is not None else store.one)(
+        _current_query(), (CURRENT, GENERATION, MODE))
     return _checked_current(store, settings, clock, row, purpose=purpose, authority=authority)
 
 
@@ -367,22 +370,24 @@ def bind_job(store, settings, clock, job_id, *, purpose):
     return view
 
 
-def check_job(store, settings, clock, job, *, purpose, executing=False, _reads=None):
+def check_job(store, settings, clock, job, *, purpose, executing=False, read=None, _reads=None):
     """Re-read native state and permission; a durable grant is never a native lease."""
+    if read is not None:
+        read.require(store)
     if not store.in_transaction:
         if _reads is not None:
             raise RuntimeError("OWNER_AUTHORITY_CHECKED_TRANSACTION_REQUIRED")
         return store.read_or_write(lambda: check_job(
             store, settings, clock, job, purpose=purpose, executing=executing,
         ))
-    row = _reads.job if _reads is not None else store.one(
+    row = _reads.job if _reads is not None else (read.one if read is not None else store.one)(
         "SELECT state,lease_token,lease_until,authority_json FROM jobs WHERE job_id=%s",
         (job["job_id"],),
     )
     ref = _job_reference(row)
     view = (_checked_current(store, settings, clock, _reads.authority,
                               purpose=purpose, authority=ref) if _reads is not None
-            else current(store, settings, clock, purpose=purpose, authority=ref))
+            else current(store, settings, clock, purpose=purpose, authority=ref, read=read))
     return _checked_job(row, job, view, clock, executing=executing)
 
 

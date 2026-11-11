@@ -10,6 +10,65 @@ from companion.owner_authority_protocol import AuthorityStop
 from tests.support.owner_input import captured
 
 
+@pytest.mark.parametrize("writer", [False, True])
+def test_unchanged_journal_material_is_folded_once_but_db_projection_is_always_checked(
+    core, tmp_path, monkeypatch, writer,
+):
+    captured(core, tmp_path)
+    paid_budget._clear_codec()
+    reads = []
+    records = paid_budget._journal_records
+
+    def observed(raw):
+        reads.append(len(raw))
+        return records(raw)
+
+    monkeypatch.setattr(paid_budget, "_journal_records", observed)
+    scope = core.store.transaction if writer else core.store.read_snapshot
+    with scope():
+        first = owner_authority.current(core.store, core.settings, core.clock)
+        second = owner_authority.current(core.store, core.settings, core.clock)
+        assert first == second and len(reads) == 1
+    with core.store.transaction():
+        core.store.execute("UPDATE owner_authority_revisions SET policy_json='{}'")
+        with pytest.raises((CoreError, ValueError)):
+            owner_authority.current(core.store, core.settings, core.clock)
+
+
+def test_same_length_changed_journal_never_reuses_verified_material(core, tmp_path):
+    captured(core, tmp_path)
+    path = Path(core.settings.paid_model.journal_path)
+    original = path.read_bytes()
+    owner_authority.current(core.store, core.settings, core.clock)
+    changed = original.replace(b'"previous":"0', b'"previous":"9', 1)
+    assert changed != original and len(changed) == len(original)
+    try:
+        path.write_bytes(changed)
+        with pytest.raises(CoreError):
+            owner_authority.current(core.store, core.settings, core.clock)
+    finally:
+        path.write_bytes(original)
+    assert owner_authority.current(core.store, core.settings, core.clock)
+
+
+def test_erasure_custody_parses_its_original_bytes_without_a_third_file_read(
+    core, tmp_path, monkeypatch,
+):
+    captured(core, tmp_path)
+    path = Path(core.settings.erasure_ledger)
+    opens = []
+    original = Path.open
+
+    def observed(file, *args, **kwargs):
+        if file == path:
+            opens.append(1)
+        return original(file, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observed)
+    owner_authority.current(core.store, core.settings, core.clock)
+    assert len(opens) == 2  # Original bytes plus the final independent-file fence.
+
+
 def test_authority_read_does_not_reconcile_financial_tables_but_append_still_does(
     core, tmp_path, monkeypatch,
 ):

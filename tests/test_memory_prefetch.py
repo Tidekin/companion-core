@@ -209,8 +209,18 @@ def test_restored_conversation_does_not_repeat_prefetch_or_paid_request(
 
 @pytest.mark.parametrize("erase_after_tool", [False, True])
 def test_raw_tool_fallback_uses_original_sources_and_erasure_fence(
-    core, tmp_path, erase_after_tool,
+    core, tmp_path, monkeypatch, erase_after_tool,
 ):
+    from companion import turn_recall
+
+    original_reference, scopes = turn_recall.reference, []
+
+    def reference(store, *args, **kwargs):
+        scopes.append(store.frozen_scope)
+        return original_reference(store, *args, **kwargs)
+
+    monkeypatch.setattr(turn_recall, "reference", reference)
+
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat", "memory", "history")) as (
             entry, _sends,
@@ -246,5 +256,6 @@ def test_raw_tool_fallback_uses_original_sources_and_erasure_fence(
             assert bool(outbox) is not erase_after_tool
             assert all(row["state"] == "SETTLED" for row in core.store.rows(
                 "SELECT state FROM model_usage"))
+            assert scopes and all(scope is not None for scope in scopes)
 
     run(scenario())

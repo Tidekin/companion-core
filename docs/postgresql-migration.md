@@ -6,6 +6,15 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
+当前新建与离线导入目标为 `pg0007_job_event_lookup`。迁移链先应用既有的
+`pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
+再由 `pg0006_fact_key_ascii` 将 fact-key 索引
+对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
+`pg0007_job_event_lookup` 为 `jobs(event_id,kind)` 添加普通 B-tree 索引，避免原任务
+来源绑定校验随无关历史任务增长而扫描整表。真实原生查询计划的合成回归覆盖 1 万条
+无关任务；没有放宽来源、任务唯一绑定或检索 SQL 工作预算。外键不会自动给引用列
+建索引，见 [PostgreSQL 18 外键文档](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)。
+
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
 `pg0003_native_chat`，保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite
 `0068_image_review_target` 的 103 张业务表。SQLite 的旧迁移历史仅用于读取原备份，
@@ -191,10 +200,48 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 查询中读取；临时超时、带行数上限的 SELECT、超时恢复仍在同一保存点中按顺序执行。
 取消或 SQL 错误回滚该保存点，调用方快照和超时保留。
 
+临时超时取本次读取预算与已有服务器上限中的较小值。原超时通过 `current_setting`
+及 PostgreSQL 原生 interval 换算读取，避免每次枚举服务器设置。上述三条 SQL 在原
+保存点内通过 Psycopg `ClientCursor` 绑定、转义参数，以一个原生 simple-Query 消息发送，
+按结果集顺序取得有限 SELECT 的结果。发送前仍检查绝对截止时间；第一条 SQL 再读取
+当时的服务器上限，不能放宽刚收紧的截止时间。错误仍交由原保存点回滚。其他查询继续
+使用原服务器参数绑定；数组、字节、空值、引号及行数上限有独立回归检查。实现遵循
+[Psycopg 客户端绑定游标](https://www.psycopg.org/psycopg3/docs/advanced/cursors.html#client-side-binding-cursors)、
+[多语句查询](https://www.psycopg.org/psycopg3/docs/basic/from_pg2.html#multiple-statements-in-the-same-query)
+和 [PostgreSQL statement_timeout](https://www.postgresql.org/docs/16/runtime-config-client.html#GUC-STATEMENT-TIMEOUT)
+的原生语义；同一消息中的超时分别作用于每条语句，整个操作仍受 Core 的绝对截止时间约束。
+
+记忆候选的精确 ID、事实键、文本、语义及最近记录查询通过原生
+[UNION ALL](https://www.postgresql.org/docs/18/queries-union.html) 合并为一次有限读取。
+各通道先执行原过滤、排序及行数上限，再用
+[row_number](https://www.postgresql.org/docs/18/tutorial-window.html) 标明通道内顺序；
+最终按通道与位置消费，保留原候选优先级、去重、字节计费和溢出凭证。事实正文仍在
+申请字节额度后单独读取，来源和证明继续走原校验；检索 SQL 总额度保持 1000 毫秒。
+
 回复校验在一条 SELECT 中读取事件撤回标记、消息类型和双方回复版本；来源读取也在
 一条 SELECT 中取回原事件、签名回执和隐私版本。原有限来源图在读取正文时一并读取
 有上限的邻接 ID，正文读取前仍先申请原字节预算。重复读取合并在各次原校验边界内，
 不跨模型调用，也不保存权限或费用验证结果。
+
+历史输入与已投递片段在 Store 持有的只读重复读快照内批量取回来源绑定、签名回执、
+任务绑定及原投递字段。每条来源仍核验原签名、时间与撤回，批次开始和结束仍核验当前
+授权及独立账本文件。独立来源调用、可复用历史检查回调及调用方自行打开的事务继续
+逐条读取当前状态，包括当前事务自己写入的撤回、私有范围变化和证据修订。
+完整的同步历史收集在 Store 持有的写事务内也可批量读取有限来源、回执和投递原行；
+逐条保留原授权、时钟、签名及独立文件校验。原批次结束检查重新核验任务与授权，并用
+既有原生写入统计拒绝校验过程中任何自身写入；下一次收集重新查询全部原行。
+有限来源图的同一次读取可以
+共享原 `MemorySources`，超过联合工作上限时恢复逐份证明的既有上限。
+
+一次同步会话校验内可以共享当前授权、租约及输入绑定的原始行，并对所需历史候选
+和记忆证明根做有限批量读取。读取对象只属于创建它的 Store 及其只读重复读快照，
+入口返回前关闭并清空。授权策略、签名、时钟、租约和独立文件校验仍逐次执行，结束前
+再次核验当前授权与租约；普通写事务继续读取当前状态。联合证明超过原来源额度时，
+每份必要证明继续使用自己的原有限额度。这里采用
+[PostgreSQL 重复读快照](https://www.postgresql.org/docs/16/transaction-iso.html)
+保证原始行在该作用域内稳定，并参考
+[DSH 22ddee3 的作用域身份和 dispose 边界](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/core/tools/src/index.ts#L1434-L1509)
+限制临时对象生命周期；没有引入 DSH 执行路径或保存授权结论。
 
 聊天校验进一步在原费用与删除日志锁下，用一条 SELECT 读取当前授权、原任务租约、
 签名输入来源、配置绑定、回复修订和有序图片绑定。SQL 子查询复用各模块的原查询，
@@ -208,6 +255,26 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 来源查询同时读取撤回标记，继续使用原撤回状态解析与拒绝码；标记键沿用相同的 UTF-8
 SHA-256，[PostgreSQL 原生散列函数](https://www.postgresql.org/docs/16/functions-binarystring.html)
 与 Python 的原键计算分别验证。临时原行不会跨异步调用或多次模型校验保存。
+
+上下文计划先验证完整计划的大小与请求结构，再按有界请求 ID 集合一次读取模型准入与
+用量绑定。内连接的两个请求键相等，条件直接使用准入表主键，避免 `COALESCE` 条件使
+数据库先扫描并连接全部历史请求。只取请求 ID、任务 ID、payload 哈希及 measurement
+原文；每个请求仍分别执行任务、payload 与 measurement 哈希校验，缺失或任一项变化
+仍拒绝计划。读取结果只在本次同步检查内使用，后续边界重新读取，也能看到当前写事务
+的修改。原生回归覆盖工具续接的两次真实模拟请求、逐项篡改及一万条无关请求的查询计划。
+
+授权原始账本的解析与生命周期折叠沿用既有精确字节编解码方式：只保留一个不超过
+`CACHE_MAX_BYTES` 的字节键和有界的不可变序列化材料；调用者得到私有副本。任何字节
+变化均重新解码，较大账本走完整路径，解码失败清除材料。每次授权核验仍重新读取文件、
+验证当前数据库投影与生命周期，检查策略和有效期，并在返回前再次核对文件。材料不包含
+数据库或时间相关的授权结论，原费用追加与对账仍使用完整财务校验。
+
+删除账本 custody 直接校验已读到的原始字节，省去中间一次重复文件读取，仍保留结尾的
+独立文件重读和数据库删除投影核对。只读事务通过 Psycopg 原生事务属性生成一条
+`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`，结束时还原连接属性；后续写事务
+继续使用原隔离级别。成功、回滚、异常及有界读取的保存点/超时均有原生回归。
+见 [Psycopg 事务属性](https://www.psycopg.org/psycopg3/docs/basic/transactions.html#transaction-characteristics)；
+同时核对项目固定 3.3.8 的 `_get_tx_start_command` 与属性设置实现，不新增依赖。
 
 原生投递的来源校验复用同一读取入口；原授权、回复、配置 HMAC、来源、历史、图片、
 记忆和阅读证据校验仍全部执行。已准备投递沿用原配置查询语义，缺少后加的配置绑定
