@@ -655,6 +655,75 @@ Future<void> addBot(BuildContext context, WidgetRef ref) async {
   );
 }
 
+/// Owner-readable text for a login that did not reach a usable session.
+String loginProblemText(String status) {
+  if (status.contains('OWNER_MODEL_CARRY_CHANGED')) {
+    return '服务器暂时不能在线登记新设备。'
+        '请把下面的设备公钥发给维护者，在下次停写维护时登记；登记后重新登录即可。';
+  }
+  if (status.contains('CONSOLE_LOGIN_RATE_LIMIT')) {
+    return '尝试次数过多，请稍后再试。';
+  }
+  if (status.contains('CONSOLE_LOGIN_REQUIRED')) {
+    return '主人凭据不正确，请重新输入。';
+  }
+  return '登录没有完成：$status';
+}
+
+/// Shows why login stopped and, when the device needs offline registration,
+/// this device's public key. The key is public; the private seed never leaves
+/// the secure vault.
+Future<void> showLoginProblem(
+  BuildContext context,
+  String status,
+  Future<String> Function() publicKey,
+) async {
+  final needsKey = status.contains('OWNER_MODEL_CARRY_CHANGED');
+  final key = needsKey ? await publicKey() : null;
+  if (!context.mounted) return;
+  await showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('登录未完成'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              loginProblemText(status),
+              key: const ValueKey('login_problem'),
+            ),
+            if (key != null) ...[
+              const SizedBox(height: 14),
+              const Text('设备公钥', style: TextStyle(fontSize: 12)),
+              const SizedBox(height: 4),
+              SelectableText(
+                key,
+                key: const ValueKey('device_public_key'),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        if (key != null)
+          TextButton(
+            key: const ValueKey('copy_device_key'),
+            onPressed: () => Clipboard.setData(ClipboardData(text: key)),
+            child: const Text('复制公钥'),
+          ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('知道了'),
+        ),
+      ],
+    ),
+  );
+}
+
 class ChatPane extends ConsumerStatefulWidget {
   const ChatPane({super.key, required this.bot, this.compact = false});
   final BotProfile bot;
@@ -773,6 +842,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       );
       if (credential == null || credential.isEmpty) return;
       await active.login(credential);
+      if (mounted && active.state.review == null && !active.state.connected) {
+        await showLoginProblem(
+          context,
+          active.state.status,
+          active.backend.publicIdentity,
+        );
+        return;
+      }
     }
     if (mounted && active.state.review != null) {
       final approved = await showDialog<bool>(
