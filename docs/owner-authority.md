@@ -246,6 +246,8 @@ HTTP 钩子等待期间的 STOP；所有外部 provider 使用强制 synthetic `
 
 ### 停止后的原输入材料校验
 
+原生设备输入（`authenticated_native_device`）与 QQ 输入共用同一签名 capture 合同，校验按 capture 的类型选择原接收路径：原生输入必须来自 `native.chat`、会话 `native:owner`，QQ 输入必须来自 `qq.onebot` 的主人私聊。两者都不借用对方的身份。STOP 之后的 activate、carry 和交接都会读取这些输入，因此用过原生聊天之后，这一步同样必须能读通。
+
 2026-10-25 检查 DSH jobs-local
 [原始 producer 与终态投影](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/jobs/jobs-local/src/index.ts)：
 终态由所属 producer 的已提交记录产生，读者获得保留投影。本项目沿用原责任与终态分离的原则，

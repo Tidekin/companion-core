@@ -10,10 +10,17 @@ from companion.contracts import CoreError
 from companion.poke_protocol import OwnerPokeCapture
 from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import AuthorityRef, validate_authority_ref
+from companion_delivery_protocol.native_chat import KIND as NATIVE_KIND
+from companion_delivery_protocol.native_chat import SESSION as NATIVE_SESSION
+from companion_delivery_protocol.native_chat import SOURCE as NATIVE_SOURCE
 
 
 def _source(store, original, saved, owner_id):
-    """Reuse signed input identity checks without requiring current execution authority."""
+    """Reuse signed input identity checks without requiring current execution authority.
+
+    QQ and native device inputs share the capture contract; only the admission source and
+    session they were signed for differ.
+    """
     row = store.one('SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source '
         'AS source, e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, '
         'e.actor_id AS actor_id, e.event_type AS event_type, e.occurred_at AS occurred_at, '
@@ -24,13 +31,18 @@ def _source(store, original, saved, owner_id):
         'c.platform_session_key AS platform_session_key FROM events AS e JOIN conversations AS c '
         'ON e.conversation_id = c.conversation_id WHERE e.event_id = %s',
                     (original.event_id,))
+    # The signed capture kind decides which original admission path it must match:
+    # a native device input never borrows a QQ identity and the reverse.
+    native = original.kind == NATIVE_KIND
+    source, session = ((NATIVE_SOURCE, NATIVE_SESSION) if native
+                       else ("qq.onebot", "onebot-direct:FriendMessage:" + owner_id))
     try:
         body = json.loads(row["body_json"])
         if (not isinstance(body, dict) or row["redacted"]
             or (row["source"], row["actor_id"], row["event_type"], row["privacy_scope"],
                 row["scope"], row["owner_actor_id"]) != (
-                "qq.onebot", "owner", "message.received", "private", "private", "owner")
-            or row["platform_session_key"] != "onebot-direct:FriendMessage:" + owner_id
+                source, "owner", "message.received", "private", "private", "owner")
+            or row["platform_session_key"] != session
             or row["source_event_id"] != original.source_event_id
             or datetime.fromisoformat(row["occurred_at"]) != original.occurred_at
             or input_digest(body) != original.input_sha256
