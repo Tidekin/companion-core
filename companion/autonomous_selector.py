@@ -445,7 +445,10 @@ def native_selector(core, worker_id) -> RoundRobin:
             lane("memory_index", memory_index, ("memory",), interval=1.0,
                  idle_interval=MAINTENANCE_SECONDS),
             lane("rem", rem, ("rem", "memory")),
-            lane("social", social, ("social",)),
+            # Social planning reloads profile and candidate state on each turn and its
+            # plans are hours apart; it is paced the same way as life_topic.
+            lane("social", social, ("social",), interval=0.0,
+                 idle_interval=MAINTENANCE_SECONDS),
         ),
         lambda: foreground_clear(core, hint),
     )
