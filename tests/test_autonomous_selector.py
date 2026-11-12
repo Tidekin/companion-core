@@ -213,6 +213,11 @@ def test_native_social_skip_does_not_create_a_second_scheduler_job_or_repay(core
 
 
 def test_social_budget_deferral_reuses_original_native_job_after_deadline(core, monkeypatch):
+    from companion import autonomous_selector
+
+    # Lane pacing is monotonic; in production it advances together with the wall clock.
+    monkeypatch.setattr(autonomous_selector, "monotonic",
+                        lambda: datetime.fromisoformat(core.clock()).timestamp())
     module, _, _ = background(core)
     module.model.proposal = {"kind": "skip", "reason_code": "NO_ACTION"}
     core.model = module.model
@@ -466,13 +471,14 @@ def test_idle_fast_lane_waits_its_idle_interval_and_keeps_pace_when_busy(monkeyp
     assert selector.next_maintenance == clock[0] + 1.0
 
 
-def test_native_life_topic_lane_is_paced_instead_of_running_every_wake(core):
+def test_native_planning_lanes_are_paced_instead_of_running_every_wake(core):
     from companion.worker_wakeup import MAINTENANCE_SECONDS
 
     lanes = {lane.name: lane for lane in native_selector(core, "life-test").lanes}
-    topic = lanes["life_topic"]
-    assert (topic.interval, topic.idle_interval) == (0.0, MAINTENANCE_SECONDS)
-    assert not topic.maintenance
+    for name in ("life_topic", "social"):
+        lane = lanes[name]
+        assert (lane.interval, lane.idle_interval) == (0.0, MAINTENANCE_SECONDS), name
+        assert not lane.maintenance
 
 
 def test_scheduling_hint_reuses_one_authority_view_per_window(core, monkeypatch):
