@@ -100,6 +100,17 @@ class _MemoryControlExclusive:
         await self.app(scope, receive, send)
 
 
+# Base64 of the largest accepted avatar original plus the small JSON envelope. The
+# route still parses this with its strict model and Core re-checks the decoded bytes.
+def _avatar_upload_body_bytes():
+    from companion.companion_avatar import MAX_UPLOAD_BYTES
+
+    return (MAX_UPLOAD_BYTES + 2) // 3 * 4 + 4096
+
+
+AVATAR_UPLOAD_BODY_BYTES = _avatar_upload_body_bytes()
+
+
 class BodyLimit:
     def __init__(self, app, image_limit=131072, meme_limit=131072, file_limit=131072,
                  voice_limit=131072, voice_input_limit=131072, video_limit=131072,
@@ -134,6 +145,8 @@ class BodyLimit:
             if re.fullmatch(r"/internal/v3/readers/[^/]+/[^/]+/media", scope["path"])
             else self.evaluation_limit
             if scope["path"] in {"/internal/v2/evaluations", "/internal/v2/evaluations/preview"}
+            else AVATAR_UPLOAD_BODY_BYTES
+            if scope["path"] == "/v1/console/chat/profile/avatars"
             else 131072
         )
         if re.fullmatch(r"/internal/v2/voice-node/jobs/voice_[a-f0-9]{32}/result", scope["path"]):
