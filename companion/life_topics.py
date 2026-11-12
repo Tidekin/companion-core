@@ -89,6 +89,27 @@ def _paused(store, settings, now):
     )
 
 
+# One validated journal outcome per process, keyed by everything the full check reads.
+# This is a scheduling hint only: every admission still validates the journal itself.
+_JOURNAL_CHECKED = {}
+
+
+def _journal_key(store, settings):
+    import os
+
+    info = os.stat(settings.paid_model.journal_path)
+    rows = store.one(
+        "SELECT (SELECT md5(COALESCE(string_agg(u::text, ',' ORDER BY u.request_id), '')) "
+        "FROM model_usage u) AS usage, "
+        "(SELECT md5(COALESCE(string_agg(a::text, ',' ORDER BY a.request_id), '')) "
+        "FROM model_admissions a) AS admissions, "
+        "(SELECT md5(string_agg(key || '=' || value, ',' ORDER BY key)) FROM runtime_meta "
+        "WHERE key LIKE 'model_%%' OR key LIKE 'cloud_budget%%') AS meta"
+    )
+    return (str(settings.paid_model.journal_path), info.st_ino, info.st_size,
+            info.st_mtime_ns, tuple(rows.values()))
+
+
 def _uncertain(store, settings):
     from companion import model_carry, paid_budget
 
@@ -102,11 +123,19 @@ def _uncertain(store, settings):
     try:
         with _transaction(store):
             model_carry.supported(store, settings)
-            paid_budget.journal(store, settings.paid_model, initialize=False)
+            # Retained historical UNKNOWN rows made every planning turn replay the
+            # whole budget journal (about a second on production). An unchanged
+            # journal file and unchanged accounting rows reuse the last outcome.
+            key = _journal_key(store, settings)
+            if _JOURNAL_CHECKED.get("key") != key:
+                _JOURNAL_CHECKED.clear()
+                paid_budget.journal(store, settings.paid_model, initialize=False)
+                _JOURNAL_CHECKED["key"] = key
             # Admission owns capacity. Rechecking it as source permission after
             # reserve would reject this very attempt for occupying its own slot.
             return False
-    except CoreError:
+    except (CoreError, OSError):
+        _JOURNAL_CHECKED.clear()
         return True
 
 
