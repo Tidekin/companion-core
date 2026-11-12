@@ -425,7 +425,12 @@ def native_selector(core, worker_id) -> RoundRobin:
             maintenance("commitment_expiry", core.goals.expire_commitments, ("goals",)),
             lane("wake", wake_goal, WAKE_PURPOSES, interval=MAINTENANCE_SECONDS),
             lane("goal", schedule_goal, ("goals", "exploration")),
-            lane("life_topic", life_topic, ("life",)),
+            # One idle life_topic turn re-projects every topic source (seconds of SQL
+            # on a real history), and unrelated peer commits woke it for exactly that.
+            # Progress keeps it due immediately; a turn that found nothing waits the
+            # maintenance interval. Topic deadlines are minutes to hours apart.
+            lane("life_topic", life_topic, ("life",), interval=0.0,
+                 idle_interval=MAINTENANCE_SECONDS),
             lane("private_share", private_share, ("proactive",)),
             lane("follow_up", follow_up, ("proactive",)),
             lane("activity", activity),

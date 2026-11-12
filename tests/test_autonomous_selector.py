@@ -144,7 +144,14 @@ def test_native_life_fences_remain_silent_when_selector_revisits(core, fence):
     assert not core.store.rows("SELECT * FROM outbox")
 
 
-def test_native_defer_waits_for_cooldown_then_requires_new_evidence(core):
+def test_native_defer_waits_for_cooldown_then_requires_new_evidence(core, monkeypatch):
+    from datetime import datetime
+
+    from companion import autonomous_selector
+
+    # Pacing is monotonic; in production it advances together with the wall clock.
+    monkeypatch.setattr(autonomous_selector, "monotonic",
+                        lambda: datetime.fromisoformat(core.clock()).timestamp())
     bug(core)
     proposal(core, "DEFER", "NONE", text="", defer_seconds=60)
     core.clock.advance(86400)
@@ -457,6 +464,15 @@ def test_idle_fast_lane_waits_its_idle_interval_and_keeps_pace_when_busy(monkeyp
     run(selector.step())
     # Real progress keeps the fast cadence.
     assert selector.next_maintenance == clock[0] + 1.0
+
+
+def test_native_life_topic_lane_is_paced_instead_of_running_every_wake(core):
+    from companion.worker_wakeup import MAINTENANCE_SECONDS
+
+    lanes = {lane.name: lane for lane in native_selector(core, "life-test").lanes}
+    topic = lanes["life_topic"]
+    assert (topic.interval, topic.idle_interval) == (0.0, MAINTENANCE_SECONDS)
+    assert not topic.maintenance
 
 
 def test_scheduling_hint_reuses_one_authority_view_per_window(core, monkeypatch):
