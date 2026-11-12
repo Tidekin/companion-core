@@ -226,8 +226,11 @@ class Store:
                 entered = True
                 yield self
                 # Native NOTIFY commits or rolls back with the business change.
-                # Hints carry no content, authority or delivery permission.
-                self._session.notify()
+                # Hints carry no content, authority or delivery permission. A
+                # transaction that wrote no row has nothing for a peer to rescan;
+                # the timed reconcile rescan still covers any missed hint.
+                if self._session.wrote_rows():
+                    self._session.notify()
             outcome = "ROLLBACK" if rollback else "COMMIT"
         except BaseException as error:
             pending = self._budget_stops
