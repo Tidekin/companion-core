@@ -146,6 +146,27 @@ def test_cleanup_keeps_the_current_avatar_and_restore_fails_closed(core):
     assert profile.current(core.store, core.settings)["avatar_asset_id"] == new
 
 
+def test_a_real_photo_sized_upload_passes_the_api_body_limit(client, core, tmp_path):
+    """A detailed photo is far above the default 128 KiB API body limit."""
+    import os
+
+    captured(core, tmp_path)
+    headers, _ = enroll(client, Ed25519PrivateKey.generate())
+    noise = Image.frombytes("RGB", (1024, 768), os.urandom(1024 * 768 * 3))
+    out = io.BytesIO()
+    noise.save(out, format="PNG")
+    data = out.getvalue()
+    assert 1_000_000 < len(data) < avatar.MAX_UPLOAD_BYTES
+    response = client.post("/v1/console/chat/profile/avatars", headers=headers, json={
+        "mime_type": "image/png", "data_base64": base64.b64encode(data).decode(),
+        "operation_id": "upload-photo-1", "expected_revision": 0})
+    assert response.status_code == 200, response.text
+    oversized = client.post("/v1/console/chat/profile/avatars", headers=headers, json={
+        "mime_type": "image/png", "operation_id": "upload-photo-2",
+        "data_base64": "A" * (8 * 1024 * 1024)})
+    assert oversized.status_code == 413
+
+
 def test_native_routes_upload_set_and_serve_the_avatar(client, core, tmp_path):
     captured(core, tmp_path)
     headers, _ = enroll(client, Ed25519PrivateKey.generate())
