@@ -44,6 +44,26 @@ def test_rollback_and_self_hints_do_not_wake_another_business_scan(core):
     run(scenario())
 
 
+def test_a_transaction_that_writes_nothing_does_not_wake_a_peer(core):
+    """Lease and authority checks commit read-only work; only real writes are hints."""
+    async def scenario():
+        with Wakeup(core.store, core.settings, "life-worker", utcnow) as wake:
+            scan = wake.before_scan()
+            with closing(Store(core.store.database, core.settings.state_directory)) as other:
+                for _ in range(5):
+                    with other.transaction():
+                        other.one("SELECT value FROM runtime_meta WHERE key='privacy_epoch'")
+                started = monotonic()
+                assert await wake.wait(scan, UnitResult(False), started + .3) == "maintenance"
+                assert monotonic() - started >= .29
+                scan = wake.before_scan()
+                with other.transaction():
+                    other.one("SELECT 1 AS n")
+                    other.execute("INSERT INTO runtime_meta(key,value) VALUES ('wrote','1')")
+            assert await asyncio.wait_for(wake.wait(scan, UnitResult(False)), 2) == "commit"
+    run(scenario())
+
+
 def test_missing_all_notifications_still_returns_for_a_real_rescan(core, monkeypatch):
     monkeypatch.setattr(worker_wakeup, "MAINTENANCE_SECONDS", .08)
 

@@ -281,6 +281,12 @@ class Session:
         self.execute("SELECT pg_advisory_xact_lock_shared(%s)" if shared else
                      "SELECT pg_advisory_xact_lock(%s)", (key,))
 
+    def wrote_rows(self):
+        """Rows this transaction inserted, updated or deleted in the current schema."""
+        if self._connection.info.transaction_status != TransactionStatus.INTRANS:
+            raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
+        return self.one("SELECT " + TRANSACTION_WRITE_COUNT + " AS n")["n"] != "0"
+
     def notify(self):
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:
             raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
