@@ -814,3 +814,20 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
     except BaseException:
         _clear_codec()
         raise
+
+
+def inputs_key(store, settings):
+    """Identity of what a read-only journal validation reads: file and accounting rows."""
+    import os
+
+    info = os.stat(settings.paid_model.journal_path)
+    rows = store.one(
+        "SELECT (SELECT md5(COALESCE(string_agg(u::text, ',' ORDER BY u.request_id), '')) "
+        "FROM model_usage u) AS usage, "
+        "(SELECT md5(COALESCE(string_agg(a::text, ',' ORDER BY a.request_id), '')) "
+        "FROM model_admissions a) AS admissions, "
+        "(SELECT md5(string_agg(key || '=' || value, ',' ORDER BY key)) FROM runtime_meta "
+        "WHERE key LIKE 'model_%%' OR key LIKE 'cloud_budget%%') AS meta"
+    )
+    return (str(settings.paid_model.journal_path), info.st_ino, info.st_size,
+            info.st_mtime_ns, tuple(rows.values()))
