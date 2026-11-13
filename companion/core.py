@@ -887,7 +887,11 @@ class Core(Runtime):
                       "这次一起接住，别漏掉主人问你的话。")
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules.message["content"]:
             rules.append(qq_rich.RULES)
-        quoting = bool(authority) and job["kind"] == "chat" and cfg.quote_policy != "never"
+        from companion.transport import native_text
+
+        # The native client has no quote box, so its history carries no quote aliases.
+        quoting = (bool(authority) and job["kind"] == "chat" and cfg.quote_policy != "never"
+                   and not native_text(s, job["event_id"]))
         if quoting:
             turns = [reply_quote.label_turn(turn, source)
                      for turn, source in zip(turns, sources, strict=True)]
@@ -1602,6 +1606,9 @@ class Core(Runtime):
                     and not text_only
                     and self.settings.quote_policy != "never"):
                 quote_choice, reply = reply_quote.extract(reply)
+            elif generated_reply:
+                # Quote aliases are never visible text, even when copied from older history.
+                reply = reply_quote.extract(reply)[1]
             with self.store.transaction():
                 task_settings = self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:

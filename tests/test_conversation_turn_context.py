@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from companion import owner_input
+from companion import owner_input, reply_quote
 from companion.conversation_policy import PARTICIPATION_V2, ConversationPolicyConfig
 from companion.reply_segments import SEMANTIC_RULES, SegmentedReplyConfig
 from scripts.evaluate_r1_conversation import load_cases
@@ -91,8 +91,12 @@ def test_native_entry_and_independent_worker_keep_turn_sources_and_delivery(core
                                      (source["event_id"],))
                 eligible = owner_input.history_sources(core.store, core.settings, core.clock, job)
                 assert len(eligible) == number - 1
-                job_id, wire = await sdk_step(core, tmp_path, source["event_id"], number)
+                # A copied quote alias never reaches the native client.
+                job_id, wire = await sdk_step(core, tmp_path, source["event_id"], number,
+                                              "[编号 m1a2b] 原始历史答复")
                 assert PARTICIPATION_V2 in wire["messages"][0]["content"]
+                assert "编号 m" not in json.dumps(wire["messages"], ensure_ascii=False)
+                assert reply_quote.RULES not in wire["messages"][0]["content"]
                 assert SEMANTIC_RULES in wire["messages"][0]["content"]
                 assert "不分析、不解释自己" not in wire["messages"][0]["content"]
                 answers = sum(item["role"] == "assistant" for item in wire["messages"])
@@ -115,8 +119,10 @@ def test_native_entry_and_independent_worker_keep_turn_sources_and_delivery(core
                               if item["kind"] == "conversation_policy")
                 assert policy["strategy"] == "participation_v2"
                 assert (await entry.send(entry.client, entry.protocol))["worked"]
-                delivered = core.store.one('SELECT sent_at FROM outbox WHERE origin_event_id=%s',
-                                            (source["event_id"],))
+                delivered = core.store.one(
+                    'SELECT sent_at,content_json FROM outbox WHERE origin_event_id=%s',
+                    (source["event_id"],))
+                assert "编号" not in json.loads(delivered["content_json"])["text"]
                 # Bridge send receipts use wall time. Subprocess startup can outlast
                 # the synthetic tick; the next input must follow actual delivery.
                 core.clock.now = max(core.clock.now, datetime.fromisoformat(delivered["sent_at"]))
