@@ -282,6 +282,24 @@ from summed job/case time and queue delays. Four shards add runner startup and
 session-fixture overhead; if runner concurrency or costs dominate, reverting the
 matrix, shard count and reuse job set together restores the previous two shards.
 
+The November 13 refresh uses all eight JUnit reports from successful full run
+[43432707689](https://github.com/Tidekin/companion-core/actions/runs/43432707689).
+Each platform reports the same 11,738 cases across 755 test files; 105 files had
+no measurement in the previous weights. Applying the refreshed weights to those
+same reports changes the summed case loads as follows:
+
+| Platform | Previous per-shard case seconds | Refreshed per-shard case seconds |
+|---|---|---|
+| Ubuntu | 2320 / 2278 / 2748 / 2853 | 2548 / 2506 / 2576 / 2570 |
+| Windows | 3296 / 4576 / 3265 / 4104 | 3783 / 3839 / 3815 / 3804 |
+
+The largest Windows case load falls by 16.1%; this is a replay of recorded case
+durations, not a measured workflow speedup. The baseline workflow took 42m06s,
+including queue delays; its slowest product test step took 2331 seconds. The
+candidate's full CI receipt supplies actual elapsed time. The four shards per
+platform, two workers, file-level fixture boundaries, full test scope and reuse
+requirements remain unchanged.
+
 The October 31 refresh uses all eight JUnit reports from successful full run
 [41165362841](https://github.com/yanyuhanyue/companion-core/actions/runs/41165362841).
 Its slowest job took 954 seconds; the suite step accounted for 895 seconds.
