@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from companion import owner_channel
 from companion.paid_budget import sha
 from companion.store import after
 
@@ -85,7 +86,7 @@ def reply_target(store, event_id):
         'outbox.segment_interval_ms AS segment_interval_ms, outbox.delivery_lane AS delivery_lane, '
         'outbox.native_ack_json AS native_ack_json, outbox.authority_json AS authority_json FROM '
         "outbox AS outbox WHERE outbox.conversation_id = %s AND outbox.state = 'SENT' AND "
-        "outbox.action_type IN ('qq.private.reply', 'qq.private.proactive') AND outbox.sent_at <= "
+        "outbox.action_type IN " + owner_channel.SQL_PRIVATE_ACTIONS + " AND outbox.sent_at <= "
         '%s AND outbox.sent_at > %s ORDER BY outbox.sent_at DESC NULLS LAST, record_sequence DESC '
         'NULLS LAST LIMIT 1',
         (
@@ -95,8 +96,9 @@ def reply_target(store, event_id):
         ),
     )
     if not reply or store.one(
-        "SELECT 1 FROM outbox WHERE conversation_id = %s AND action_type IN ('qq.private.reply', "
-        "'qq.private.proactive') AND state IN ('SENDING', 'DELIVERY_UNCERTAIN') AND created_at >= "
+        "SELECT 1 FROM outbox WHERE conversation_id = %s AND action_type IN "
+        + owner_channel.SQL_PRIVATE_ACTIONS
+        + " AND state IN ('SENDING', 'DELIVERY_UNCERTAIN') AND created_at >= "
         '%s AND created_at <= %s LIMIT 1',
         (event["conversation_id"], reply["created_at"], event["occurred_at"]),
     ):

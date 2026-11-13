@@ -201,8 +201,9 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
             'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
             'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
             'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE '
-            'outbox.origin_event_id = %s AND outbox.action_type = %s ORDER BY record_sequence '
-            'NULLS FIRST', (job["event_id"], action),
+            'outbox.origin_event_id = %s AND outbox.action_type IN (%s, %s) ORDER BY '
+            'record_sequence NULLS FIRST',
+            (job["event_id"], action, action.replace("qq.", "native.", 1)),
         )
         if existing:
             group = reply_group(store, existing[0]["message_id"])
@@ -283,9 +284,9 @@ def reply_group(store, message_id, *, require_sent=False):
             'outbox.reply_group_id = %s ORDER BY outbox.segment_index NULLS FIRST',
                           (row["reply_group_id"],))
         source = store.one(
-            'SELECT j.event_id, e.conversation_id, j.kind, e.redacted, e.source FROM jobs AS j '
-            'JOIN events '
-            'AS e USING (event_id) WHERE j.job_id = %s', (row["reply_group_id"],),
+            'SELECT j.event_id, e.conversation_id, j.kind, e.redacted, e.source, c.platform '
+            'FROM jobs AS j JOIN events AS e USING (event_id) JOIN conversations AS c ON '
+            'c.conversation_id = e.conversation_id WHERE j.job_id = %s', (row["reply_group_id"],),
         )
         if (
             not source or source["redacted"]
@@ -293,7 +294,7 @@ def reply_group(store, message_id, *, require_sent=False):
             or not 1 <= len(rows) <= 2**31 - 1 or row["segment_count"] != len(rows)
             or row["action_type"] not in (
                 {"native.private.reply", "native.private.proactive"}
-                if source["source"] == "native.chat"
+                if source["platform"] == "native.chat"
                 else {"qq.private.reply", "qq.private.proactive"})
             or (source["kind"] in {"chat", "reply_recovery"}
                 and row["action_type"] not in {"qq.private.reply", "native.private.reply"})

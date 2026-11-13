@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from companion import owner_authority
+from companion import owner_authority, owner_channel
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.privacy import epoch, redact, sensitive
@@ -86,7 +86,7 @@ def proactive_counts(store, settings, now):
                 "e.event_id=j.event_id WHERE j.kind='activity' AND "
                 '(CASE WHEN e.body_json IS JSON THEN '
                 "(e.body_json::json#>>'{notice,kind}') END)='life' AND "
-                "o.action_type='qq.private.proactive' GROUP BY "
+                "o.action_type IN " + owner_channel.SQL_PROACTIVE_ACTIONS + " GROUP BY "
                 'o.origin_event_id) SELECT '
                 'COALESCE(SUM((created_at>=%s)::int),0) n,'
                 'MAX(created_at)>%s recent FROM reservations WHERE '
@@ -223,7 +223,7 @@ def share_delivery_problem(store, settings, message_id, now):
     )
     if (
         not delivery
-        or delivery["action_type"] != "qq.private.proactive"
+        or delivery["action_type"] not in owner_channel.PROACTIVE_ACTIONS
         or delivery["origin_event_id"] != candidate["event_id"]
         or delivery["scope"] != "private"
         or delivery["owner_actor_id"] != "owner"
@@ -424,13 +424,15 @@ class SocialPlanner:
                 "conversations.scope AS scope, conversations.owner_actor_id AS owner_actor_id, "
                 "conversations.last_event_at AS last_event_at, conversations.created_at AS "
                 "created_at, conversations.reply_revision AS reply_revision FROM conversations AS "
-                "conversations WHERE conversations.platform = 'qq.onebot' AND conversations.scope "
-                "= 'private' AND conversations.owner_actor_id = 'owner' ORDER BY "
-                "conversations.last_event_at DESC NULLS LAST LIMIT 1"
+                "conversations WHERE conversations.conversation_id = %s",
+                (owner_channel.latest_conversation(s),),
             )
-            if not conversation or conversation["last_event_at"] > after(
-                now, -cfg.proactive_idle_seconds
-            ):
+            # Busy on either channel is busy; the share goes where the owner last wrote.
+            busy = s.one(
+                "SELECT MAX(last_event_at) AS at FROM conversations WHERE platform IN "
+                + owner_channel.SQL_SOURCES + " AND scope = 'private' AND owner_actor_id = 'owner'"
+            )["at"]
+            if not conversation or (busy and busy > after(now, -cfg.proactive_idle_seconds)):
                 return False
             if s.one("SELECT 1 FROM jobs WHERE state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT')"):
                 return False
