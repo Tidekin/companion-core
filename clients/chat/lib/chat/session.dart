@@ -35,7 +35,7 @@ class BotSession {
     DateTime Function()? clock,
     bool autoPoll = true,
   }) : clock = clock ?? DateTime.now {
-    loaded = _publish('本地历史已恢复；登录后同步');
+    loaded = _publish('登录后就可以聊天');
     if (autoPoll) {
       _timer = Timer.periodic(const Duration(seconds: 2), (_) {
         final interval = state.pending.isEmpty ? 15 : 2;

@@ -45,14 +45,14 @@ void main() {
     expect(find.text(sentAt(turn('SUCCEEDED').createdAt)), findsOneWidget);
 
     await tester.pumpWidget(host(TurnView(turn: turn('FAILED'))));
-    expect(find.text('处理失败'), findsOneWidget);
+    expect(find.text('回复失败了，可以再发一次'), findsOneWidget);
     // Failure is not shown by colour alone.
     expect(find.byIcon(Icons.error_outline_rounded), findsOneWidget);
 
     await tester.pumpWidget(
       host(TurnView(turn: turn('SUCCEEDED', uncertain: true))),
     );
-    expect(find.text('结果待核对 · 不会自动重新生成'), findsOneWidget);
+    expect(find.text('这条回复没有确认送达'), findsOneWidget);
   });
 
   testWidgets('entrance plays once and is skipped under reduced motion', (
