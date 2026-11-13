@@ -300,6 +300,12 @@ candidate's full CI receipt supplies actual elapsed time. The four shards per
 platform, two workers, file-level fixture boundaries, full test scope and reuse
 requirements remain unchanged.
 
+The [native status isolation check](../tests/test_reader_status_isolation.py)
+holds the snapshot while real HTTP health must complete, and verifies that the
+status request is still pending and the snapshot runs outside the API thread.
+Its five-second HTTP watchdog and fifteen-second snapshot guard leave room for
+shared-runner scheduling; completion ordering remains the regression assertion.
+
 The October 31 refresh uses all eight JUnit reports from successful full run
 [41165362841](https://github.com/yanyuhanyue/companion-core/actions/runs/41165362841).
 Its slowest job took 954 seconds; the suite step accounted for 895 seconds.
