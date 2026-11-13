@@ -473,7 +473,8 @@ class ExpressionEngine:
             )
         return intent.model_copy(update={"image": ImageIntent(category=category)})
 
-    def enqueue(self, event_id, conversation_id, reply, now, action="qq.private.reply", key=None):
+    def enqueue(self, event_id, conversation_id, reply, now, action="qq.private.reply", key=None,
+                *, quote=None):
         """Freeze one text/image intent atomically under the existing delivery key."""
         key = key or f"reply:{event_id}:v1"
         with nullcontext() if self.store.in_transaction else self.store.transaction():
@@ -492,8 +493,11 @@ class ExpressionEngine:
                 raise CoreError("EXPRESSION_CONVERSATION_MISMATCH", 400)
             if not self.settings.expression_enabled or event["source"] == "native.chat":
                 return enqueue(
-                    self.store, event_id, conversation_id, reply, now, action=action, key=key
+                    self.store, event_id, conversation_id, reply, now, action=action, key=key,
+                    quote=quote,
                 )
+            if quote is not None:
+                raise CoreError("INVALID_REPLY_QUOTE", 400)
             intent = self.intent(event_id, reply, now)
             message_id = enqueue(
                 self.store, event_id, conversation_id, intent.text, now, action=action, key=key

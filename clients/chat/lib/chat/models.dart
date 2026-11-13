@@ -73,15 +73,41 @@ class BotProfile {
   int get hashCode => Object.hash(id, name, endpoint, backend);
 }
 
+/// An earlier message a reply answers; Core sends only its id.
+class ChatQuote {
+  const ChatQuote({this.eventId, this.messageId});
+
+  /// The owner's message (a turn id).
+  final String? eventId;
+
+  /// One of the companion's earlier replies.
+  final String? messageId;
+  static ChatQuote? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final eventId = value['event_id'];
+    final messageId = value['message_id'];
+    if (eventId is String) return ChatQuote(eventId: eventId);
+    if (messageId is String) return ChatQuote(messageId: messageId);
+    return null;
+  }
+}
+
 class ChatReply {
-  const ChatReply({required this.id, required this.text, required this.state});
+  const ChatReply({
+    required this.id,
+    required this.text,
+    required this.state,
+    this.quote,
+  });
   final String id;
   final String text;
   final String state;
+  final ChatQuote? quote;
   factory ChatReply.fromJson(Map<String, dynamic> value) => ChatReply(
     id: value['message_id'] as String,
     text: value['text'] as String,
     state: value['state'] as String,
+    quote: ChatQuote.fromJson(value['quote']),
   );
 }
 

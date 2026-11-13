@@ -16,6 +16,7 @@ from companion import input_recall, reply_revision
 CHOICE = re.compile(r"【引用\s*(m[0-9a-f]{4})】")
 LABEL = re.compile(r"[\[【]编号[ \t]+m(?:[0-9a-f]{4}|\.{3}|…{1,2})[\]】] ?")
 MESSAGE_ID = re.compile(r"-?[1-9][0-9]{0,19}")
+NATIVE_ID = re.compile(r"[A-Za-z0-9_:-]{1,160}")
 RULES = (
     "\n主人消息和你先前回复开头的[编号 m加四位字符]是本地编号，不是原话的一部分。"
     "想明确回应较早的某一句（主人说的或你自己说过的）时，可以在回复最前面写【引用 编号】，"
@@ -62,6 +63,30 @@ def label_turn(turn, source):
             message, reply_done = label(message, reply_id), True
         labelled.append(message)
     return labelled
+
+
+PARTIAL = re.compile(r"[\[【](?:引(?:用(?:\s*m[0-9a-f]{0,4})?)?"
+                     r"|编(?:号(?:[ \t]+m[0-9a-f]{0,4})?)?)?")
+
+
+def visible_preview(text):
+    """Streaming text without quote markers, hiding a marker still being written."""
+    text = LABEL.sub("", CHOICE.sub("", text))
+    lead = text.lstrip()
+    if lead and PARTIAL.fullmatch(lead):
+        return ""
+    return lead
+
+
+def strip_markers(reply):
+    """Remove quote markers and labels only; other whitespace stays lossless."""
+    cleaned = LABEL.sub("", CHOICE.sub("", reply))
+    return reply if cleaned == reply else cleaned.lstrip()
+
+
+def choice(reply):
+    found = CHOICE.search(reply)
+    return found.group(1) if found else None
 
 
 def extract(reply):
@@ -116,6 +141,48 @@ def target(store, settings, clock, job, chosen):
     assistant), or the current input when it answers several coalesced inputs. often:
     also quote the current input when named. The id always comes from Core's records.
     """
+    found = _choose(store, settings, clock, job, chosen)
+    if found is None:
+        return None
+    kind, key, row = found
+    message_id = _owner_id(store, job, row) if kind == "owner" else _reply_id(store, job, key)
+    return message_id if message_id and MESSAGE_ID.fullmatch(message_id) else None
+
+
+def native_target(store, settings, clock, job, chosen):
+    """The native turn or reply to show quoted, chosen exactly as for QQ, or None.
+
+    The value names only a Core record the client already synchronizes; the client
+    shows the quoted text from its own copy, so an erased target shows nothing.
+    """
+    found = _choose(store, settings, clock, job, chosen)
+    if found is None:
+        return None
+    kind, key, row = found
+    if kind == "owner":
+        if (row["conversation_id"] != job["conversation_id"] or row["actor_id"] != "owner"
+                or row["source"] != "native.chat" or row["privacy_scope"] != "private"
+                or row.get("redacted") or not reply_revision.source_active(store, row["event_id"])):
+            return None
+        return {"event_id": row["event_id"]}
+    reply = store.one("SELECT origin_event_id,conversation_id,action_type,state,content_json "
+                      "FROM outbox WHERE message_id=%s", (key,))
+    if (not reply or reply["state"] != "SENT" or reply["action_type"] != "native.private.reply"
+            or reply["conversation_id"] != job["conversation_id"]
+            or not json.loads(reply["content_json"]).get("text")
+            or not reply_revision.source_active(store, reply["origin_event_id"])):
+        return None
+    return {"message_id": key}
+
+
+def valid_native_quote(value):
+    return (isinstance(value, dict) and len(value) == 1
+            and next(iter(value)) in {"event_id", "message_id"}
+            and isinstance(next(iter(value.values())), str)
+            and NATIVE_ID.fullmatch(next(iter(value.values()))) is not None)
+
+
+def _choose(store, settings, clock, job, chosen):
     from companion import owner_input
 
     if settings.quote_policy == "never" or job["kind"] != "chat":
@@ -150,8 +217,8 @@ def target(store, settings, clock, job, chosen):
         if (kind == "owner" and row["event_id"] == current["event_id"] and not coalesced
                 and settings.quote_policy != "often"):
             return None
-    message_id = _owner_id(store, job, row) if kind == "owner" else _reply_id(store, job, key)
-    return message_id if message_id and MESSAGE_ID.fullmatch(message_id) else None
+        return kind, key, row
+    return kind, row["event_id"], row
 
 
 def _bubble_text(text):

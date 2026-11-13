@@ -11,7 +11,7 @@ from pydantic_ai.messages import (
     TextPartDelta,
 )
 
-from companion import job_queue, owner_delivery, transport
+from companion import job_queue, owner_delivery, reply_quote, transport
 from companion.agent_runtime import check_conversation
 from companion.contracts import CoreError
 from companion.privacy import epoch
@@ -176,10 +176,11 @@ def project(context, event_id, *, redacted=False):
             return result
         owner_delivery._sources(context.store, context.settings, context.clock, job,
                                 executing=running, preview=True)
+        text = reply_quote.visible_preview(value["text"])
         if running:
-            return {**result, "text": value["text"], "state": "GENERATING"}
+            return {**result, "text": text, "state": "GENERATING"}
         if value.get("state") == "INTERRUPTED":
-            return {**result, "text": value["text"], "state": "INTERRUPTED"}
+            return {**result, "text": text, "state": "INTERRUPTED"}
         return {**result, "state": "INTERRUPTED" if job["state"] == "FAILED" else "WAITING"}
     except (CoreError, ValueError, TypeError, KeyError):
         return result  # A failed current proof can never expose the previous plaintext.

@@ -7,11 +7,11 @@ from pathlib import Path
 from tests.sdk_reader_fixture import answer
 
 
-async def sdk_step(core, tmp_path, event_id, index):
+async def sdk_step(core, tmp_path, event_id, index, reply="原始历史答复"):
     job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s', (event_id,))
     config, output = tmp_path / f"history-{index}.pickle", tmp_path / f"history-{index}.json"
     config.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
-        [answer("原始历史答复")], "SUCCEEDED", str(output))))
+        [answer(reply)], "SUCCEEDED", str(output))))
     process = await asyncio.create_subprocess_exec(sys.executable,
         str(Path(__file__).parents[1] / "reader_sdk_worker.py"), str(config),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
