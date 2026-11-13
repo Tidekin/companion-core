@@ -17,7 +17,7 @@ import json
 
 from pydantic import Field, ValidationError, field_validator
 
-from companion import budget
+from companion import budget, owner_channel
 from companion.contracts import CoreError, StrictModel
 from companion.store import after, encode, uid
 
@@ -473,7 +473,7 @@ def mentioned(store, conversation_id, item, at):
     said = set()
     for row in store.rows(
         "SELECT content_json FROM outbox WHERE conversation_id = %s AND state = 'SENT' AND "
-        "action_type IN ('qq.private.reply', 'qq.private.proactive') AND sent_at > %s AND sent_at "
+        "action_type IN " + owner_channel.SQL_PRIVATE_ACTIONS + " AND sent_at > %s AND sent_at "
         "<= %s",
         (conversation_id, after(at, -MENTION_WINDOW), at),
     ):

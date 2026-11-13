@@ -565,6 +565,12 @@ def invalidate(store, topic_id, reason, *, terminal=None, now=None):
         )
 
 
+def _unfenced(text):
+    """The JSON inside one Markdown code fence; the schema still decides everything else."""
+    found = re.fullmatch(r"\s*```(?:json)?[ \t]*\n(.*?)\n?```\s*", text, re.S)
+    return found.group(1) if found else text
+
+
 class LifeTopics:
     def __init__(self, store, settings, clock):
         self.store, self.settings, self.clock = store, settings, clock
@@ -1850,7 +1856,7 @@ class LifeTopics:
         if not notices._settled(s, job["job_id"]):
             raise CoreError("NOTICE_JOB_UNSETTLED", 409)
         try:
-            decision = LifeDecision.model_validate_json(text)
+            decision = LifeDecision.model_validate_json(_unfenced(text))
         except ValidationError as error:
             raise CoreError("LIFE_INVALID_PROPOSAL", 400) from error
         if (

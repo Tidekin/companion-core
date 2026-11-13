@@ -439,7 +439,8 @@ class MoodService:
                         'AS authority_json FROM outbox AS o JOIN events AS '
                         'original ON original.event_id = o.origin_event_id '
                         "WHERE o.conversation_id = %s AND o.state = 'SENT' AND "
-                        "o.action_type = 'qq.private.reply' AND o.sent_at <= %s "
+                        "o.action_type IN ('qq.private.reply','native.private.reply') "
+                        "AND o.sent_at <= %s "
                         'AND original.record_sequence < (SELECT record_sequence '
                         'AS rowid FROM events AS events WHERE events.event_id = '
                         '%s) ORDER BY o.sent_at DESC NULLS LAST, '
@@ -462,8 +463,8 @@ class MoodService:
                     (
                         'SELECT 1 FROM outbox AS o JOIN events AS original ON '
                         'original.event_id = o.origin_event_id WHERE '
-                        'o.conversation_id = %s AND o.action_type = '
-                        "'qq.private.reply' AND o.state IN ('SENDING', "
+                        'o.conversation_id = %s AND o.action_type IN '
+                        "('qq.private.reply','native.private.reply') AND o.state IN ('SENDING', "
                         "'DELIVERY_UNCERTAIN') AND o.created_at >= %s AND "
                         'o.created_at <= %s AND original.record_sequence < '
                         '(SELECT record_sequence AS rowid FROM events WHERE '
@@ -722,7 +723,7 @@ class MoodService:
                     "SELECT action_type, origin_event_id FROM outbox WHERE message_id = %s",
                     (row["target_message_id"],),
                 )
-                if target["action_type"] == "qq.private.reply":
+                if target["action_type"] in {"qq.private.reply", "native.private.reply"}:
                     prior = self._lineage(target["origin_event_id"], sources, source_check, memo())
                     if not prior:
                         continue

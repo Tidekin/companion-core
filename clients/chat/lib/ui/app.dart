@@ -1530,11 +1530,12 @@ class TurnView extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Bubble(
-              text: turn.redacted ? '此消息已删除' : turn.text,
-              owner: true,
-              time: sentAt(turn.createdAt),
-            ),
+            if (!turn.proactive)
+              Bubble(
+                text: turn.redacted ? '此消息已删除' : turn.text,
+                owner: true,
+                time: sentAt(turn.createdAt),
+              ),
             // Preview and final bubbles share keys by position, so the final
             // reply replaces the streamed text in place instead of flashing.
             for (final (index, reply) in replies.indexed)
@@ -1544,6 +1545,10 @@ class TurnView extends StatelessWidget {
                 child: Bubble(
                   text: reply.text,
                   bot: index == 0 ? bot : null,
+                  // A message the companion started carries its own send time.
+                  time: turn.proactive && index == 0
+                      ? sentAt(turn.createdAt)
+                      : null,
                   header: switch ((reply.quote, quotes)) {
                     (final ChatQuote quote, final QuoteLookup lookup) =>
                       QuoteBox(
