@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from companion import owner_channel
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 
@@ -314,7 +315,7 @@ class AffectEngine:
         # A delivered share can be the subject even hours after the last owner turn.
         sent = self.store.one(
             'SELECT origin_event_id FROM outbox WHERE conversation_id = %s AND action_type IN '
-            "('qq.private.reply', 'qq.private.proactive') AND state = 'SENT' AND NOT EXISTS(SELECT "
+            "" + owner_channel.SQL_PRIVATE_ACTIONS + " AND state = 'SENT' AND NOT EXISTS(SELECT "
             '1 FROM affect_evidence AS a WHERE a.event_id = origin_event_id AND a.dimension = '
             "'engagement') AND sent_at > %s AND sent_at <= %s ORDER BY sent_at DESC NULLS LAST, "
             'record_sequence DESC NULLS LAST LIMIT 1',

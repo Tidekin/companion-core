@@ -107,8 +107,8 @@ class WakePlanner:
                 budget.chat_pending(s, now)
                 or s.one(
                     (
-                        'SELECT 1 FROM conversations WHERE platform = '
-                        "'qq.onebot' AND scope = 'private' AND owner_actor_id = "
+                        'SELECT 1 FROM conversations WHERE platform IN '
+                        "('qq.onebot','native.chat') AND scope = 'private' AND owner_actor_id = "
                         "'owner' AND last_event_at > %s LIMIT 1"
                     ),
                     (after(now, -cfg.proactive_idle_seconds),),

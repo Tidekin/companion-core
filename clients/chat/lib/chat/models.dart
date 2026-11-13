@@ -123,9 +123,13 @@ class ChatTurn {
     this.uncertain = false,
     this.error,
     this.preview,
+    this.proactive = false,
   });
   final String id;
   final int sequence;
+
+  /// The companion wrote first; there is no owner message in this item.
+  final bool proactive;
   final String text;
   final DateTime createdAt;
   final String state;
@@ -142,6 +146,7 @@ class ChatTurn {
     state: value['state'] as String,
     redacted: value['redacted'] as bool,
     uncertain: value['uncertain'] as bool? ?? false,
+    proactive: value['kind'] == 'proactive',
     error: value['error'] as String?,
     preview: value['preview'] is Map
         ? ChatPreview.fromJson(

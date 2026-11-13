@@ -119,13 +119,15 @@ def _turn(context, row):
         "AND action_type IN ('native.private.reply','native.private.proactive') "
         "ORDER BY record_sequence", (row["event_id"],),
     )
+    proactive = row["actor_id"] == "system"
     return {"event_id": row["event_id"], "sequence": row["record_sequence"],
+            **({"kind": "proactive"} if proactive else {}),
             "source_event_id": row["source_event_id"],
-            "text": "" if erased else json.loads(row["body_json"]).get("text", ""),
+            "text": "" if erased or proactive else json.loads(row["body_json"]).get("text", ""),
             "redacted": erased, "created_at": row["occurred_at"], "state": row["state"],
             "uncertain": bool(row["uncertain"]),
             "error": row["last_error_code"],
-            "preview": project(context, row["event_id"], redacted=erased),
+            "preview": None if proactive else project(context, row["event_id"], redacted=erased),
             "replies": [_reply(item, erased) for item in replies]}
 
 
@@ -149,8 +151,12 @@ _HISTORY = (
     "WHERE mu.job_id=j.job_id AND mu.state='UNKNOWN') AS uncertain "
     "FROM events e JOIN jobs j USING(event_id) "
     "LEFT JOIN agent_conversations ac USING(job_id) "
-    "JOIN conversations c USING(conversation_id) WHERE e.source='native.chat' "
-    "AND e.actor_id='owner' AND e.privacy_scope='private' AND j.kind='chat' "
+    "JOIN conversations c USING(conversation_id) WHERE ((e.source='native.chat' "
+    "AND e.actor_id='owner' AND j.kind='chat') "
+    # A proactive message is its own item once delivered; its activity has no owner text.
+    "OR (e.source='system.timer' AND e.actor_id='system' AND j.kind='activity' AND EXISTS("
+    "SELECT 1 FROM outbox p WHERE p.origin_event_id=e.event_id AND p.action_type="
+    "'native.private.proactive' AND p.state='SENT'))) AND e.privacy_scope='private' "
     "AND c.scope='private' AND c.owner_actor_id='owner' AND c.platform='native.chat' "
     "AND c.platform_session_key='native:owner' "
 )

@@ -369,3 +369,75 @@ def test_native_quote_values_are_only_record_references():
     assert reply_quote.visible_preview('【引用 m1a2b】\n嗯') == '嗯'
     assert reply_quote.visible_preview('[编') == ''
     assert reply_quote.visible_preview('你好【') == '你好【'
+
+
+def test_a_lull_on_the_native_client_gets_its_follow_up_there(client, core, tmp_path, monkeypatch):
+    import json
+
+    import numpy as np
+
+    from companion import turn_taking
+    from companion.retrieval import SemanticIndex
+    from companion.store import after
+    from companion.turn_taking import TurnTakingConfig
+    from tests.sdk_reader_fixture import answer, response, worker_for
+
+    captured(core, tmp_path)
+    view = owner_authority.current(core.store, core.settings, core.clock, purpose='chat')
+    policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),
+        'purposes': ['chat', 'history', 'proactive'],
+        'history': {'scope': 'owner_private', 'not_before': after(core.clock(), -1),
+                    'max_turns': 15, 'max_utf8_bytes': 16000}})
+    activate(core, policy, revision=view.authority.revision, operation='native-proactive')
+    core.settings.turn_recall_rerank = False
+    monkeypatch.setattr(SemanticIndex, '_infer', lambda self, query, contents:
+        (tuple(np.asarray([1., 0.], dtype='<f4') for _ in contents),
+         np.asarray([1., 0.], dtype='<f4')))
+
+    class Encoder:
+        def passage_embed(self, texts, **kwargs):
+            return (np.asarray([1., 0.], dtype='<f4') for _ in texts)
+
+        query_embed = passage_embed
+
+    monkeypatch.setattr(SemanticIndex, 'warmup', lambda self: Encoder())
+    core.settings.turn_taking = TurnTakingConfig()
+    core.settings.proactive_enabled = True
+    core.settings.quiet_start = core.settings.quiet_end = 0
+    key = Ed25519PrivateKey.generate()
+    headers, authority = enroll(client, key)
+    replies = ['结局你喜欢吗？', '我也觉得后半段太赶了。', '对了，里面那个配角其实挺出彩的。']
+
+    def provider(request):
+        return response(answer(replies.pop(0)), stream=json.loads(request.content).get('stream'))
+
+    def send(text):
+        result = client.post('/v1/console/chat/messages', json=packet(core, key, authority, text),
+                             headers=headers)
+        assert result.status_code == 202, result.text
+        return result.json()
+
+    async def scenario():
+        async with worker_for(core, provider) as worker:
+            first = send('我刚看完那部电影')
+            assert await worker.run_once('native-lull-1', job_id=first['job_id'])
+            core.clock.advance(60)
+            second = send('还行，就是有点仓促')
+            assert await worker.run_once('native-lull-2', job_id=second['job_id'])
+            core.clock.advance(900)
+            assert turn_taking.flush(worker.store, worker.settings, core.clock())
+            job = worker.store.one("SELECT job_id FROM jobs WHERE kind='activity'")
+            assert await worker.run_once('native-lull-notice', job_id=job['job_id'])
+            row = worker.store.one("SELECT action_type,state,content_json FROM outbox "
+                                   "ORDER BY record_sequence DESC LIMIT 1")
+            assert row['action_type'] == 'native.private.proactive', row
+            assert row['state'] == 'SENT'
+            items = client.get('/v1/console/chat/messages').json()['items']
+            assert [item.get('kind') for item in items] == [None, None, 'proactive']
+            assert items[-1]['text'] == ''
+            assert items[-1]['replies'][0]['text'] == '对了，里面那个配角其实挺出彩的。'
+            core.clock.advance(900)
+            # Never double-text: the newest message is now the companion's own.
+            assert not turn_taking.flush(worker.store, worker.settings, core.clock())
+
+    run(scenario())

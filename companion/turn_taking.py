@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import Field
 
-from companion import conversation_policy
+from companion import conversation_policy, owner_channel
 from companion.contracts import CoreError, StrictModel
 from companion.store import after
 
@@ -85,7 +85,8 @@ def _last_reply(store, conversation_id, event_id):
     """Final delivery time and all delivered text for one owner turn, or None."""
     parts = store.rows(
         "SELECT message_id, content_json, sent_at FROM outbox WHERE conversation_id = %s AND "
-        "origin_event_id = %s AND action_type = 'qq.private.reply' AND state = 'SENT' ORDER BY "
+        "origin_event_id = %s AND action_type IN " + owner_channel.SQL_REPLY_ACTIONS + " AND "
+        "state = 'SENT' ORDER BY "
         "record_sequence NULLS FIRST",
         (conversation_id, event_id),
     )
@@ -142,7 +143,7 @@ def _owner_events(store, conversation_id, *, before_rowid=None, limit=1):
                 'SELECT record_sequence AS rowid,event_id,body_json,'
                 'occurred_at,redacted FROM events WHERE '
                 "conversation_id=%s AND actor_id='owner' AND "
-                "source='qq.onebot' AND privacy_scope='private' AND "
+                "source IN " + owner_channel.SQL_SOURCES + " AND privacy_scope='private' AND "
                 "event_type IN ('message.received',"
                 "'message.media_received') "
             )
@@ -243,12 +244,11 @@ def follow_up_target(store, settings, now):
     config = settings.turn_taking
     if not config.follow_up_enabled:
         return None
-    conversation = store.one(
-        "SELECT conversation_id FROM conversations WHERE platform = 'qq.onebot' AND scope = "
-        "'private' AND owner_actor_id = 'owner' ORDER BY last_event_at DESC NULLS LAST LIMIT 1"
-    )
-    if not conversation:
+    # Follow the channel the owner last wrote on.
+    conversation_id = owner_channel.latest_conversation(store)
+    if not conversation_id:
         return None
+    conversation = {"conversation_id": conversation_id}
     last = store.one(
         "SELECT message_id, origin_event_id, action_type, state, sent_at FROM outbox WHERE "
         "conversation_id = %s ORDER BY record_sequence DESC NULLS LAST LIMIT 1",
@@ -257,7 +257,7 @@ def follow_up_target(store, settings, now):
     # Never double-text: the newest message must be the bot's reply to the owner.
     if (
         not last
-        or last["action_type"] != "qq.private.reply"
+        or last["action_type"] not in owner_channel.REPLY_ACTIONS
         or last["state"] != "SENT"
         or not _follow_up_window(config, last["sent_at"], now)
     ):
@@ -272,8 +272,10 @@ def follow_up_target(store, settings, now):
     # need not have its own Outbox row; anchor to the actual earlier delivery.
     before = store.one(
         "SELECT o.origin_event_id FROM outbox AS o JOIN events AS e ON e.event_id = "
-        "o.origin_event_id WHERE o.conversation_id = %s AND o.action_type = 'qq.private.reply' AND "
-        "o.state = 'SENT' AND e.actor_id = 'owner' AND e.source = 'qq.onebot' AND e.privacy_scope "
+        "o.origin_event_id WHERE o.conversation_id = %s AND o.action_type IN "
+        + owner_channel.SQL_REPLY_ACTIONS + " AND "
+        "o.state = 'SENT' AND e.actor_id = 'owner' AND e.source IN " + owner_channel.SQL_SOURCES
+        + " AND e.privacy_scope "
         "= 'private' AND e.event_type IN ('message.received', 'message.media_received') AND "
         "e.redacted = 0 AND e.record_sequence < %s AND o.sent_at >= %s AND o.sent_at <= %s AND "
         "e.ingested_at > %s AND e.occurred_at <= %s AND NOT EXISTS(SELECT 1 FROM runtime_meta "
@@ -397,9 +399,9 @@ def follow_up_material(store, settings, ref, now):
     )
     if (
         not reply
-        or reply["action_type"] != "qq.private.reply"
+        or reply["action_type"] != owner_channel.action(reply["platform"], "reply")
         or reply["state"] != "SENT"
-        or reply["platform"] != "qq.onebot"
+        or reply["platform"] not in owner_channel.SOURCES
         or reply["scope"] != "private"
         or reply["owner_actor_id"] != "owner"
     ):
@@ -428,8 +430,9 @@ def follow_up_material(store, settings, ref, now):
         if body.get("control_command") or body.get("diary_command"):
             continue
         parts = store.rows(
-            "SELECT content_json FROM outbox WHERE origin_event_id = %s AND action_type = "
-            "'qq.private.reply' AND state = 'SENT' ORDER BY record_sequence NULLS FIRST",
+            "SELECT content_json FROM outbox WHERE origin_event_id = %s AND action_type IN "
+            + owner_channel.SQL_REPLY_ACTIONS + " AND state = 'SENT' ORDER BY record_sequence "
+            "NULLS FIRST",
             (row["event_id"],),
         )
         answer = "".join(json.loads(part["content_json"]).get("text", "") for part in parts)

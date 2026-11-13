@@ -244,7 +244,11 @@ def _material(store, row, job, view, requests, context_hashes, *, meme_binding=N
         '%s', (row["origin_event_id"],))
     actions = ({"qq.private.reply", "qq.private.poke"} if job["kind"] == "poke"
                else {"qq.private.reply", "qq.private.proactive"})
-    if event and event["source"] == "native.chat":
+    native = store.one("SELECT 1 FROM conversations WHERE conversation_id = %s AND "
+                       "platform = 'native.chat'", (row["conversation_id"],))
+    # A native conversation carries native actions, whether the origin is the owner's
+    # native input or a system activity scheduled for that conversation.
+    if (event and event["source"] == "native.chat") or (native and job["kind"] != "poke"):
         actions = {"native.private.reply", "native.private.proactive"}
     if (not event or row["origin_event_id"] != job["event_id"]
         or row["conversation_id"] != job["conversation_id"]
@@ -511,7 +515,8 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         poke.check_delivery(store, settings, view, message_id, clock=clock)
     if problem := notices.delivery_problem(store, settings, message_id, clock()):
         raise CoreError(problem, 403)
-    if row["action_type"] == "qq.private.proactive" and not proactive_allowed(
+    proactive = row["action_type"] in {"qq.private.proactive", "native.private.proactive"}
+    if proactive and not proactive_allowed(
         store, settings, clock(),
     ):
         raise CoreError("PROACTIVE_SEND_PAUSED", 409)

@@ -5,7 +5,7 @@ import json
 import re
 from contextlib import nullcontext
 
-from companion import job_queue, owner_authority
+from companion import job_queue, owner_authority, owner_channel
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.paid_budget import sha
@@ -233,7 +233,7 @@ def schedule(store, settings, kind, ref, conversation_id, now):
         )
         if (
             not conversation
-            or conversation["platform"] != "qq.onebot"
+            or conversation["platform"] not in owner_channel.SOURCES
             or conversation["scope"] != "private"
             or conversation["owner_actor_id"] != "owner"
         ):
@@ -318,7 +318,7 @@ def validate(store, settings, job, now):
         or current["privacy_scope"] != "private"
         or current["scope"] != "private"
         or current["owner_actor_id"] != "owner"
-        or current["platform"] != "qq.onebot"
+        or current["platform"] not in owner_channel.SOURCES
         or current["actor_id"] != "system"
         or current["event_type"] != "activity.tick"
         or current["source_event_id"] != _key(store, value["kind"], value["ref"])
@@ -416,7 +416,7 @@ def prior_contacts(store, job, data, now, retention_days):
                 'events e ON e.event_id=o.origin_event_id JOIN '
                 'event_dependencies d ON d.event_id=e.event_id WHERE '
                 'o.conversation_id=%s AND '
-                "o.action_type='qq.private.proactive' AND "
+                "o.action_type IN " + owner_channel.SQL_PROACTIVE_ACTIONS + " AND "
                 "o.state='SENT' AND e.redacted=0 AND e.event_id<>%s AND "
                 'o.sent_at>%s AND o.sent_at<=%s AND d.source_event_id '
                 'IN (SELECT value FROM '
@@ -711,7 +711,10 @@ def delivery_problem(store, settings, message_id, now, *, job=None):
 
         reply_revision.check_sources(store, job["job_id"])
         data = validate(store, settings, job, now)
-        action = "qq.private.reply" if data["kind"] == "commitment" else "qq.private.proactive"
+        platform = store.one("SELECT platform FROM conversations WHERE conversation_id = %s",
+                             (job["source_conversation"],))
+        action = owner_channel.action(platform and platform["platform"],
+                                      "reply" if data["kind"] == "commitment" else "proactive")
         delivery = job["delivery"]
         if (
             delivery["action_type"] != action
