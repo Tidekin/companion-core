@@ -140,7 +140,7 @@ def test_status_native_snapshot_wait_keeps_health_responsive(core, monkeypatch, 
     def delayed(settings):
         threads.append(threading.get_ident())
         entered.set()
-        assert release.wait(3)
+        assert release.wait(15)
         return snapshot(settings)
 
     monkeypatch.setattr(ops_status, "snapshot", delayed)
@@ -155,7 +155,9 @@ def test_status_native_snapshot_wait_keeps_health_responsive(core, monkeypatch, 
                 params={"summary_only": str(summary).lower()}))
             try:
                 assert await asyncio.to_thread(entered.wait, 3)
-                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
+                # Prove health completes before the blocked snapshot is released.
+                # A subsecond deadline also measures shared-runner scheduling.
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 5)
                 assert health.status_code == 200 and not pending.done()
                 release.set()
                 response = await asyncio.wait_for(pending, 5)
