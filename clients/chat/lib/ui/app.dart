@@ -1359,8 +1359,10 @@ class Bubble extends StatelessWidget {
             Align(
               alignment: Alignment.centerLeft,
               widthFactor: 1,
+              // Core keeps segment text lossless, so a paragraph break stays on the
+              // end of the earlier bubble. Show it without leading/trailing blank lines.
               child: Text(
-                text,
+                text.trim(),
                 style: const TextStyle(
                   fontSize: 14.5,
                   height: 1.65,
@@ -1391,6 +1393,10 @@ class Bubble extends StatelessWidget {
           ),
           const SizedBox(width: 10),
         ],
+        // Follow-up bubbles in the same group keep the avatar's column (32 + 10)
+        // so they line up with the first bubble instead of hugging the edge.
+        if (!owner && bot == null)
+          const SizedBox(key: ValueKey('bubble_avatar_gap'), width: 42),
         bubble,
         if (!owner) const SizedBox(width: 38),
       ],
