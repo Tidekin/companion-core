@@ -11,6 +11,7 @@ import 'avatar.dart';
 import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
+import 'typing.dart';
 
 const _wideBreakpoint = 860.0;
 
@@ -1055,11 +1056,38 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   }
                 },
               ),
-              TextButton(
-                key: ValueKey('connect_${widget.bot.id}'),
-                onPressed: connect,
-                child: Text(state.review != null ? '登记设备' : '登录'),
-              ),
+              if (state.connected)
+                Padding(
+                  key: ValueKey('connected_${widget.bot.id}'),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Tooltip(
+                    message: '已登录并连接；断开请用右侧菜单',
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF6E9E7E),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        const Text(
+                          '已连接',
+                          style: TextStyle(fontSize: 12, color: Warm.textSoft),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else
+                TextButton(
+                  key: ValueKey('connect_${widget.bot.id}'),
+                  onPressed: connect,
+                  child: Text(state.review != null ? '登记设备' : '登录'),
+                ),
               actionsButton(),
             ],
           ),
@@ -1316,15 +1344,25 @@ class _Meta extends StatelessWidget {
 }
 
 class Bubble extends StatelessWidget {
+  static const textStyle = TextStyle(
+    fontSize: 14.5,
+    height: 1.65,
+    color: Warm.text,
+  );
+
   const Bubble({
     super.key,
     required this.text,
     this.owner = false,
     this.bot,
     this.time,
+    this.content,
   });
   final String text;
   final bool owner;
+
+  /// Replaces the plain text, e.g. typing dots or a paced reveal.
+  final Widget? content;
 
   /// Real send time, shown small inside the bubble.
   final String? time;
@@ -1361,14 +1399,7 @@ class Bubble extends StatelessWidget {
               widthFactor: 1,
               // Core keeps segment text lossless, so a paragraph break stays on the
               // end of the earlier bubble. Show it without leading/trailing blank lines.
-              child: Text(
-                text.trim(),
-                style: const TextStyle(
-                  fontSize: 14.5,
-                  height: 1.65,
-                  color: Warm.text,
-                ),
-              ),
+              child: content ?? Text(text.trim(), style: Bubble.textStyle),
             ),
             if (time != null)
               Text(
@@ -1418,22 +1449,26 @@ class TurnView extends StatelessWidget {
   Widget build(BuildContext context) {
     final failed = turn.state == 'FAILED';
     final status = turn.uncertain
-        ? '结果待核对 · 不会自动重新生成'
+        ? '这条回复没有确认送达'
         : turn.preview?.state == 'WITHDRAWN' && turn.state == 'RUNNING'
-        ? '回复未完成'
+        ? '回复中断了，可以再发一次'
         : {
-                'QUEUED': '等待处理',
-                'RUNNING': '正在回复',
-                'RETRY_WAIT': '等待重试',
-                'SUCCEEDED': '已完成',
-                'FAILED': '处理失败',
-                'CANCELLED': '已取消',
+                'QUEUED': '',
+                'RUNNING': '',
+                'RETRY_WAIT': '稍等，正在重试',
+                'SUCCEEDED': '',
+                'FAILED': '回复失败了，可以再发一次',
+                'CANCELLED': '这条回复已取消',
               }[turn.state] ??
               turn.state;
     final replies = turn.replies.where((r) => r.text.isNotEmpty).toList();
-    // The send time sits in the bubble; only states other than a plain
-    // completion get a status line.
-    final quiet = turn.state == 'SUCCEEDED' && !turn.uncertain;
+    final preview = turn.redacted || replies.isNotEmpty ? null : turn.preview;
+    final previewLines = preview == null
+        ? const <String>[]
+        : bubbleLines(preview.text);
+    final working = {'QUEUED', 'RUNNING', 'RETRY_WAIT'}.contains(turn.state);
+    // The send time sits in the bubble; plain progress needs no status line.
+    final quiet = status.isEmpty;
     return Appear(
       animate: animate,
       child: Padding(
@@ -1446,30 +1481,48 @@ class TurnView extends StatelessWidget {
               owner: true,
               time: sentAt(turn.createdAt),
             ),
+            // Preview and final bubbles share keys by position, so the final
+            // reply replaces the streamed text in place instead of flashing.
             for (final (index, reply) in replies.indexed)
               Appear(
-                key: ValueKey('reply_${reply.id}'),
+                key: ValueKey('bot_${turn.id}_$index'),
                 animate: animate || index > 0,
                 child: Bubble(text: reply.text, bot: index == 0 ? bot : null),
               ),
-            if (turn.preview case final preview?
-                when !turn.redacted && replies.isEmpty) ...[
-              if (preview.text.isNotEmpty)
-                Bubble(
-                  key: ValueKey('preview_${turn.id}'),
-                  text: preview.text,
-                  bot: bot,
+            for (final (index, line) in previewLines.indexed)
+              Appear(
+                key: ValueKey('bot_${turn.id}_$index'),
+                animate: index > 0,
+                child: Bubble(
+                  key: ValueKey('preview_${turn.id}_$index'),
+                  text: line,
+                  bot: index == 0 ? bot : null,
+                  content:
+                      index == previewLines.length - 1 &&
+                          preview?.state == 'GENERATING'
+                      ? RevealText(line, style: Bubble.textStyle)
+                      : null,
                 ),
+              ),
+            if (working && replies.isEmpty && previewLines.isEmpty)
+              Bubble(
+                key: ValueKey('typing_${turn.id}'),
+                text: '',
+                bot: bot,
+                content: const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 6),
+                  child: TypingDots(),
+                ),
+              ),
+            if (preview != null && quiet)
               if (switch (preview.state) {
-                    'GENERATING' => '生成中预览',
-                    'INTERRUPTED' => '回复未完成',
-                    'WITHDRAWN' => '预览已撤回',
-                    'WAITING' => '等待恢复原任务',
+                    'INTERRUPTED' => '回复中断了，可以再发一次',
+                    'WITHDRAWN' => '回复中断了，可以再发一次',
+                    'WAITING' => '连接恢复后会接着回复',
                     _ => '',
                   }
                   case final label when label.isNotEmpty)
                 _Meta(label),
-            ],
             if (!quiet)
               _Meta(
                 status,

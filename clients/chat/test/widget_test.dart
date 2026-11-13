@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:drift/native.dart';
+import 'package:companion_chat/persistence/database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -74,16 +76,63 @@ void main() {
           home: Scaffold(body: TurnView(turn: turn())),
         ),
       );
-      expect(find.text('生成中预览'), findsOneWidget);
+      // The streamed text is revealed at a reading pace in its own bubble.
+      await tester.pump(const Duration(seconds: 1));
       expect(find.text('首段正文'), findsOneWidget);
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(body: TurnView(turn: turn(done: true))),
         ),
       );
-      expect(find.text('生成中预览'), findsNothing);
-      expect(find.byKey(const ValueKey('preview_stream')), findsNothing);
+      expect(find.byKey(const ValueKey('preview_t_0')), findsNothing);
       expect(find.text('首段正文，完成。'), findsOneWidget);
+    },
+  );
+  testWidgets(
+    'after login the header shows the connection, not a login button',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      // The full sync after login needs the real repository.
+      final database = ChatDatabase(NativeDatabase.memory());
+      final vault = MemoryVault();
+      final repo = ChatRepository(database, CacheCipher(vault));
+      await repo.addBot(
+        BotProfile(id: 'a', name: 'a', endpoint: Uri.parse('https://a.test')),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          repositoryProvider.overrideWithValue(repo),
+          vaultProvider.overrideWithValue(vault),
+          backendFactoryProvider.overrideWithValue(DemoBackend.new),
+        ],
+      );
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const ChatApplication(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('bot_a')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('connect_a')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('connect_a')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('owner_credential')),
+        'secret',
+      );
+      await tester.tap(find.byKey(const ValueKey('login_device')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('connected_a')), findsOneWidget);
+      expect(find.byKey(const ValueKey('connect_a')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      container.dispose();
+      await tester.pump(const Duration(seconds: 5));
+      await tester.runAsync(database.close);
     },
   );
   testWidgets(
