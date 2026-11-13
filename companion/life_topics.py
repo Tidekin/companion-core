@@ -20,6 +20,7 @@ from companion.life_protocol import (
     LifeQZoneSourceGrant,
 )
 from companion.observation import expired_sources
+from companion.paid_budget import inputs_key as paid_budget_inputs_key
 from companion.paid_budget import sha
 from companion.privacy import epoch, redact, sensitive
 from companion.social import SocialPlanner, feedback_paused, quiet_hours
@@ -95,19 +96,7 @@ _JOURNAL_CHECKED = {}
 
 
 def _journal_key(store, settings):
-    import os
-
-    info = os.stat(settings.paid_model.journal_path)
-    rows = store.one(
-        "SELECT (SELECT md5(COALESCE(string_agg(u::text, ',' ORDER BY u.request_id), '')) "
-        "FROM model_usage u) AS usage, "
-        "(SELECT md5(COALESCE(string_agg(a::text, ',' ORDER BY a.request_id), '')) "
-        "FROM model_admissions a) AS admissions, "
-        "(SELECT md5(string_agg(key || '=' || value, ',' ORDER BY key)) FROM runtime_meta "
-        "WHERE key LIKE 'model_%%' OR key LIKE 'cloud_budget%%') AS meta"
-    )
-    return (str(settings.paid_model.journal_path), info.st_ino, info.st_size,
-            info.st_mtime_ns, tuple(rows.values()))
+    return paid_budget_inputs_key(store, settings)
 
 
 def _uncertain(store, settings):

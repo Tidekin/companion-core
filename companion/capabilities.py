@@ -47,14 +47,28 @@ def _observation(facts, now):
         return "UNOBSERVED", {}
 
 
+# The capability inventory is a prompt projection; admission validates the journal
+# itself. One validated view is reused while the journal file and accounting rows
+# are unchanged; a failed validation is never cached.
+_CARRY_VIEW = {}
+
+
 def _carry_view(store, settings):
     """Reuse verified native closure; an absent/invalid proof grants no exception."""
+    import copy
+
     if not owner_authority.required(store, settings) or not model_carry.active(settings):
         return {}
     try:
         model_carry.supported(store, settings)
-        return paid_budget.journal(store, settings.paid_model, initialize=False)
-    except CoreError:
+        key = paid_budget.inputs_key(store, settings)
+        if _CARRY_VIEW.get("key") != key:
+            _CARRY_VIEW.clear()
+            view = paid_budget.journal(store, settings.paid_model, initialize=False)
+            _CARRY_VIEW.update(key=key, view=view)
+        return copy.deepcopy(_CARRY_VIEW["view"])
+    except (CoreError, OSError):
+        _CARRY_VIEW.clear()
         return {}
 
 
