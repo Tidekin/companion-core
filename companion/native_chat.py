@@ -126,10 +126,18 @@ def _turn(context, row):
             "uncertain": bool(row["uncertain"]),
             "error": row["last_error_code"],
             "preview": project(context, row["event_id"], redacted=erased),
-            "replies": [{"message_id": item["message_id"], "state": item["state"],
-                         "text": ("" if erased or item["state"] != "SENT" else
-                                  json.loads(item["content_json"]).get("text", "")),
-                         "created_at": item["created_at"]} for item in replies]}
+            "replies": [_reply(item, erased) for item in replies]}
+
+
+def _reply(item, erased):
+    visible = not erased and item["state"] == "SENT"
+    content = json.loads(item["content_json"]) if visible else {}
+    value = {"message_id": item["message_id"], "state": item["state"],
+             "text": content.get("text", ""), "created_at": item["created_at"]}
+    # Only a reference: the client shows the quoted text from its own synchronized copy.
+    if visible and content.get("quote"):
+        value["quote"] = content["quote"]
+    return value
 
 
 _HISTORY = (

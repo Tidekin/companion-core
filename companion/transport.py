@@ -22,7 +22,7 @@ def native_text(store, event_id):
 
 
 def enqueue(store, event_id, conversation_id, text, now, action="qq.private.reply", key=None, *,
-            reply_to=None):
+            reply_to=None, quote=None):
     if action not in {"qq.private.reply", "qq.private.proactive"}:
         raise CoreError("CAPABILITY_DISABLED", 403)
     with nullcontext() if store.in_transaction else store.transaction():
@@ -34,6 +34,13 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
             if action != "qq.private.reply" or not valid_reply_to({"message_id": reply_to}):
                 raise CoreError("INVALID_REPLY_QUOTE", 400)
             content["reply_to"] = {"message_id": reply_to}
+        if quote is not None:
+            from companion.reply_quote import valid_native_quote
+
+            if (reply_to is not None or action != "qq.private.reply"
+                    or not valid_native_quote(quote) or not native_text(store, event_id)):
+                raise CoreError("INVALID_REPLY_QUOTE", 400)
+            content["quote"] = quote
         key = key or f"reply:{event_id}:v1"
         previous = store.one('SELECT message_id FROM outbox WHERE delivery_key = %s', (key,))
         if previous:
@@ -103,6 +110,12 @@ def _meme_tail(content, event_id):
         raise ValueError("invalid meme binding")
 
 
+def _valid_native_quote(value):
+    from companion.reply_quote import valid_native_quote
+
+    return valid_native_quote(value)
+
+
 def valid_reply_to(value):
     return (isinstance(value, dict) and set(value) == {"message_id"}
             and isinstance(value["message_id"], str)
@@ -110,7 +123,7 @@ def valid_reply_to(value):
 
 
 def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.private.reply",
-                        reply_to=None, image=None):
+                        reply_to=None, image=None, quote=None):
     """Freeze all parts atomically; a retried job cannot recut or duplicate its reply."""
     if (
         not isinstance(parts, list) or not 1 <= len(parts) <= 2**31 - 1
@@ -122,6 +135,13 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
     contents = [{"text": text} for text in parts]
     if reply_to is not None:
         contents[0]["reply_to"] = {"message_id": reply_to}
+    if quote is not None:
+        from companion.reply_quote import valid_native_quote
+
+        # Only a Core-resolved native record; the native client renders the quote.
+        if image is not None or not valid_native_quote(quote):
+            raise CoreError("INVALID_REPLY_QUOTE", 400)
+        contents[0]["quote"] = quote
     if image is not None:
         tail = {"text": "", "image": image}
         try:
@@ -132,7 +152,8 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
             raise CoreError("INVALID_REPLY_SEGMENTS", 400) from error
         contents.append(tail)
     return _enqueue_contents(store, job, parts, contents, interval_ms, now, action=action,
-                             reply_to=reply_to, version=2 if image is not None else 1)
+                             reply_to=reply_to, quote=quote,
+                             version=2 if image is not None else 1)
 
 
 def enqueue_mixed_reply(store, job, contents, interval_ms, now):
@@ -151,7 +172,7 @@ def enqueue_mixed_reply(store, job, contents, interval_ms, now):
 
 
 def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, version,
-                      reply_to=None):
+                      reply_to=None, quote=None):
     with nullcontext() if store.in_transaction else store.transaction():
         reply_revision.check_job(store, job)
         source = store.one(
@@ -197,7 +218,7 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
             return [row["message_id"] for row in group["rows"]]
         if len(contents) == 1 and version != 3:
             return [enqueue(store, job["event_id"], job["conversation_id"], parts[0], now,
-                            action=action, reply_to=reply_to)]
+                            action=action, reply_to=reply_to, quote=quote)]
         group_hash = digest(_group_manifest(job["job_id"], parts, interval_ms,
                             contents=contents if version in (2, 3) else None, version=version))
         ids = []
@@ -205,7 +226,8 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
             message_id = enqueue(store, job["event_id"], job["conversation_id"],
                                  content["text"], now,
                                  key=f"reply:{job['event_id']}:v2:{index}", action=action,
-                                 reply_to=reply_to if index == 0 else None)
+                                 reply_to=reply_to if index == 0 else None,
+                                 quote=quote if index == 0 else None)
             if version in (2, 3):
                 set_content(store, message_id, content)
             store.execute(
@@ -301,8 +323,11 @@ def reply_group(store, message_id, *, require_sent=False):
                     "segment_interval_ms"))
                 or part["delivery_key"] != f"reply:{row['origin_event_id']}:v2:{index}"
                 or not mixed and not tail and set(content) - (
-                    {"reply_to"} if index == 0 else set()) != {"text"}
+                    {"reply_to", "quote"} if index == 0 else set()) != {"text"}
                 or ("reply_to" in content and not valid_reply_to(content["reply_to"]))
+                or ("quote" in content and (
+                    "reply_to" in content or row["action_type"] != "native.private.reply"
+                    or not _valid_native_quote(content["quote"])))
                 or mixed and "reply_to" in content and index != 0
                 or not isinstance(content["text"], str)
                 or not mixed and not tail and not content["text"].strip()

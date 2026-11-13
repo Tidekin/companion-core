@@ -887,14 +887,13 @@ class Core(Runtime):
                       "这次一起接住，别漏掉主人问你的话。")
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules.message["content"]:
             rules.append(qq_rich.RULES)
-        from companion.transport import native_text
-
-        # The native client has no quote box, so its history carries no quote aliases.
-        quoting = (bool(authority) and job["kind"] == "chat" and cfg.quote_policy != "never"
-                   and not native_text(s, job["event_id"]))
+        quoting = bool(authority) and job["kind"] == "chat" and cfg.quote_policy != "never"
         if quoting:
             turns = [reply_quote.label_turn(turn, source)
                      for turn, source in zip(turns, sources, strict=True)]
+            # Recalled turns may be merged back into the window; label them alike.
+            history.recalled_history = [(source, reply_quote.label_turn(turn, source))
+                                        for source, turn in history.recalled_history]
             rules.append(reply_quote.RULES)
         current_input = []
         if (job["kind"] == "chat" and cfg.chat_time_labels) or followup:
@@ -1603,12 +1602,15 @@ class Core(Runtime):
             preview_only = any(s["kind"] == "video_preview_reply" for s in context_snapshots)
             quote_choice = None
             if (authority and generated_reply and not preview_only and job["kind"] == "chat"
-                    and not text_only
                     and self.settings.quote_policy != "never"):
-                quote_choice, reply = reply_quote.extract(reply)
+                if text_only:
+                    quote_choice = reply_quote.choice(reply)
+                    reply = reply_quote.strip_markers(reply)
+                else:
+                    quote_choice, reply = reply_quote.extract(reply)
             elif generated_reply:
                 # Quote aliases are never visible text, even when copied from older history.
-                reply = reply_quote.extract(reply)[1]
+                reply = reply_quote.strip_markers(reply)
             with self.store.transaction():
                 task_settings = self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:
@@ -1734,19 +1736,26 @@ class Core(Runtime):
                             parts = []  # The owner already moved on while the model was answering.
                         quote_to = reply_quote.target(
                             self.store, self.settings, self.clock, job, quote_choice,
-                        ) if authority and parts else None
+                        ) if authority and parts and not text_only else None
+                        native_quote = reply_quote.native_target(
+                            self.store, self.settings, self.clock, job, quote_choice,
+                        ) if authority and parts and text_only and image is None else None
                         message_ids = enqueue_reply_parts(
                             self.store, job, parts, policy.interval_ms, now, reply_to=quote_to,
-                            image=image,
+                            image=image, quote=native_quote,
                         ) if parts else []
                     else:
                         create_reply = self.expression.enqueue if (
                             authority is None or "expression" in authority.policy.purposes
                         ) else lambda *args, **kwargs: enqueue(self.store, *args, **kwargs)
+                        native_quote = reply_quote.native_target(
+                            self.store, self.settings, self.clock, job, quote_choice,
+                        ) if authority and text_only and job["kind"] == "chat" else None
                         message_ids = [create_reply(
                             job["event_id"], job["conversation_id"], reply, now,
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
+                            **({"quote": native_quote} if native_quote else {}),
                         )]
                     if (authority and message_ids and generated_reply and not text_only
                             and not voice_reply and not singing_reply and not mixed_reply

@@ -11,6 +11,7 @@ import 'avatar.dart';
 import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
+import 'quote.dart';
 import 'typing.dart';
 
 const _wideBreakpoint = 860.0;
@@ -736,6 +737,8 @@ class ChatPane extends ConsumerStatefulWidget {
 class _ChatPaneState extends ConsumerState<ChatPane> {
   final input = TextEditingController();
   final scroll = ScrollController();
+  // Lets a quote jump to its original turn.
+  final turnKeys = <String, GlobalKey>{};
   Timer? draftTimer;
   String lastDraft = '';
   bool sending = false;
@@ -756,6 +759,35 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       input.text = lastDraft = active.draft;
       initialized = true;
     });
+  }
+
+  /// Brings a quoted turn into view, first roughly if it is not built yet.
+  Future<void> jumpTo(String turnId, List<Object> timeline) async {
+    Future<bool> reveal() async {
+      final target = turnKeys[turnId]?.currentContext;
+      if (target == null || !target.mounted) return false;
+      await Scrollable.ensureVisible(
+        target,
+        alignment: 0.2,
+        duration: Motion.reduced(context)
+            ? Duration.zero
+            : const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+      return true;
+    }
+
+    if (await reveal() || !scroll.hasClients) return;
+    final index = timeline.indexWhere((t) => t is ChatTurn && t.id == turnId);
+    if (index < 0) return;
+    final position = scroll.position;
+    scroll.jumpTo(
+      position.maxScrollExtent *
+          index /
+          (timeline.length - 1).clamp(1, 1 << 30),
+    );
+    await WidgetsBinding.instance.endOfFrame;
+    if (mounted) await reveal();
   }
 
   bool entering(String id) {
@@ -991,6 +1023,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       timeline.add(turn);
     }
     timeline.addAll(changes.skip(next));
+    final quotes = QuoteLookup(state.turns);
     final chat = Column(
       children: [
         Container(
@@ -1119,11 +1152,16 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     );
                   }
                   final turn = item as ChatTurn;
-                  return TurnView(
-                    key: ValueKey('turn_${turn.id}'),
-                    turn: turn,
-                    bot: speaker,
-                    animate: entering(turn.id),
+                  return KeyedSubtree(
+                    key: turnKeys.putIfAbsent(turn.id, GlobalKey.new),
+                    child: TurnView(
+                      key: ValueKey('turn_${turn.id}'),
+                      turn: turn,
+                      bot: speaker,
+                      animate: entering(turn.id),
+                      quotes: quotes,
+                      onQuoteTap: (id) => jumpTo(id, timeline),
+                    ),
                   );
                 }
                 final message = pending[index - timeline.length];
@@ -1357,9 +1395,13 @@ class Bubble extends StatelessWidget {
     this.bot,
     this.time,
     this.content,
+    this.header,
   });
   final String text;
   final bool owner;
+
+  /// Shown above the text, e.g. the message this reply quotes.
+  final Widget? header;
 
   /// Replaces the plain text, e.g. typing dots or a paced reveal.
   final Widget? content;
@@ -1394,6 +1436,12 @@ class Bubble extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (header != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                widthFactor: 1,
+                child: header,
+              ),
             Align(
               alignment: Alignment.centerLeft,
               widthFactor: 1,
@@ -1441,10 +1489,16 @@ class TurnView extends StatelessWidget {
     required this.turn,
     this.bot,
     this.animate = false,
+    this.quotes,
+    this.onQuoteTap,
   });
   final ChatTurn turn;
   final BotProfile? bot;
   final bool animate;
+
+  /// Resolves what a reply quotes; null shows no quotes.
+  final QuoteLookup? quotes;
+  final void Function(String turnId)? onQuoteTap;
   @override
   Widget build(BuildContext context) {
     final failed = turn.state == 'FAILED';
@@ -1487,7 +1541,24 @@ class TurnView extends StatelessWidget {
               Appear(
                 key: ValueKey('bot_${turn.id}_$index'),
                 animate: animate || index > 0,
-                child: Bubble(text: reply.text, bot: index == 0 ? bot : null),
+                child: Bubble(
+                  text: reply.text,
+                  bot: index == 0 ? bot : null,
+                  header: switch ((reply.quote, quotes)) {
+                    (final ChatQuote quote, final QuoteLookup lookup) =>
+                      QuoteBox(
+                        key: ValueKey('quote_${reply.id}'),
+                        message: lookup.find(quote),
+                        botName: bot?.name ?? 'TA',
+                        onTap: switch (lookup.find(quote)) {
+                          final QuotedMessage found when onQuoteTap != null =>
+                            () => onQuoteTap!(found.turnId),
+                          _ => null,
+                        },
+                      ),
+                    _ => null,
+                  },
+                ),
               ),
             for (final (index, line) in previewLines.indexed)
               Appear(

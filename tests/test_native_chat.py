@@ -276,3 +276,96 @@ def test_native_unknown_model_result_never_regenerates_on_reconnect(client, core
     history = client.get('/v1/console/chat/messages').json()
     assert history['items'][0]['uncertain']
     assert len(core.store.rows('SELECT 1 FROM jobs')) == 1
+
+
+def test_native_reply_quotes_an_earlier_message_by_reference(client, core, tmp_path, monkeypatch):
+    import json
+
+    import numpy as np
+
+    from companion import reply_quote
+    from companion.reply_segments import SegmentedReplyConfig
+    from companion.retrieval import SemanticIndex
+    from tests.sdk_reader_fixture import answer, response, worker_for
+
+    captured(core, tmp_path)
+    memory_scope(core)
+    core.settings.turn_recall_rerank = False
+    # Only local embedding inference is fixed, as in the native memory test.
+    monkeypatch.setattr(SemanticIndex, '_infer', lambda self, query, contents:
+        (tuple(np.asarray([1., 0.], dtype='<f4') for _ in contents),
+         np.asarray([1., 0.], dtype='<f4')))
+
+    class Encoder:
+        def passage_embed(self, texts, **kwargs):
+            return (np.asarray([1., 0.], dtype='<f4') for _ in texts)
+
+        query_embed = passage_embed
+
+    monkeypatch.setattr(SemanticIndex, 'warmup', lambda self: Encoder())
+    core.settings.quote_policy = "occasionally"
+    core.settings.segmented_reply = SegmentedReplyConfig(min_chars=4, interval_ms=1500)
+    key = Ed25519PrivateKey.generate()
+    headers, authority = enroll(client, key)
+    requests, replies = [], ['第一段足够长。第二段也足够长。']
+
+    def provider(request):
+        requests.append(json.loads(request.content))
+        return response(answer(replies[-1]), stream=requests[-1].get('stream'))
+
+    def send(text):
+        result = client.post('/v1/console/chat/messages', json=packet(core, key, authority, text),
+                             headers=headers)
+        assert result.status_code == 202, result.text
+        return result.json()
+
+    def turn(event_id):
+        return client.get('/v1/console/chat/messages/' + event_id).json()['items'][0]
+
+    async def scenario():
+        async with worker_for(core, provider) as worker:
+            first = send('猫把纸箱挤塌了')
+            assert await worker.run_once('native-quote-first', job_id=first['job_id'])
+            first_reply = turn(first['event_id'])['replies'][0]
+            assert 'quote' not in first_reply
+            core.clock.advance(1)
+            # A streaming preview never shows the marker while it is being written.
+            assert reply_quote.visible_preview('【引用 m1a') == ''
+            replies.append('【引用 ' + reply_quote.alias(first['event_id']) + '】后来呢')
+            second = send('换个话题')
+            assert await worker.run_once('native-quote-owner', job_id=second['job_id'])
+            wire = json.dumps(requests[-1], ensure_ascii=False)
+            assert '[编号 ' + reply_quote.alias(first['event_id']) + ']' in wire
+            quoted = turn(second['event_id'])['replies'][0]
+            assert quoted['quote'] == {'event_id': first['event_id']}
+            assert quoted['text'] == '后来呢'
+            core.clock.advance(1)
+            replies.append('【引用 ' + reply_quote.alias(first_reply['message_id']) + '】我说的')
+            third = send('你说什么来着')
+            assert await worker.run_once('native-quote-reply', job_id=third['job_id'])
+            quoted = turn(third['event_id'])['replies'][0]
+            assert quoted['quote'] == {'message_id': first_reply['message_id']}
+            assert '引用' not in quoted['text']
+            core.clock.advance(1)
+            # A made-up alias drops the quote, never the reply.
+            replies.append('【引用 m0000】随便')
+            fourth = send('嗯')
+            assert await worker.run_once('native-quote-unknown', job_id=fourth['job_id'])
+            quoted = turn(fourth['event_id'])['replies'][0]
+            assert 'quote' not in quoted and quoted['text'] == '随便'
+
+    run(scenario())
+
+
+def test_native_quote_values_are_only_record_references():
+    from companion import reply_quote
+
+    assert reply_quote.valid_native_quote({'event_id': 'evt_' + 'a' * 64})
+    assert reply_quote.valid_native_quote({'message_id': 'msg_abc'})
+    for value in ({}, {'event_id': 1}, {'text': 'x'}, {'event_id': 'a', 'message_id': 'b'},
+                  {'event_id': 'has space'}, 'evt_a'):
+        assert not reply_quote.valid_native_quote(value)
+    assert reply_quote.visible_preview('[编号 m8a1f] 那就') == '那就'
+    assert reply_quote.visible_preview('【引用 m1a2b】\n嗯') == '嗯'
+    assert reply_quote.visible_preview('[编') == ''
+    assert reply_quote.visible_preview('你好【') == '你好【'
