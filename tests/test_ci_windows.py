@@ -109,16 +109,16 @@ def test_last_ui_commit_cannot_hide_backend_changes_earlier_in_the_pr(tmp_path):
     ("pull_request", ["companion/console_static/app.js", "tests/test_console_browser.py",
                       "tests/test_console_supplement_browser.py"], "selected", 1, True),
     ("pull_request", ["tests/test_console_supplement_browser.py",
-                      "companion/console_api.py"], "full", 8, True),
+                      "companion/console_api.py"], "full", 16, True),
     ("pull_request", ["tests/test_console_browser.py",
-                      "tests/test_console_browser_extra.py"], "full", 8, True),
+                      "tests/test_console_browser_extra.py"], "full", 16, True),
     ("pull_request", ["tests/test_console_browser.py",
-                      ".github/workflows/ci.yml"], "full", 8, True),
-    ("pull_request", ["companion/expression.py"], "selected", 8, False),
-    ("pull_request", ["companion/new.py"], "full", 8, True),
-    ("pull_request", ["uv.lock"], "full", 8, True),
-    ("pull_request", ["docs/guide.md"], "docs", 4, False),
-    ("push", ["companion/console_static/app.css"], "full", 8, True),
+                      ".github/workflows/ci.yml"], "full", 16, True),
+    ("pull_request", ["companion/expression.py"], "selected", 16, False),
+    ("pull_request", ["companion/new.py"], "full", 16, True),
+    ("pull_request", ["uv.lock"], "full", 16, True),
+    ("pull_request", ["docs/guide.md"], "docs", 8, False),
+    ("push", ["companion/console_static/app.css"], "full", 16, True),
 ])
 def test_plan_cli_emits_consistent_profile_selection_and_matrix(
     tmp_path, monkeypatch, event, files, profile, count, browser,
@@ -144,7 +144,7 @@ def test_plan_cli_emits_consistent_profile_selection_and_matrix(
     ci_policy.main()
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["profile"] == "full"
-    assert len(json.loads(values["matrix"])["include"]) == 8
+    assert len(json.loads(values["matrix"])["include"]) == 16
 
 
 @pytest.mark.parametrize("product,browser", [(True, True), (False, True), (True, False)])
@@ -154,7 +154,7 @@ def test_matrix_and_gate_cover_every_selected_shard_and_required_job(product, br
     expected_platforms = ["ubuntu-latest"] + (["windows-latest"] if product else [])
     assert {(row["os"], row["shard"]) for row in matrix} == {
         (platform, shard) for platform in expected_platforms
-        for shard in range(4 if product else 1)}
+        for shard in range(8 if product else 1)}
     assert sum(row["shard"] == row["verify_shard"] for row in matrix) == len(expected_platforms)
     profile = "full" if product and browser else "selected"
     results = needs("full")

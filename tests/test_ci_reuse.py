@@ -13,6 +13,7 @@ import yaml
 
 from scripts import ci_container_artifacts as images
 from scripts import ci_policy, ci_reuse
+from scripts.ci_shards import SHARD_COUNT
 from tests.support import ci_policy as policy_tests
 from tests.support.ci_container_artifacts import runtime_evidence
 from tests.support.ci_policy import commit
@@ -134,9 +135,21 @@ def test_identical_actual_tree_reuses_full_success_and_validates_again(evidence)
 def test_release_proof_jobs_match_the_actual_full_workflow():
     workflow = yaml.safe_load((ROOT / ci_reuse.WORKFLOW).read_text(encoding="utf8"))
     actual = set(workflow["jobs"]) - {"test"}
-    actual.update(f"test ({platform}-latest, {shard})"
-                  for platform in ("ubuntu", "windows") for shard in range(4))
+    matrix = ci_policy.test_matrix({"product": True, "browser": True})["include"]
+    assert len(matrix) == SHARD_COUNT * 2
+    assert {item["shard"] for item in matrix} == set(range(SHARD_COUNT))
+    actual.update(f"test ({item['os']}, {item['shard']})" for item in matrix)
     assert ci_reuse.REQUIRED_JOBS == actual
+
+
+@pytest.mark.parametrize("platform", ["ubuntu", "windows"])
+def test_missing_last_shard_cannot_authorize_main_or_runtime_images(evidence, platform):
+    name = f"test ({platform}-latest, {SHARD_COUNT - 1})"
+    evidence["jobs"]["jobs"] = [job for job in evidence["jobs"]["jobs"] if job["name"] != name]
+    evidence["jobs"]["total_count"] = len(evidence["jobs"]["jobs"])
+    assert evidence["plan"]() == ("full", None)
+    with pytest.raises(ValueError):
+        images.resolve_source("synthetic/repository", 101, read=evidence["read"])
 
 
 def test_skipped_flutter_build_cannot_authorize_runtime_image_consumption(evidence):

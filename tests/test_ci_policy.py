@@ -155,7 +155,7 @@ def test_cli_event_failure_chooses_full_and_gate_failure_returns_nonzero(tmp_pat
     outputs = dict(line.split("=", 1) for line in output.read_text("utf-8").splitlines())
     assert outputs["profile"] == "full" and outputs["reuse"] == "null"
     assert json.loads(outputs["windows"])["product"] is True
-    assert len(json.loads(outputs["matrix"])["include"]) == 8
+    assert len(json.loads(outputs["matrix"])["include"]) == 16
     env["NEEDS_JSON"] = json.dumps(needs("docs"))
     result = subprocess.run([sys.executable, "scripts/ci_policy.py", "gate", "--profile", "full"],
                             cwd=ROOT, env=env, capture_output=True, text=True)
