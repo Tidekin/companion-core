@@ -326,8 +326,10 @@ def _reply_group(store, row):
 def rich_reference(store, settings, job, body, withdrawn):
     from companion import qq_rich
     from companion.store import encode
+    from companion.transport import native_text
 
-    if rich_reference := qq_rich.context(body, withdrawn):
+    label = "消息附件资料" if native_text(store, job["event_id"]) else "QQ引用资料"
+    if rich_reference := qq_rich.context(body, withdrawn, label=label):
         if any(segment["type"] == "reply"
                for segment in (body.get("rich") or {}).get("segments", [])):
             rich_reference["content"] += (

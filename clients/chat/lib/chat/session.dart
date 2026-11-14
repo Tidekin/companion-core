@@ -221,12 +221,23 @@ class BotSession {
     });
   }
 
-  Future<void> send(String text) async {
+  Future<void> send(
+    String text, {
+    List<OutgoingImage> images = const [],
+  }) async {
     await loaded;
-    if (text.trim().isEmpty || text.runes.length > 20000) {
+    if ((text.trim().isEmpty && images.isEmpty) || text.runes.length > 20000) {
       throw const BackendError('请输入 1 至 20000 个字符。');
     }
-    final packet = await backend.prepare(text, randomId(), clock());
+    if (images.length > maxImagesPerMessage) {
+      throw const BackendError('一条消息最多带 4 张图片。');
+    }
+    final packet = await backend.prepare(
+      text,
+      randomId(),
+      clock(),
+      images: images,
+    );
     await repository.enqueue(bot.id, packet);
     await _publish('消息已在本机入队');
     if (_active) unawaited(sync());

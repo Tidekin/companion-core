@@ -335,6 +335,13 @@ class Core(Runtime):
             return None
         from companion.transport import native_text
 
+        if (self.settings.content_enabled and row["kind"] == "chat" and row.get("authority_json")
+                and native_text(s, row["event_id"]) and body.get("rich")):
+            from companion import agent_images
+
+            # A native message's images are staged right after it is admitted.
+            if agent_images.waiting(self, row):
+                return None
         if (
             self.settings.content_enabled
             and row["kind"] == "chat"

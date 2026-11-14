@@ -23,9 +23,13 @@ abstract interface class ChatBackend {
   Future<PendingMessage> prepare(
     String text,
     String requestId,
-    DateTime occurredAt,
-  );
+    DateTime occurredAt, {
+    List<OutgoingImage> images = const [],
+  });
   Future<String> submit(PendingMessage message);
+
+  /// The history preview of one image attached to the owner's message.
+  Future<Uint8List> messageImage(String eventId, int slot);
   Future<void> refresh();
   Future<Map<String, dynamic>> history({int? before});
   Future<List<Map<String, dynamic>>> status(String eventId);
@@ -168,10 +172,29 @@ class CoreBackend implements ChatBackend {
         });
   }
 
-  Future<Uint8List> _fetchAvatar(String assetId) async {
+  final _messageImages = <String, Future<Uint8List>>{};
+
+  @override
+  Future<Uint8List> messageImage(String eventId, int slot) {
+    if (!RegExp(r'^evt_[a-f0-9]{64}$').hasMatch(eventId) || slot < 0) {
+      return Future.error(const BackendError('NATIVE_IMAGE_NOT_FOUND'));
+    }
+    final key = '$eventId/$slot';
+    return _messageImages[key] ??=
+        _fetchBytes('/v1/console/chat/messages/$eventId/images/$slot')
+            .catchError((Object error) {
+              _messageImages.remove(key);
+              throw error;
+            });
+  }
+
+  Future<Uint8List> _fetchAvatar(String assetId) =>
+      _fetchBytes('/v1/console/chat/profile/assets/$assetId');
+
+  Future<Uint8List> _fetchBytes(String path) async {
     try {
       final response = await http.get<List<int>>(
-        '/v1/console/chat/profile/assets/$assetId',
+        path,
         options: Options(headers: _headers, responseType: ResponseType.bytes),
       );
       final status = response.statusCode ?? 503;
@@ -338,9 +361,15 @@ class CoreBackend implements ChatBackend {
   Future<PendingMessage> prepare(
     String text,
     String requestId,
-    DateTime occurredAt,
-  ) async {
+    DateTime occurredAt, {
+    List<OutgoingImage> images = const [],
+  }) async {
     if (!await canPrepare()) throw const BackendError('请先登录并登记此设备。');
+    final hashes = [
+      for (final image in images)
+        hexBytes((await Sha256().hash(image.bytes)).bytes),
+    ];
+    final rich = imageRich(text, hashes);
     final key = await _deviceKey();
     final publicKey = await publicIdentity();
     final deviceId = hexBytes(
@@ -355,7 +384,10 @@ class CoreBackend implements ChatBackend {
       'kind': 'authenticated_native_device',
       'event_id': eventId,
       'source_event_id': source,
-      'input_sha256': await digest(text),
+      // Each image is signed by its hash inside the message projection.
+      'input_sha256': await digest(
+        rich == null ? text : {'text': text, 'rich': rich},
+      ),
       'frame_sha256': await digest([requestId, text, timestamp]),
       'evidence_sha256': await digest(['native.chat', deviceId, requestId]),
       'identity_sha256': await digest(['native.chat', deviceId, publicKey]),
@@ -374,6 +406,14 @@ class CoreBackend implements ChatBackend {
       packet: {
         'capture': {...capture, 'signature': hexBytes(signature.bytes)},
         'text': text,
+        if (images.isNotEmpty)
+          'images': [
+            for (final image in images)
+              {
+                'mime_type': image.mimeType,
+                'data_base64': base64Encode(image.bytes),
+              },
+          ],
       },
     );
   }
