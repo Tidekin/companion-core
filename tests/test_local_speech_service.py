@@ -93,13 +93,14 @@ def test_service_rejects_request_driven_model_or_execution_changes(tmp_path, upd
 
 
 def test_http_timeout_keeps_execution_slot_until_provider_really_finishes(tmp_path):
-    config = speech_config(tmp_path).model_copy(update={"timeout_seconds": 0.03})
+    # Wide margins: a slow CI runner must not turn the final quick request into a timeout.
+    config = speech_config(tmp_path).model_copy(update={"timeout_seconds": 1.0})
     engine = Engine()
     app = create_app(config, engine=engine)
 
     async def scenario():
         async with app.router.lifespan_context(app):
-            engine.delay = 0.12
+            engine.delay = 2.5
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                         base_url="http://127.0.0.1") as client:
                 first = await client.post("/v1/audio/speech", json=body(config))
