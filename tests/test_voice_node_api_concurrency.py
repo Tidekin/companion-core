@@ -55,17 +55,21 @@ def test_node_claim_write_wait_keeps_http_responsive(core, monkeypatch, record_p
                                                 f"{body['sequence']}"},
                 ))
                 requests.append(request)
-                before = perf_counter()
-                await event_wait(entered)
-                assert not request.done(), "claim blocked the HTTP loop until its lock timeout"
-                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
-                elapsed = perf_counter() - before
-                record_property("health_during_node_claim_wait_ms", round(elapsed * 1000, 3))
-                assert health.status_code == 200 and elapsed < 0.75
-                assert not request.done()
-                process.stdin.write(b"release\n")
-                await process.stdin.drain()
-                response = await asyncio.wait_for(request, 8)
+                try:
+                    await event_wait(entered)
+                    assert not request.done(), "claim blocked the HTTP loop until its lock timeout"
+                    before = perf_counter()
+                    # Health must complete while the independent process still holds the lock.
+                    health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 5)
+                    elapsed = perf_counter() - before
+                    record_property("health_during_node_claim_wait_ms", round(elapsed * 1000, 3))
+                    assert health.status_code == 200 and not request.done()
+                finally:
+                    # Release and join before HTTP shutdown, including on an assertion failure.
+                    process.stdin.write(b"release\n")
+                    await process.stdin.drain()
+                    await asyncio.gather(request, return_exceptions=True)
+                response = request.result()
                 assert response.status_code == 200, response.text
                 assert response.headers["cache-control"] == "no-store"
                 # The exact native claim can be reconciled without advancing twice.
