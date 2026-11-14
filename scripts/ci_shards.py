@@ -11,7 +11,7 @@ from xml.etree import ElementTree
 # file together so module fixtures/order retain their normal pytest semantics.
 WEIGHTS_PATH = Path(__file__).with_name("ci_weights.json")
 WEIGHTS = json.loads(WEIGHTS_PATH.read_text("utf-8"))["file_seconds"]
-SHARD_COUNT = 4
+SHARD_COUNT = 8
 
 
 def file_priority(name):

@@ -75,7 +75,7 @@ coverage plus the retained runtime-image metadata artifact. Reuse checks all act
 names/results and the original image artifacts. Older receipts and selected receipts are rejected.
 
 Preflight emits the native GitHub Actions JSON matrix. Full product validation gets all
-four shards on each platform, plus its replay/smoke/package checks once. Console-only PRs
+eight shards on each platform, plus its replay/smoke/package checks once. Console-only PRs
 get one Ubuntu Console/package job. The gate validates every selected skip, requires the
 Console test and browser jobs, and rejects failed, cancelled or unexpected job results. Every final
 gate writes `.local/ci/validation.json` with selection reasons, the actual scheduled matrix,
@@ -144,7 +144,7 @@ a build. Directory permissions may differ for the owner-only migration-directory
 
 | Identity | Meaning |
 |---|---|
-| Commit, tree, run ID and attempt | Original full CI source and all fifteen successful jobs, including Flutter |
+| Commit, tree, run ID and attempt | Original full CI source and all twenty-three successful jobs, including Flutter |
 | `image_id` | Actual producer-local Docker ID; classic stores use config IDs, containerd uses manifest/index IDs |
 | `config_digest` | Portable SHA256 of the original saved image configuration bytes |
 | `archive_descriptor` / `platform_manifest_descriptor` | Validated OCI root and single `linux/amd64` manifest descriptors |
@@ -184,6 +184,10 @@ Daemon errors or inconsistent identity never authorize a fallback load. The rece
 descriptors and `consumer_local_image_id`. No tags, registry references or daemon configuration
 are changed. Original retained metadata and archives remain unchanged; the deployment pins the
 reviewed consumer-tool revision separately from the original full-run image source.
+The consumer revision must match that source run's shard contract. Existing retained
+images keep their previously pinned consumer; the updated revision requires all eight
+product shards on both platforms. An incomplete current run cannot authorize image
+consumption or main reuse. Original receipts and archives are unchanged.
 
 BuildKit's local cache backend and the existing pinned Actions cache preserve dependency
 layers. The dependency installation steps already precede application COPY steps in the
@@ -216,12 +220,12 @@ Build-context verification uses Git's documented
 
 ## File shards and timing maintenance
 
-The ordinary suite runs as four disjoint file shards on each selected platform.
+The ordinary suite runs as eight disjoint file shards on each selected platform.
 Full runs include both Ubuntu and Windows. Every collected file is assigned, including new files, and a file's
 parametrized cases and module fixtures stay together. Replay, smoke, build and
 package checks run once per platform, on the existing designated shard. A failed
-shard fails the final gate; full-tree reuse requires all eight test jobs as well as the
-remaining full-validation jobs. An old two-shard receipt is insufficient.
+shard fails the final gate; full-tree reuse requires all sixteen test jobs as well as the
+remaining full-validation jobs. A receipt missing any current test job is insufficient.
 
 Each product shard uses the existing `scripts.test_feedback` entry point with two
 pytest-xdist workers and `--dist=loadfile`. The shard plugin still selects the
@@ -247,7 +251,7 @@ public image COPY inputs. The pinned [uv compiler](https://github.com/astral-sh/
 passes this environment to its Python workers. A real compile/import regression
 checks public input guards and stale-source invalidation with the workflow's
 actual prefix and compiler options. Bytecode remains excluded from release packages.
-The shared empty-schema fixture performs one real migration per job, then creates
+The shared empty-schema fixture performs one real migration per pytest worker, then creates
 independent test databases. Each worker and its children keep their own scratch
 directory and real port tests continue binding kernel-assigned ports.
 
@@ -255,7 +259,7 @@ Before starting workers, the coordinator prepares the pinned BGE file snapshot
 once per job. A cold model cache still downloads the required files; a warm cache
 uses the local snapshot. Each worker retains its own real ONNX inference session
 and process-local encoder cache. Sharding preserves dependency/model cache rules,
-four-shard weights, the platform matrix, required jobs and full-tree evidence requirements. JUnit
+recorded file weights, both platforms and full-tree evidence requirements. JUnit
 continues recording setup, call and teardown durations. If resource pressure or
 instability outweighs the measured gain, set `--workers 0` in the product command
 to restore serial execution without changing its scope; test failures never
@@ -278,9 +282,40 @@ python -B scripts/ci_shards.py --source-run <successful-run-url> @reports
 Review the resulting weights with their source run, then include them in the next
 frozen candidate. Do not refresh weights after every CI run or trigger a second
 full run just to update timings. Compare first-job-to-gate wall time separately
-from summed job/case time and queue delays. Four shards add runner startup and
-session-fixture overhead; if runner concurrency or costs dominate, reverting the
-matrix, shard count and reuse job set together restores the previous two shards.
+from summed job/case time and queue delays. Each shard adds runner startup and
+session-fixture overhead; any shard-count change must update the matrix, partitioner,
+reuse job set and consumer-tool pin together.
+
+### November 14 concurrency and redundant-work review
+
+The previous full run took 39m43s. Its 11,739 Windows cases totaled 16,519 case
+seconds, but the 3,891 cases under 0.1s totaled only 39 seconds. Removing many small
+unit checks would save little while reducing useful regression coverage.
+
+A local comparison restricted the parent, PostgreSQL and test children to four
+logical CPUs on the same Windows host, with a warm model cache and normal database
+durability/authentication. The same 149 native database, real HTTP, owner-authority,
+erasure, voice and independent-worker cases passed without skips: two workers took
+344.328s and four took 352.719s, including `check.ps1`, lint and cleanup. Four workers
+did not improve this scope. CI retains two workers per VM and scales the existing
+matrix to eight file shards per platform instead. The standard public
+[Ubuntu and Windows runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+provide four CPUs and 16GB RAM; queue time and full workflow elapsed time remain
+part of the final receipt. This adds independent runners without a new executor,
+selection heuristic or evidence format. The recorded
+[DSH selfcheck research](#october-24-measurement-and-reused-mechanisms) still applies.
+
+The test-work reduction is limited to demonstrated duplication:
+
+| Test | Retained checks | Removed repeated work |
+|---|---|---|
+| Extracted long-history entry point | Real extraction, 480 events, original-source recall and final provider request through an independent worker | The 48-event variant with the same assertions |
+| Idle voice claims | 32 real claims, slot bound checked after every claim, latest sequence, replay, retired sequence, gap and conflict rejection | 9,968 equivalent idle iterations |
+| Retired AstrBot handler | Original stop/no-spooling assertions, runnable without PostgreSQL | Unused Core/database fixture |
+
+All eight native model-carry combinations remain because capability scope,
+evaluation revision and current-request timeout exercise distinct custody paths.
+Browser, container, package, replay and native-plugin checks remain required.
 
 The November 13 refresh uses all eight JUnit reports from successful full run
 [43432707689](https://github.com/Tidekin/companion-core/actions/runs/43432707689).
@@ -298,7 +333,7 @@ durations, not a measured workflow speedup. The baseline workflow took 42m06s,
 including queue delays; its slowest product test step took 2331 seconds. The
 candidate's full CI receipt supplies actual elapsed time. The four shards per
 platform, two workers, file-level fixture boundaries, full test scope and reuse
-requirements remain unchanged.
+requirements were retained by that refresh.
 
 The [native status isolation check](../tests/test_reader_status_isolation.py)
 holds the snapshot while real HTTP health must complete, and verifies that the

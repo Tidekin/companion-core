@@ -32,14 +32,16 @@ def request(jobs, sequence=None):
         resource_state="READY")
 
 
-def test_ten_thousand_idle_claims_keep_one_slot_and_reject_consumed_sequences(core, monkeypatch):
+def test_idle_claims_keep_one_slot_and_reject_consumed_sequences(core, monkeypatch):
     jobs, _, _, _ = prepared(core, monkeypatch)
     first = request(jobs, 1)
-    for sequence in range(1, 10_001):
+    claim_count = 32
+    for sequence in range(1, claim_count + 1):
         current = first.model_copy(update={"sequence": sequence})
         assert jobs.claim("local", current).lease is None
-    assert core.store.one("SELECT COUNT(*) n FROM voice_node_state")["n"] == 1
-    assert core.store.one("SELECT last_claim_seq FROM voice_node_state")["last_claim_seq"] == 10_000
+        assert core.store.one("SELECT COUNT(*) n FROM voice_node_state")["n"] == 1
+    state = core.store.one("SELECT last_claim_seq FROM voice_node_state")
+    assert state["last_claim_seq"] == claim_count
     assert not core.store.one(
         'SELECT 1 FROM pg_catalog.pg_class WHERE '
         "relnamespace=current_schema()::regnamespace AND relkind IN ('r','p')"
@@ -49,7 +51,7 @@ def test_ten_thousand_idle_claims_keep_one_slot_and_reject_consumed_sequences(co
     with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
         jobs.claim("local", first)
     with pytest.raises(CoreError, match="VOICE_CLAIM_SEQUENCE_GAP"):
-        jobs.claim("local", first.model_copy(update={"sequence": 10_002}))
+        jobs.claim("local", first.model_copy(update={"sequence": claim_count + 2}))
     with pytest.raises(CoreError, match="VOICE_IDEMPOTENCY_CONFLICT"):
         jobs.claim("local", current.model_copy(update={"resource_state": "QUARANTINED"}))
 

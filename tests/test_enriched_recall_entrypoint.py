@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import httpx
-import pytest
 
 from companion.model import ModelClient
 from companion.store import encode
@@ -15,10 +14,10 @@ from tests.sdk_reader_fixture import answer
 from tests.support.native_consumer_entry import environment
 
 
-@pytest.mark.parametrize("history_size", [48, 480])
 def test_extracted_long_history_reaches_actual_final_provider_request(
-    core, tmp_path, history_size, record_property,
+    core, tmp_path, record_property,
 ):
+    history_size = 480
     workspace = Path(__file__).resolve().parents[1]
     async def scenario():
         candidates = []

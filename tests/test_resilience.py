@@ -16,7 +16,7 @@ from tests.support.basic_chat import lease
 from tests.support.confirmed_memory import remember
 
 
-def test_retired_astrbot_handler_stops_without_new_spooling(core, tmp_path, monkeypatch):
+def test_retired_astrbot_handler_stops_without_new_spooling(tmp_path, monkeypatch):
     modules = {
         name: types.ModuleType(name)
         for name in ("astrbot", "astrbot.api", "astrbot.api.event", "astrbot.api.star")

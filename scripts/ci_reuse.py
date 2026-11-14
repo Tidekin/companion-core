@@ -21,7 +21,7 @@ RECORD = "verified-tree.json"
 REQUIRED_JOBS = {
     "preflight", "quality", "ci", "container", "browser-reader", "plugin-native", "flutter-client",
     *(f"test ({platform}-latest, {shard})" for platform in ("ubuntu", "windows")
-      for shard in range(4)),
+      for shard in range(8)),
 }
 
 

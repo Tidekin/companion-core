@@ -156,7 +156,7 @@ def test_matrix(selection):
     platforms = ["ubuntu-latest"] + (["windows-latest"] if selection["product"] else [])
     return {"include": [{"os": platform, "shard": shard,
                          "verify_shard": int(platform == "windows-latest")}
-                        for platform in platforms for shard in range(4)]}
+                        for platform in platforms for shard in range(8)]}
 
 
 def valid_selection(selection):
