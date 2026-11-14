@@ -18,7 +18,6 @@ from companion_delivery_protocol.native_chat import (
     SESSION,
     SOURCE,
     device_identity,
-    image_rich,
     source_identity,
 )
 
@@ -100,7 +99,7 @@ def submit(context, body, *, content_options):
     if body.capture.kind != KIND or original_device != device_id:
         raise CoreError("NATIVE_DEVICE_SESSION_MISMATCH", 403)
     images = native_images.decode(context.settings, body.images) if body.images else []
-    rich = image_rich(body.text, [sha for _, _, sha in images])
+    rich = native_images.image_rich(body.text, [sha for _, _, sha in images])
     if ((not body.text.strip() and not rich) or body.capture.input_sha256
             != qq_rich.input_digest({"text": body.text, **({"rich": rich} if rich else {})})):
         raise CoreError("NATIVE_INPUT_CHANGED", 403)

@@ -125,3 +125,31 @@ def erase(store, event_ids):
                     _path(store, event_id, slot, extension).unlink()
                 except FileNotFoundError:
                     pass
+
+
+def image_rich(text, image_sha256):
+    """The signed projection of a native message with attached images, or None.
+
+    Text (when present) is position 0; each image is one UNREAD image segment whose
+    source_sha256 is the SHA-256 of the exact bytes the device sends. The client
+    builds the same value, so the existing rich input digest covers the images.
+    """
+    if not image_sha256:
+        return None
+    offset = 1 if text.strip() else 0
+    return {
+        "version": "references_v1", "coverage": "PARTIAL",
+        "segment_count": offset + len(image_sha256),
+        "owner_text_positions": [0] if offset else [],
+        "segments": [{"index": offset + slot, "type": "image", "actor": "UNVERIFIED",
+                      "coverage": "UNREAD", "slot": slot, "source_sha256": sha}
+                     for slot, sha in enumerate(image_sha256)],
+    }
+
+
+def input_sha256(text, image_sha256=()):
+    """What a native capture signs: the bare text, or text plus the image projection."""
+    from companion.qq_rich import input_digest
+
+    rich = image_rich(text, list(image_sha256))
+    return input_digest({"text": text, **({"rich": rich} if rich else {})})
