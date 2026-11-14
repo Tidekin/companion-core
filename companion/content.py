@@ -126,6 +126,9 @@ def erase_content(store, event_ids):
         "('r','p')"
     ):
         return
+    from companion import native_images
+
+    native_images.erase(store, event_ids)
     for event_id in event_ids:
         rows = store.rows(
             "SELECT item_id FROM content_items WHERE owner_event_id = %s OR source_event_id = %s "
@@ -182,9 +185,13 @@ def owner_source(store, settings, clock, options, event_id, upload=False):
         event["actor_id"],
         event["scope"],
         event["owner_actor_id"],
-    ) != ("qq.onebot", "owner", "private", "owner"):
+    ) not in {("qq.onebot", "owner", "private", "owner"),
+              ("native.chat", "owner", "private", "owner")}:
         raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
     body = json.loads(event["body_json"])
+    # A native message enters content intake only through its signed image projection.
+    if event["source"] == "native.chat" and not body.get("rich"):
+        raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
     if owner_authority.required(store, settings):
         view = owner_authority.current(store, settings, clock, purpose="content")
         owner_input.source(store, settings, view, event_id, clock())

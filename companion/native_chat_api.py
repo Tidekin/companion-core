@@ -234,6 +234,14 @@ def register_routes(app, settings, prefix, auth, authenticate):
             "Cache-Control": "private, max-age=86400, immutable",
             "X-Content-Type-Options": "nosniff"})
 
+    @app.get(prefix + "/messages/{event_id}/images/{slot}", dependencies=auth)
+    async def message_image(event_id: str, slot: int, request: Request):
+        data, mime = await execute(request, lambda ctx, check: native_chat.image(
+            ctx, event_id, slot), readonly=True)
+        # The session and the message's erasure state are checked on every request.
+        return Response(data, media_type=mime, headers={
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
     @app.get(prefix + "/messages/{event_id}", dependencies=auth)
     async def status(event_id: str, request: Request):
         return await execute(request, lambda ctx, check: native_chat.history(

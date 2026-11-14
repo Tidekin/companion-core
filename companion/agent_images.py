@@ -226,6 +226,10 @@ def stage(service, event_id, request_key, data, mime, lease_token, proof):
 def upload_proof(store, settings, authority, event_id, image, lease_token, media_hash, mime, proof):
     from companion_delivery_protocol.authority import image_upload_signing_payload
 
+    if isinstance(proof, dict) and proof.get("native") is True:
+        return _native_proof(store, settings, authority, event_id, image, media_hash, mime,
+                             proof)
+
     expected = {"authority": authority, "event_id": event_id, "slot": image["slot"],
                 "source_sha256": image["source_sha256"], "lease_token": lease_token,
                 "media_sha256": media_hash, "mime": mime}
@@ -242,6 +246,51 @@ def upload_proof(store, settings, authority, event_id, image, lease_token, media
     except (ValueError, TypeError, InvalidSignature):
         raise CoreError("OWNER_IMAGE_UPLOAD_INVALID", 403) from None
     return proof
+
+
+def _native_proof(store, settings, authority, event_id, image, media_hash, mime, proof):
+    """A native image is bound by the owner's signed message itself: its signed
+    source_sha256 is the hash of these exact bytes, from a native.chat event."""
+    expected = {"native": True, "event_id": event_id, "slot": image["slot"],
+                "source_sha256": image["source_sha256"], "media_sha256": media_hash,
+                "mime": mime}
+    original = owner_authority.evidence(store, settings, authority)
+    if (proof != expected or image["source_sha256"] != media_hash
+            or "image" not in original.policy.purposes
+            or not store.one("SELECT 1 FROM events WHERE event_id = %s AND source = "
+                             "'native.chat' AND actor_id = 'owner'", (event_id,))):
+        raise CoreError("OWNER_IMAGE_UPLOAD_INVALID", 403)
+    return proof
+
+
+def accept_native(store, settings, clock, event_id, slot, data, mime):
+    """Stage one native original in the submit transaction; bytes must match the signature."""
+    if not store.in_transaction:
+        raise RuntimeError("NATIVE_IMAGE_ACCEPT_REQUIRES_TRANSACTION")
+    view, _, images, _ = source(store, settings, clock, event_id)
+    row = store.one("SELECT * FROM content_items WHERE owner_event_id = %s AND "
+                    "kind = 'qq_image' AND slot = %s AND redacted = 0", (event_id, slot))
+    if not row or row["state"] != "WAITING" or not 0 <= slot < len(images):
+        raise CoreError("OWNER_IMAGE_SOURCE_CHANGED", 403)
+    prepare(data, mime, settings.paid_model.image_input,
+            original_limit=min(row["reserved_bytes"], settings.content.max_image_bytes))
+    media_hash = hashlib.sha256(data).hexdigest()
+    proof = {"native": True, "event_id": event_id, "slot": slot,
+             "source_sha256": images[slot]["source_sha256"], "media_sha256": media_hash,
+             "mime": mime}
+    upload_proof(store, settings, view.authority.as_dict(), event_id, images[slot], None,
+                 media_hash, mime, proof)
+    expires = datetime.fromisoformat(after(clock(), image_spool.RETENTION_SECONDS))
+    if view.policy.expires_at is not None:
+        expires = min(expires, view.policy.expires_at)
+    expiry = expires.astimezone(UTC).isoformat(timespec="microseconds")
+    image_spool.put(store, row, data, mime, expiry)
+    store.insert("captured_images", item_id=row["item_id"], proof_json=encode(proof),
+                 mime=mime, expires_at=expiry)
+    store.execute("UPDATE content_items SET state = 'SUCCEEDED', fingerprint = %s, "
+                  "media_sha256 = %s, updated_at = %s WHERE item_id = %s",
+                  (hashlib.sha256(mime.encode() + b"\0" + data).hexdigest(), media_hash,
+                   clock(), row["item_id"]))
 
 
 def accept(service, original, data, mime, lease_token, proof):

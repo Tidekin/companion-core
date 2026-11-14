@@ -1,5 +1,7 @@
 """Signed native device API setup without importing a business test suite."""
 
+import base64
+import hashlib
 import uuid
 
 from companion_delivery_protocol.authority import capture_signing_payload
@@ -28,8 +30,14 @@ def enroll(client, key):
     return headers, value['authority']
 
 
-def packet(core, key, authority, text='原生文本输入', request_id=None):
+def packet(core, key, authority, text='原生文本输入', request_id=None, images=()):
+    """images: (mime, bytes) pairs, signed by hash inside the message projection."""
     value = capture(key.public_key().public_bytes_raw().hex(), authority,
-                    request_id or uuid.uuid4().hex, text, core.clock())
+                    request_id or uuid.uuid4().hex, text, core.clock(),
+                    [hashlib.sha256(data).hexdigest() for _, data in images])
     value['signature'] = key.sign(capture_signing_payload(value)).hex()
-    return {'capture': value, 'text': text}
+    result = {'capture': value, 'text': text}
+    if images:
+        result['images'] = [{'mime_type': mime, 'data_base64': base64.b64encode(data).decode()}
+                            for mime, data in images]
+    return result

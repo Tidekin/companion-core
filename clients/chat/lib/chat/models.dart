@@ -4,6 +4,37 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 
+/// An image the owner attaches to a message, exactly as it will be sent.
+typedef OutgoingImage = ({Uint8List bytes, String mimeType});
+
+/// Core's per-message limits for attached images.
+const maxImagesPerMessage = 4;
+const maxImageBytes = 4000000;
+const maxImagesTotalBytes = 12 * 1024 * 1024;
+
+/// The signed projection of a message with images; mirrors Core's `image_rich`.
+Map<String, dynamic>? imageRich(String text, List<String> sha256) {
+  if (sha256.isEmpty) return null;
+  final offset = text.trim().isEmpty ? 0 : 1;
+  return {
+    'version': 'references_v1',
+    'coverage': 'PARTIAL',
+    'segment_count': offset + sha256.length,
+    'owner_text_positions': offset == 1 ? [0] : <int>[],
+    'segments': [
+      for (final (slot, hash) in sha256.indexed)
+        {
+          'index': offset + slot,
+          'type': 'image',
+          'actor': 'UNVERIFIED',
+          'coverage': 'UNREAD',
+          'slot': slot,
+          'source_sha256': hash,
+        },
+    ],
+  };
+}
+
 String randomId() {
   final random = Random.secure();
   return hexBytes(List<int>.generate(16, (_) => random.nextInt(256)));
@@ -124,9 +155,13 @@ class ChatTurn {
     this.error,
     this.preview,
     this.proactive = false,
+    this.images = const [],
   });
   final String id;
   final int sequence;
+
+  /// Slots of the images attached to the owner's message, in order.
+  final List<int> images;
 
   /// The companion wrote first; there is no owner message in this item.
   final bool proactive;
@@ -147,6 +182,10 @@ class ChatTurn {
     redacted: value['redacted'] as bool,
     uncertain: value['uncertain'] as bool? ?? false,
     proactive: value['kind'] == 'proactive',
+    images: [
+      for (final item in (value['images'] as List? ?? const []))
+        if (item is Map && item['slot'] is int) item['slot'] as int,
+    ],
     error: value['error'] as String?,
     preview: value['preview'] is Map
         ? ChatPreview.fromJson(
@@ -186,6 +225,13 @@ class PendingMessage {
   final String? eventId;
   final bool admitted;
   final String? error;
+
+  /// The attached image bytes, for showing the message before Core has it.
+  List<Uint8List> get images => [
+    for (final item in (packet['images'] as List? ?? const []))
+      if (item is Map && item['data_base64'] is String)
+        base64Decode(item['data_base64'] as String),
+  ];
 }
 
 class BackendError implements Exception {

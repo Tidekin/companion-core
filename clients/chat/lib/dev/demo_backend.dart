@@ -1,5 +1,6 @@
 // Synthetic transport for debug UI and tests. Production main never imports it.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import '../chat/core_backend.dart';
@@ -213,13 +214,34 @@ class DemoBackend implements ChatBackend {
   Future<PendingMessage> prepare(
     String text,
     String requestId,
-    DateTime occurredAt,
-  ) async => PendingMessage(
+    DateTime occurredAt, {
+    List<OutgoingImage> images = const [],
+  }) async => PendingMessage(
     requestId: requestId,
     text: text,
     eventId: 'event_$requestId',
-    packet: {'request': requestId, 'text': text, 'original_authority': 1},
+    packet: {
+      'request': requestId,
+      'text': text,
+      'original_authority': 1,
+      if (images.isNotEmpty)
+        'images': [
+          for (final image in images)
+            {
+              'mime_type': image.mimeType,
+              'data_base64': base64Encode(image.bytes),
+            },
+        ],
+    },
   );
+
+  /// Attached image bytes by "event/slot", standing in for Core's previews.
+  final demoImages = <String, Uint8List>{};
+
+  @override
+  Future<Uint8List> messageImage(String eventId, int slot) async =>
+      demoImages['$eventId/$slot'] ??
+      (throw const BackendError('NATIVE_IMAGE_NOT_FOUND'));
   @override
   Future<String> submit(PendingMessage message) async {
     submissions++;
@@ -228,10 +250,17 @@ class DemoBackend implements ChatBackend {
     if (rename != null) simulateCompanionRename(rename.group(1)!.trim());
     if (!records.any((r) => r['event_id'] == id)) {
       generations++;
+      final images = message.images;
+      for (final (slot, bytes) in images.indexed) {
+        demoImages['$id/$slot'] = bytes;
+      }
       records.add({
         'event_id': id,
         'sequence': records.length + 1,
         'text': message.text,
+        'images': [
+          for (var slot = 0; slot < images.length; slot++) {'slot': slot},
+        ],
         'created_at': DateTime.now().toUtc().toIso8601String(),
         'state': 'SUCCEEDED',
         'redacted': false,

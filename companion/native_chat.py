@@ -4,7 +4,7 @@ import json
 
 from pydantic import Field
 
-from companion import inbox, owner_authority, owner_input, qq_rich
+from companion import inbox, native_images, owner_authority, owner_input, qq_rich
 from companion.contracts import CoreError, InboundEvent, StrictModel
 from companion.owner_authority_protocol import (
     AuthorityChange,
@@ -18,6 +18,7 @@ from companion_delivery_protocol.native_chat import (
     SESSION,
     SOURCE,
     device_identity,
+    image_rich,
     source_identity,
 )
 
@@ -33,7 +34,9 @@ class DeviceApproval(Device):
 
 class Submit(StrictModel):
     capture: OwnerCapture
-    text: str = Field(min_length=1, max_length=20000)
+    text: str = Field(max_length=20000)
+    images: list[native_images.NativeImage] = Field(default_factory=list,
+                                                    max_length=native_images.MAX_IMAGES)
 
 
 def device_view(context, public_key=None, *, registered=True):
@@ -96,8 +99,10 @@ def submit(context, body, *, content_options):
         raise CoreError("NATIVE_SOURCE_IDENTITY_REQUIRED", 403) from error
     if body.capture.kind != KIND or original_device != device_id:
         raise CoreError("NATIVE_DEVICE_SESSION_MISMATCH", 403)
-    if (not body.text.strip() or
-            body.capture.input_sha256 != qq_rich.input_digest({"text": body.text})):
+    images = native_images.decode(context.settings, body.images) if body.images else []
+    rich = image_rich(body.text, [sha for _, _, sha in images])
+    if ((not body.text.strip() and not rich) or body.capture.input_sha256
+            != qq_rich.input_digest({"text": body.text, **({"rich": rich} if rich else {})})):
         raise CoreError("NATIVE_INPUT_CHANGED", 403)
     owner_input.approve(context.store, context.settings, context.clock, body.capture)
     event = InboundEvent(schema_version=1, event_id=body.capture.event_id, source=SOURCE,
@@ -105,9 +110,42 @@ def submit(context, body, *, content_options):
         occurred_at=body.capture.occurred_at,
         conversation={"platform_session_key": SESSION, "scope": "private"},
         actor={"platform_user_id": "owner", "role": "owner"},
-        payload={"text": body.text, "media": [], "shared_content": []}, trace_id=uid("trace"))
-    return inbox.receive(context.store, context.settings, context.clock, context.ledger,
-                         event, "native:" + event.event_id, content_options=content_options)
+        payload={"text": body.text, "media": [],
+                 "shared_content": [{"kind": "image", "slot": slot} for slot in range(len(images))],
+                 **({"rich": rich} if rich else {})}, trace_id=uid("trace"))
+    result = inbox.receive(context.store, context.settings, context.clock, context.ledger,
+                           event, "native:" + event.event_id, content_options=content_options)
+    if images:
+        _stage_images(context, event.event_id, images)
+    return result
+
+
+def _stage_images(context, event_id, images):
+    """Originals into the owner image intake; a retried submit finds them already staged."""
+    from companion import agent_images
+
+    store = context.store
+    with store.transaction():
+        for slot, (mime, data, _) in enumerate(images):
+            row = store.one("SELECT state FROM content_items WHERE owner_event_id = %s AND "
+                            "kind = 'qq_image' AND slot = %s", (event_id, slot))
+            # Content intake may be off or over its daily cap; the message still stands.
+            if row is not None and row["state"] == "WAITING":
+                agent_images.accept_native(store, context.settings, context.clock, event_id,
+                                           slot, data, mime)
+    for slot, (_, data, _) in enumerate(images):
+        native_images.save_preview(store, event_id, slot, data)
+
+
+def image(context, event_id, slot):
+    """One attached image's history preview, only while its native message stands."""
+    device_view(context)
+    row = context.store.one(_HISTORY + "AND e.event_id=%s", (event_id,))
+    if (row is None or row["redacted"] or row["actor_id"] != "owner"
+            or not any(item.get("kind") == "image" and item.get("slot") == slot
+                       for item in json.loads(row["body_json"]).get("shared_content", []))):
+        raise CoreError("NATIVE_IMAGE_NOT_FOUND", 404)
+    return native_images.read_preview(context.store, event_id, slot)
 
 
 def _turn(context, row):
@@ -124,6 +162,9 @@ def _turn(context, row):
             **({"kind": "proactive"} if proactive else {}),
             "source_event_id": row["source_event_id"],
             "text": "" if erased or proactive else json.loads(row["body_json"]).get("text", ""),
+            "images": [] if erased or proactive else [
+                {"slot": item["slot"]} for item in json.loads(row["body_json"]).get(
+                    "shared_content", []) if item.get("kind") == "image"],
             "redacted": erased, "created_at": row["occurred_at"], "state": row["state"],
             "uncertain": bool(row["uncertain"]),
             "error": row["last_error_code"],

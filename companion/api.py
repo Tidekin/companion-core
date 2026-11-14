@@ -111,6 +111,16 @@ def _avatar_upload_body_bytes():
 AVATAR_UPLOAD_BODY_BYTES = _avatar_upload_body_bytes()
 
 
+def _native_submit_body_bytes():
+    from companion.native_images import SUBMIT_BODY_BYTES
+
+    return SUBMIT_BODY_BYTES
+
+
+# A native message may carry its attached images; Core re-checks each decoded original.
+NATIVE_SUBMIT_BODY_BYTES = _native_submit_body_bytes()
+
+
 class BodyLimit:
     def __init__(self, app, image_limit=131072, meme_limit=131072, file_limit=131072,
                  voice_limit=131072, voice_input_limit=131072, video_limit=131072,
@@ -147,6 +157,8 @@ class BodyLimit:
             if scope["path"] in {"/internal/v2/evaluations", "/internal/v2/evaluations/preview"}
             else AVATAR_UPLOAD_BODY_BYTES
             if scope["path"] == "/v1/console/chat/profile/avatars"
+            else NATIVE_SUBMIT_BODY_BYTES
+            if scope["path"] == "/v1/console/chat/messages" and scope.get("method") == "POST"
             else 131072
         )
         if re.fullmatch(r"/internal/v2/voice-node/jobs/voice_[a-f0-9]{32}/result", scope["path"]):

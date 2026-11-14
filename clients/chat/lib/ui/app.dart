@@ -11,6 +11,7 @@ import 'avatar.dart';
 import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
+import 'attachments.dart';
 import 'quote.dart';
 import 'typing.dart';
 
@@ -739,6 +740,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   final scroll = ScrollController();
   // Lets a quote jump to its original turn.
   final turnKeys = <String, GlobalKey>{};
+  // Images picked for the next message, in order.
+  final attachments = <OutgoingImage>[];
   Timer? draftTimer;
   String lastDraft = '';
   bool sending = false;
@@ -790,6 +793,26 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (mounted) await reveal();
   }
 
+  Future<void> attach() async {
+    try {
+      final picked = await pickChatImages(
+        remaining: maxImagesPerMessage - attachments.length,
+        alreadyBytes: attachments.fold(
+          0,
+          (sum, image) => sum + image.bytes.length,
+        ),
+      );
+      if (picked.isNotEmpty && mounted) {
+        setState(() => attachments.addAll(picked));
+      }
+    } on AttachPickError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
   bool entering(String id) {
     final seen = shown;
     if (seen == null || seen.contains(id)) return false;
@@ -800,14 +823,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   Future<void> send() async {
     final text = input.text;
     if (sending ||
-        text.trim().isEmpty ||
+        text.trim().isEmpty && attachments.isEmpty ||
         input.value.composing.isValid && !input.value.composing.isCollapsed) {
       return;
     }
     setState(() => sending = true);
     final active = session;
     try {
-      await active.send(text);
+      await active.send(text, images: List.of(attachments));
+      if (mounted) setState(attachments.clear);
       if (lastDraft == text) {
         lastDraft = '';
         if (mounted) input.clear();
@@ -1161,6 +1185,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                       animate: entering(turn.id),
                       quotes: quotes,
                       onQuoteTap: (id) => jumpTo(id, timeline),
+                      loadImage: (slot) =>
+                          session.backend.messageImage(turn.id, slot),
                     ),
                   );
                 }
@@ -1174,7 +1200,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        Bubble(text: message.text, owner: true),
+                        Bubble(
+                          text: message.text,
+                          owner: true,
+                          header: message.images.isEmpty
+                              ? null
+                              : MessageImages.local(images: message.images),
+                        ),
                         _Meta(
                           failed
                               ? '提交被拒绝 · ${message.error}'
@@ -1205,8 +1237,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (attachments.isNotEmpty)
+                  AttachmentStrip(
+                    key: ValueKey('attachments_${widget.bot.id}'),
+                    images: attachments,
+                    onRemove: (index) =>
+                        setState(() => attachments.removeAt(index)),
+                  ),
                 Container(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 5, 4),
+                  padding: const EdgeInsets.fromLTRB(4, 4, 5, 4),
                   decoration: BoxDecoration(
                     color: Warm.composer,
                     borderRadius: BorderRadius.circular(28),
@@ -1222,6 +1261,18 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
+                      IconButton(
+                        key: ValueKey('attach_${widget.bot.id}'),
+                        tooltip: '添加图片',
+                        color: Warm.textSoft,
+                        onPressed:
+                            !state.ready ||
+                                sending ||
+                                attachments.length >= maxImagesPerMessage
+                            ? null
+                            : attach,
+                        icon: const Icon(Icons.image_outlined),
+                      ),
                       Expanded(
                         child: CallbackShortcuts(
                           bindings: {
@@ -1442,13 +1493,14 @@ class Bubble extends StatelessWidget {
                 widthFactor: 1,
                 child: header,
               ),
-            Align(
-              alignment: Alignment.centerLeft,
-              widthFactor: 1,
-              // Core keeps segment text lossless, so a paragraph break stays on the
-              // end of the earlier bubble. Show it without leading/trailing blank lines.
-              child: content ?? Text(text.trim(), style: Bubble.textStyle),
-            ),
+            if (content != null || text.trim().isNotEmpty || header == null)
+              Align(
+                alignment: Alignment.centerLeft,
+                widthFactor: 1,
+                // Core keeps segment text lossless, so a paragraph break stays on the
+                // end of the earlier bubble. Show it without leading/trailing blank lines.
+                child: content ?? Text(text.trim(), style: Bubble.textStyle),
+              ),
             if (time != null)
               Text(
                 time!,
@@ -1491,8 +1543,12 @@ class TurnView extends StatelessWidget {
     this.animate = false,
     this.quotes,
     this.onQuoteTap,
+    this.loadImage,
   });
   final ChatTurn turn;
+
+  /// Fetches one attached image's preview; null shows none.
+  final Future<Uint8List> Function(int slot)? loadImage;
   final BotProfile? bot;
   final bool animate;
 
@@ -1535,6 +1591,13 @@ class TurnView extends StatelessWidget {
                 text: turn.redacted ? '此消息已删除' : turn.text,
                 owner: true,
                 time: sentAt(turn.createdAt),
+                header: switch ((turn.redacted, loadImage)) {
+                  (false, final load?) when turn.images.isNotEmpty =>
+                    MessageImages(
+                      images: [for (final slot in turn.images) load(slot)],
+                    ),
+                  _ => null,
+                },
               ),
             // Preview and final bubbles share keys by position, so the final
             // reply replaces the streamed text in place instead of flashing.
