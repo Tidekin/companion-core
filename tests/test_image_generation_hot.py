@@ -87,7 +87,7 @@ def test_previous_snapshot_keeps_original_timing_and_signature_after_restart(hot
     # Construct the pre-timing signed record, independently of the current snapshot writer.
     cfg = hot.settings
     raw = operator_config._raw(cfg)
-    for field in ("video_models", "meme_gallery_source", "meme_excluded_sha256"):
+    for field in ("video_models", "meme_gallery_source", "meme_excluded_sha256", "care"):
         raw.pop(field)  # These fields were absent from the original signed settings.
     fields = ("chat_time_labels", "conversation_policy", "style_live",
               "conversation_guidance", "image_generation")

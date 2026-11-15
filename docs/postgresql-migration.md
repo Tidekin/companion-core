@@ -6,7 +6,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0009_memory_time`。迁移链先应用既有的
+当前新建与离线导入目标为 `pg0010_care_plans`。迁移链先应用既有的
 `pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
 再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
@@ -20,6 +20,9 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 精度、计划/已发生/不确定标记及来源。原有事实保持空值，未知日期不补造；消息时间、
 入库时间和 `valid_from/valid_to` 继续各自使用原有列。来源擦除清空此元数据，旧备份恢复
 仍回放同一清理合同。离线导入器和发行包检查使用同一目标修订。
+`pg0010_care_plans` 新增带原消息、修改来源、版本、到期窗口及原有任务/投递引用的
+`care_plans` 表；既有 PostgreSQL 升级和 SQLite 离线导入均不从历史消息补建计划。
+行为、配置及验收范围见 [约好的关心](caring-followups.md)。
 
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
 `pg0003_native_chat`，保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite

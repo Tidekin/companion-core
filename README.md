@@ -83,6 +83,7 @@ uv run python -m companion life-worker
 - [停止窗口的交接恢复](docs/qq-beta/handoff-recovery.md)
 - [VPS / Bridge 部署](docs/deployment.md)
 - [主人控制台、配置版本与统一云预算](docs/owner-console.md)
+- [约好的关心：按主人安排在适合的时间询问进展](docs/caring-followups.md)
 - [当前运行拓扑、存储归属与模块边界](docs/architecture.md)
 - [验收结果与限制](docs/validation.md)、[回放数据](docs/replay-report.json)
 - [原始设计合同](docs/design-v0.3/implementation-m0-m1.md)、[接口合同](contracts/openapi.v1.yaml)

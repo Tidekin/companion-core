@@ -17,6 +17,7 @@ from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, ConfigDict, Field
 
 from companion import operator_config, shutdown
+from companion.care_protocol import CareConfig
 from companion.contracts import CoreError
 from companion.conversation_policy import ConversationPolicyConfig
 from companion.input_debounce import DebounceTiming
@@ -93,6 +94,10 @@ def _cold(settings, format_version=4):
     for name in ("meme_gallery_source", "meme_excluded_sha256"):
         if not values.get(name):
             values.pop(name, None)
+    # Retained signed startup identities predate the default caring configuration.
+    # Explicitly changed limits/switches still belong to the cold identity.
+    if values.get("care") == CareConfig().model_dump(mode="json"):
+        values.pop("care", None)
     # Unused video options did not exist in prior signed cold identities.
     values.pop("video_models", None)
     if values.get("paid_model") and not values["paid_model"].get("video_routes"):

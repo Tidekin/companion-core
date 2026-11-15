@@ -756,6 +756,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
         "expression_learning": "expression",
         "goals": "goals",
         "proactive": "proactive",
+        "care": "proactive",
         "social": "social",
         "exploration": "exploration",
         "tool.capability_status": "chat",
@@ -766,6 +767,9 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
         "tool.memory_recall": "memory",
         "tool.memory_history": "memory",
         "tool.goal_list": "goals",
+        "tool.care_plan_list": "proactive",
+        "tool.schedule_care": "proactive",
+        "tool.close_care": "proactive",
         "tool.reading_catalog": "content",
         "tool.read_content": "content",
         "tool.discover_content": "exploration",
@@ -892,6 +896,14 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
             paused=model_blocks + sharing,
             limits={"daily_limit": cfg.proactive_daily_limit},
         )
+    add(
+        "care", "按主人原话记录将来的安排，到合适时间简短关心进展。",
+        enabled=cfg.care.enabled and cfg.proactive_enabled,
+        paused=model_blocks + sharing,
+        limits={"daily_limit": cfg.care.daily_limit,
+                "jitter_seconds": cfg.care.jitter_seconds,
+                "useful_seconds": cfg.care.useful_seconds},
+    )
 
     readable, discoverable = [], []
     for adapter_id, policy in sorted(cfg.observation_adapters.items()):
@@ -1057,6 +1069,9 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
         "memory_recall": cfg.memory_enabled,
         "memory_history": cfg.memory_enabled,
         "goal_list": cfg.goals_enabled,
+        "care_plan_list": cfg.care.enabled and cfg.proactive_enabled,
+        "schedule_care": cfg.care.enabled and cfg.proactive_enabled,
+        "close_care": cfg.care.enabled and cfg.proactive_enabled,
         "search_meme_wiki": cfg.meme_wiki.enabled,
         "reading_catalog": cfg.content_enabled and cfg.observation_enabled,
         "read_content": cfg.content_enabled and cfg.observation_enabled,

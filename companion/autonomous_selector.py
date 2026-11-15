@@ -257,8 +257,13 @@ def native_selector(core, worker_id) -> RoundRobin:
 
         return UnitResult(turn_taking.flush(core.store, core.settings, core.clock()))
 
+    def care_due():
+        from companion import care
+
+        return care.flush(core.store, core.settings, core.clock())
+
     async def activity():
-        kinds, authority = ["life", "share", "commitment", "followup"], None
+        kinds, authority = ["life", "share", "commitment", "followup", "care"], None
         if owner_authority.required(core.store, core.settings):
             try:
                 view = owner_authority.current(core.store, core.settings, core.clock)
@@ -272,6 +277,7 @@ def native_selector(core, worker_id) -> RoundRobin:
                     ("share", "proactive"),
                     ("commitment", "goals"),
                     ("followup", "proactive"),
+                    ("care", "proactive"),
                 )
                 if purpose in view.policy.purposes
             ]
@@ -423,6 +429,7 @@ def native_selector(core, worker_id) -> RoundRobin:
                 "consolidation_schedule", core.consolidation.schedule_due, ("consolidation",)
             ),
             maintenance("commitment_expiry", core.goals.expire_commitments, ("goals",)),
+            maintenance("care_due", care_due, ("proactive",)),
             lane("wake", wake_goal, WAKE_PURPOSES, interval=MAINTENANCE_SECONDS),
             lane("goal", schedule_goal, ("goals", "exploration")),
             # One idle life_topic turn re-projects every topic source (seconds of SQL
