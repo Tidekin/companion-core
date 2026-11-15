@@ -154,3 +154,29 @@ def test_unknown_wording_attempt_is_not_retried(caring):
     core.clock.advance(1000)
     assert not care.flush(core.store, core.settings, core.clock())
     assert not lease(core) and len(core.model.calls) == 1
+
+
+def test_expired_uncertain_contact_releases_scan_slot_and_keeps_original_custody(caring):
+    core = caring
+    result, _ = queued(core)
+    assert run(run_notice(core))
+    item = lease(core)[0]
+    begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
+    delivery_result(
+        core.store,
+        core.settings,
+        item["message_id"],
+        DeliveryResult(lease_token=item["lease_token"], result="DELIVERY_UNCERTAIN"),
+        core.clock(),
+    )
+    usage = core.store.rows("SELECT * FROM model_usage")
+    core.clock.advance(core.settings.care.useful_seconds + 1)
+    assert not care.flush(core.store, core.settings, core.clock())
+    row = care._row(core.store, result["plan_id"])
+    assert row["state"] == "CLOSED" and row["reason_code"] == "EXPIRED"
+    assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
+    assert core.store.rows("SELECT * FROM model_usage") == usage
+    assert not lease(core) and len(core.model.calls) == 1
+    plan(core, 2)
+    core.clock.advance(3600)
+    assert care.flush(core.store, core.settings, core.clock())

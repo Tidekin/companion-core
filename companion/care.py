@@ -371,6 +371,8 @@ def flush(store, settings, now):
                     _close(store, row, "WORDING_CANCELLED", now)
                 elif row["notice_event"] and delivered(store, row["notice_event"]):
                     _close(store, row, "DELIVERED", now)
+                elif row["expires_at"] <= now:
+                    _close(store, row, "EXPIRED", now)
                 continue
             if row["expires_at"] <= now:
                 _close(store, row, "EXPIRED", now)
