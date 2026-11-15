@@ -837,6 +837,12 @@ class Memory:
                 'memories AS memories WHERE memories.memory_id = %s', (memory_id,))
             if not before:
                 raise CoreError("MEMORY_NOT_FOUND", 404)
+            if decision == "delete":
+                self.require_owner("owner")
+                self.ledger.delete_memory(s, memory_id, now)
+                s.audit("memory.owner_decision", memory_id, operation_id, now,
+                        decision=decision, channel="owner_console")
+                return {"memory_id": memory_id, "state": "FORGOTTEN"}
             roots = {e["event_id"] for e in s.rows(
                 'SELECT event_id FROM memory_evidence WHERE memory_id = %s', (memory_id,),
             )}

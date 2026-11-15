@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -15,6 +16,9 @@ class Wire implements HttpClientAdapter {
   final String name;
   final requests = <RequestOptions>[];
   bool redirect = false;
+  int sessionStatus = 200;
+  Completer<void>? loginEntered;
+  Future<void>? loginBarrier;
   String? eventData;
   @override
   Future<ResponseBody> fetch(
@@ -23,6 +27,23 @@ class Wire implements HttpClientAdapter {
     Future<void>? cancelFuture,
   ) async {
     requests.add(options);
+    if (options.path.endsWith('/session') &&
+        options.method == 'POST' &&
+        loginBarrier != null) {
+      loginEntered?.complete();
+      await loginBarrier;
+    }
+    if (options.path.endsWith('/session') &&
+        options.method == 'GET' &&
+        sessionStatus != 200) {
+      return ResponseBody.fromString(
+        '{"error":"CONSOLE_LOGIN_REQUIRED"}',
+        sessionStatus,
+        headers: {
+          'content-type': ['application/json'],
+        },
+      );
+    }
     if (options.path.endsWith('/events') && eventData != null) {
       return ResponseBody(
         Stream.fromIterable(
@@ -63,6 +84,158 @@ class Wire implements HttpClientAdapter {
 }
 
 void main() {
+  test(
+    'logout during login prevents a late cookie from restoring saved access',
+    () async {
+      final db = ChatDatabase(NativeDatabase.memory());
+      final vault = MemoryVault();
+      final barrier = Completer<void>();
+      final entered = Completer<void>();
+      final wire = Wire('racing')
+        ..loginBarrier = barrier.future
+        ..loginEntered = entered;
+      final bot = BotProfile(
+        id: 'racing',
+        name: 'racing',
+        endpoint: Uri.parse('https://racing.test'),
+      );
+      final repository = ChatRepository(db, CacheCipher(vault));
+      await repository.addBot(bot);
+      final backend = CoreBackend(
+        bot,
+        repository,
+        vault,
+        transport: Dio()..httpClientAdapter = wire,
+      );
+      final pending = backend.login('one-time-password');
+      final rejected = expectLater(
+        pending,
+        throwsA(
+          isA<BackendError>().having((e) => e.code, 'code', 'SESSION_CHANGED'),
+        ),
+      );
+      await entered.future;
+      await backend.logout();
+      barrier.complete();
+      await rejected;
+      expect(await vault.read('companion_racing_session'), isNull);
+      await backend.history();
+      expect(wire.requests.last.headers['Cookie'], isNull);
+      backend.close();
+      await db.close();
+    },
+  );
+  test('saved session resumes without a password, stays per-Bot and logout revokes it', () async {
+    final db = ChatDatabase(NativeDatabase.memory());
+    final vault = MemoryVault();
+    final repository = ChatRepository(db, CacheCipher(vault));
+    final bot = BotProfile(
+      id: 'persist',
+      name: 'persist',
+      endpoint: Uri.parse('https://persist.test'),
+    );
+    await repository.addBot(bot);
+    final first = CoreBackend(
+      bot,
+      repository,
+      vault,
+      transport: Dio()..httpClientAdapter = Wire('persist'),
+    );
+    await first.login('one-time-owner-password');
+    expect(
+      vault.values['companion_persist_session'],
+      isNot(contains('one-time-owner-password')),
+    );
+    first.close();
+    final wire = Wire('resumed');
+    final restored = CoreBackend(
+      bot,
+      repository,
+      vault,
+      transport: Dio()..httpClientAdapter = wire,
+    );
+    expect(await restored.resume(), isTrue);
+    await restored.refresh();
+    expect(wire.requests.first.method, 'GET');
+    expect(
+      wire.requests.first.headers['Cookie'],
+      'companion_owner_session=session-persist',
+    );
+    expect(wire.requests.last.headers['X-CSRF-Token'], 'csrf-resumed');
+    expect(
+      wire.requests.where(
+        (r) => r.path.endsWith('/session') && r.method == 'POST',
+      ),
+      isEmpty,
+    );
+    final other = CoreBackend(
+      BotProfile(id: 'other', name: 'other', endpoint: bot.endpoint),
+      repository,
+      vault,
+      transport: Dio()..httpClientAdapter = Wire('other'),
+    );
+    expect(await other.resume(), isFalse);
+    await restored.logout();
+    expect(wire.requests.last.method, 'DELETE');
+    expect(await vault.read('companion_persist_session'), isNull);
+    await restored.login('one-time-owner-password');
+    wire.redirect = true;
+    await expectLater(restored.logout(), throwsA(isA<BackendError>()));
+    expect(await vault.read('companion_persist_session'), isNull);
+    restored.close();
+    other.close();
+    await db.close();
+  });
+
+  test(
+    'expired or origin-mismatched saved sessions never silently log in',
+    () async {
+      final db = ChatDatabase(NativeDatabase.memory());
+      final vault = MemoryVault();
+      final repository = ChatRepository(db, CacheCipher(vault));
+      final bot = BotProfile(
+        id: 'expired',
+        name: 'expired',
+        endpoint: Uri.parse('https://expired.test'),
+      );
+      await repository.addBot(bot);
+      final first = CoreBackend(
+        bot,
+        repository,
+        vault,
+        transport: Dio()..httpClientAdapter = Wire('expired'),
+      );
+      await first.login('one-time-password');
+      first.close();
+      final stored = vault.values['companion_expired_session']!;
+      final wire = Wire('expired')..sessionStatus = 401;
+      final expired = CoreBackend(
+        bot,
+        repository,
+        vault,
+        transport: Dio()..httpClientAdapter = wire,
+      );
+      expect(await expired.resume(), isFalse);
+      expect(await vault.read('companion_expired_session'), isNull);
+      await vault.write('companion_expired_session', stored);
+      final otherOrigin = CoreBackend(
+        BotProfile(
+          id: bot.id,
+          name: bot.name,
+          endpoint: Uri.parse('https://changed.test'),
+        ),
+        repository,
+        vault,
+        transport: Dio()..httpClientAdapter = wire,
+      );
+      final before = wire.requests.length;
+      expect(await otherOrigin.resume(), isFalse);
+      expect(wire.requests.length, before);
+      expired.close();
+      otherOrigin.close();
+      await db.close();
+    },
+  );
   test('SSE handles fragmented UTF8, comments and multiline frames; session revocation stops it', () async {
     final db = ChatDatabase(NativeDatabase.memory());
     final vault = MemoryVault();

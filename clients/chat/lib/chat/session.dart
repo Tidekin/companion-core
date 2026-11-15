@@ -36,6 +36,7 @@ class BotSession {
     bool autoPoll = true,
   }) : clock = clock ?? DateTime.now {
     loaded = _publish('登录后就可以聊天');
+    unawaited(_resume());
     if (autoPoll) {
       _timer = Timer.periodic(const Duration(seconds: 2), (_) {
         final interval = state.pending.isEmpty ? 15 : 2;
@@ -208,6 +209,17 @@ class BotSession {
     });
   }
 
+  Future<void> _resume() => _network(() async {
+    final generation = _generation;
+    _active = true;
+    if (!await backend.resume()) {
+      _active = false;
+      return;
+    }
+    _guard(generation);
+    await _syncNow(full: true, generation: generation);
+  });
+
   Future<void> approve() {
     final generation = _generation;
     return _network(() async {
@@ -319,11 +331,21 @@ class BotSession {
   }
 
   Future<void> disconnect() async {
+    final generation = ++_generation;
     await _stopEvents();
-    _generation++;
+    if (_closed || generation != _generation) return;
     _review = null;
     _active = _connected = false;
-    await _publish('已断开连接，本地消息保留');
+    await _publish('正在退出登录，本地消息保留');
+    var status = '已退出登录，本地消息保留';
+    try {
+      await backend.logout();
+    } on BackendError {
+      status = '已退出本机登录；服务器会话注销未确认';
+    } catch (_) {
+      status = '退出登录未完成，请重试';
+    }
+    if (!_closed && generation == _generation) await _publish(status);
   }
 
   Future<void> close() async {

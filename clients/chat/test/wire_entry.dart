@@ -51,8 +51,15 @@ void main() {
     );
     try {
       await session.loaded;
-      await session.login(config['password'] as String);
-      if (session.state.review != null) await session.approve();
+      if (config['phase'] == 'initial') {
+        await session.login(config['password'] as String);
+        if (session.state.review != null) await session.approve();
+      } else if (!session.state.connected) {
+        await session
+            .watch()
+            .firstWhere((state) => state.connected)
+            .timeout(const Duration(seconds: 30));
+      }
       expect(session.state.connected, isTrue, reason: session.state.status);
       if (config['phase'] == 'initial') {
         await session.send('真实 TLS Flutter 客户端验收。');
@@ -64,14 +71,6 @@ void main() {
             'public_key': await backend.publicIdentity(),
           }),
         );
-        final values = <String, String>{};
-        for (final key in [
-          'companion_tls_device_seed',
-          'companion_tls_cache_key',
-        ]) {
-          values[key] = (await vault.read(key))!;
-        }
-        await secrets.writeAsString(jsonEncode(values));
       } else if (config['phase'] == 'stream') {
         await File('$directory/subscription-ready').writeAsString('ready');
         final partial = await session
@@ -116,6 +115,15 @@ void main() {
         );
         expect(session.state.pending, isEmpty);
       }
+      final values = <String, String>{};
+      for (final key in [
+        'companion_tls_device_seed',
+        'companion_tls_cache_key',
+        'companion_tls_session',
+      ]) {
+        values[key] = (await vault.read(key))!;
+      }
+      await secrets.writeAsString(jsonEncode(values));
     } finally {
       await session.close();
       await database.close();

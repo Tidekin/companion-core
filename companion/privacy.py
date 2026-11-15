@@ -227,6 +227,7 @@ class ErasureLedger:
                     raise ValueError("invalid sequence")
                 if record.get("target_type", "memory") not in {
                     "memory",
+                    "memory_only",
                     "event_batch",
                     "raw_retention",
                     "diary",
@@ -236,6 +237,11 @@ class ErasureLedger:
                     "mood_reset",
                 }:
                     raise ValueError("unknown erasure target")
+                if record.get("target_type") == "memory_only" and (
+                    not record["memory_id"] or record["memory_ids"] != [record["memory_id"]]
+                    or record["event_ids"]
+                ):
+                    raise ValueError("memory-only erasure requires one memory and no events")
                 if record.get("target_type") == "affect_reset":
                     from companion.affect import validate_reset_record
 
@@ -325,6 +331,36 @@ class ErasureLedger:
             stream.flush()
             os.fsync(stream.fileno())
         self.apply(store, record)
+
+    def delete_memory(self, store, memory_id, now):
+        """Delete one incorrect fact through the original durable replay coordinator."""
+        self._write_lock(store)
+        lines = self.read()
+        record = next((r for r in lines[1:] if r.get("target_type") == "memory_only"
+                       and r["memory_id"] == memory_id), None)
+        if record is None:
+            record = {"seq": len(lines), "erasure_id": uid("erase"), "memory_id": memory_id,
+                      "memory_ids": [memory_id], "event_ids": [], "at": now,
+                      "target_type": "memory_only"}
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(encode(record) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        self.apply(store, record)
+
+    def _apply_memory_only(self, store, record):
+        applied = store.one("SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id=%s",
+                            (record["erasure_id"],))
+        remaining = store.one(
+            "SELECT 1 FROM memories m WHERE memory_id=%s AND (status<>'FORGOTTEN' OR content<>'' "
+            "OR confidence<>0 OR fact_key<>'' OR EXISTS(SELECT 1 FROM memory_evidence e WHERE "
+            "e.memory_id=m.memory_id) OR EXISTS(SELECT 1 FROM memory_revisions r WHERE "
+            "r.memory_id=m.memory_id))",
+            (record["memory_id"],))
+        if not applied or remaining:
+            self.erase_memories(store, record["memory_ids"], record["at"])
+            advance_epoch(store)
+        self.record_complete(store, record)
 
     def reset_affect(self, store, request_id, now):
         from companion.affect import apply_feedback_reset, reset_record, reset_target
@@ -594,7 +630,7 @@ class ErasureLedger:
             previous = store.one("SELECT value FROM runtime_meta WHERE key = %s", (CONTRACT_KEY,))
             repair_contracts = not previous or previous["value"] != signature
             for record in lines[1:]:
-                if record.get("target_type") in {"affect_reset", "mood_reset"}:
+                if record.get("target_type") in {"affect_reset", "mood_reset", "memory_only"}:
                     # Rebuild the durable reset barrier even from an older backup.
                     self.apply(store, record)
                     continue
@@ -692,7 +728,7 @@ class ErasureLedger:
             self.apply_input_recall(store, record, repair=True)
             return
 
-        if record.get("target_type") in {"affect_reset", "mood_reset"}:
+        if record.get("target_type") in {"affect_reset", "mood_reset", "memory_only"}:
             self.apply(store, record)
             return
 
@@ -737,6 +773,10 @@ class ErasureLedger:
         from companion.observation import dependent_events
 
         self._write_lock(store)
+
+        if record.get("target_type") == "memory_only":
+            self._apply_memory_only(store, record)
+            return
 
         if record.get("target_type") == "input_recall":
             self.apply_input_recall(store, record)

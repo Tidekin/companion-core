@@ -50,7 +50,7 @@ class Mode(StrictModel):
 
 
 class MemoryChange(StrictModel):
-    decision: Literal["confirm", "correct", "forget"]
+    decision: Literal["confirm", "correct", "delete", "forget"]
     corrected_content: str | None = Field(default=None, min_length=1, max_length=500)
 
 

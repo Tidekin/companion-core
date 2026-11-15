@@ -29,7 +29,7 @@ class ConsoleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     public_origin: str = ""
-    session_seconds: int = Field(default=3600, ge=300, le=86400)
+    session_seconds: int = Field(default=31536000, ge=300, le=31536000)
     max_sessions: int = Field(default=5, ge=1, le=20)
 
     @model_validator(mode="after")

@@ -12,7 +12,7 @@
 [console]
 enabled = true
 public_origin = "https://console.example.test"
-session_seconds = 3600
+session_seconds = 31536000
 max_sessions = 5
 
 [cloud_budget]
@@ -24,6 +24,10 @@ fx_validity_seconds = 2592000
 `COMPANION_CONSOLE`、`COMPANION_CLOUD_BUDGET` 可用相应 JSON 对象覆盖配置。运行前执行既有 `python -m companion init` 应用迁移，API 与独立 worker 使用同一数据库和私有配置。TLS 反向代理应只发布控制台静态路径及 `/v1/console`，其他内部传输接口继续保留原有网络边界。公网访问必须先验证 DNS、证书、反向代理与浏览器实际 Origin；仅保存新地址不代表域名切换完成。
 
 `public_origin` 默认为空；启用控制台时必须显式给出规范 HTTPS Origin。
+会话默认有效一年，数据库保存会话摘要，浏览器使用持久化的 Secure/HttpOnly Cookie。
+API 重启后继续沿用；退出登录、控制凭据轮换和会话数量上限仍会撤销旧会话。
+已有部署显式设置的短有效期继续生效，升级时应将 `session_seconds` 改为上述值并重启 API；
+已有 Cookie 不会自动延长，需要重新登录一次取得新的有效期。
 单机 Nginx 示例见 [console.nginx.conf](../deploy/console.nginx.conf)。公开入口只有
 `/console/` 与 `/v1/console/`。静态请求先经 Core 的原生开关和凭据配置检查，成功后
 通过 `X-Accel-Redirect` 转至 Nginx `internal` location，再读取回环端口 8766 的
@@ -242,6 +246,16 @@ paid endpoint、窗口配置/凭据快照和 ModelClient 最终 HTTP 请求检�
 恢复备份后，费用历史可能不完整，控制台提示负责人核对独立费用证据。原记录和提示持续保留。
 
 ## 诊断与来源
+
+记忆列表和关系图用“鲸鲸”标注主人。每条记忆提供“删除这条记忆（记忆有误）”：
+`POST /v1/console/memories/{memory_id}/decision` 传入 `{"decision":"delete"}`，
+沿用主人会话、Origin、CSRF 与 `Idempotency-Key` 校验。仅该记忆的正文、修订和证据链接被清除，
+原始消息、日记、同源记忆和修订链上的其他记忆保留。“忘记”仍执行来源与衍生内容的完整遗忘。
+两者都返回 `FORGOTTEN`，删除范围由请求中的明确决定区分。
+
+仅删记忆复用现有 fsync 遗忘账本，记录 `target_type=memory_only`、一个 `memory_id` 和空
+`event_ids`。恢复旧备份和重新核验 COMPLETE 记录时，仍只删除这一条，不展开来源或衍生内容。
+恢复必须使用支持此范围的 Core 镜像；旧版会拒绝不认识的账本范围并停止，不得截断或改写账本。
 
 记忆列表 `GET /memories?view=conflicts|new|all` 分三类：“有冲突”是带 `needs_review`
 标记的记忆，需要主人判断哪个说法对；“新记住的”是来源仍有效、尚未确认且没有冲突的
