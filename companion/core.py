@@ -996,8 +996,8 @@ class Core(Runtime):
         from companion.transport import native_text
 
         if native_text(s, job["event_id"]):
-            rules.append("\n当前聊天设备只支持文字，请用文字回复；"
-                         "需要说明图片、语音或歌曲时直接描述。", dynamic=True)
+            rules.append("\n当前聊天设备能显示文字和表情包，不能播放语音或歌曲，"
+                         "也收不到你画的图；需要时直接用文字描述。", dynamic=True)
         mark("context_rules")
         selection = context_selection.References()
         bounded_text = private_life.strict(s, cfg)
@@ -1660,7 +1660,6 @@ class Core(Runtime):
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat" and not preview_only
                         and not voice_reply and not singing_reply and not mixed_reply
-                        and not text_only
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None

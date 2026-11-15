@@ -244,7 +244,7 @@ def _capture(store, settings, event_id, custody, authority):
     if (
         not event
         or event["redacted"]
-        or event["source"] != "qq.onebot"
+        or event["source"] not in {"qq.onebot", "native.chat"}
         or event["actor_id"] != "owner"
         or event["scope"] != "private"
         or event["owner_actor_id"] != "owner"
@@ -257,23 +257,43 @@ def _capture(store, settings, event_id, custody, authority):
         or value.get("input_sha256") != capture.input_sha256
         or value.get("authority") != capture.authority
         or capture.authority != authority
-        or identity
-        != [
-            settings.owner_qq_id,
-            settings.bot_qq_id,
-            event["platform_session_key"],
-            capture.protocol_epoch,
-        ]
-        or custody["capture_public_key"] != view.policy.capture.public_key
+        or custody_for(settings, event["source"], event["platform_session_key"], capture, view)
+        != {"identity": identity, "capture_public_key": custody["capture_public_key"]}
     ):
         raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+
+
+NATIVE_SESSION = "native:owner"
+
+
+def custody_for(settings, source, platform_session_key, capture, view):
+    """Who signed an asset's source message: the QQ Bridge capture or one native device.
+
+    The native identity names the device whose key in the capture's own grant
+    signed the message; a QQ identity keeps its original fields unchanged.
+    """
+    if source == "native.chat":
+        from companion_delivery_protocol.native_chat import source_identity
+
+        device_id = source_identity(capture.source_event_id)[0]
+        device = view.policy.native_devices.get(device_id)
+        if device is None or platform_session_key != NATIVE_SESSION:
+            raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+        return {"identity": ["native.chat", device_id, platform_session_key,
+                             capture.protocol_epoch],
+                "capture_public_key": device.public_key}
+    if source != "qq.onebot" or view.policy.capture is None:
+        raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+    return {"identity": [settings.owner_qq_id, settings.bot_qq_id, platform_session_key,
+                         capture.protocol_epoch],
+            "capture_public_key": view.policy.capture.public_key}
 
 
 def original_custody(store, settings, event_id):
     """Derive custody from the original signed capture, never a new grant."""
     event = store.one(
-        "SELECT platform_session_key FROM events JOIN conversations USING "
-        "(conversation_id) WHERE event_id = %s",
+        "SELECT events.source AS source, platform_session_key FROM events JOIN conversations "
+        "USING (conversation_id) WHERE event_id = %s",
         (event_id,),
     )
     saved = store.one("SELECT value FROM runtime_meta WHERE key = %s", ("owner_input:" + event_id,))
@@ -281,15 +301,8 @@ def original_custody(store, settings, event_id):
         raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
     value = strict_json(saved["value"])
     capture, view = owner_input.verify(store, settings, value.get("capture", {}))
-    custody = {
-        "identity": [
-            settings.owner_qq_id,
-            settings.bot_qq_id,
-            event["platform_session_key"],
-            capture.protocol_epoch,
-        ],
-        "capture_public_key": view.policy.capture.public_key,
-    }
+    custody = custody_for(settings, event["source"], event["platform_session_key"],
+                          capture, view)
     _capture(store, settings, event_id, custody, capture.authority)
     return custody
 

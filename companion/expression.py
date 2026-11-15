@@ -491,7 +491,9 @@ class ExpressionEngine:
                 raise CoreError("PRIVACY_CHANGED", 503)
             if event["conversation_id"] != conversation_id:
                 raise CoreError("EXPRESSION_CONVERSATION_MISMATCH", 400)
-            if not self.settings.expression_enabled or event["source"] == "native.chat":
+            # A native quote keeps its plain reply; otherwise a meme may follow the text.
+            if not self.settings.expression_enabled or (
+                    event["source"] == "native.chat" and quote is not None):
                 return enqueue(
                     self.store, event_id, conversation_id, reply, now, action=action, key=key,
                     quote=quote,

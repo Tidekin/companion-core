@@ -30,6 +30,9 @@ abstract interface class ChatBackend {
 
   /// The history preview of one image attached to the owner's message.
   Future<Uint8List> messageImage(String eventId, int slot);
+
+  /// The meme a delivered reply carries; refused once it is erased or excluded.
+  Future<Uint8List> replySticker(String messageId);
   Future<void> refresh();
   Future<Map<String, dynamic>> history({int? before});
   Future<List<Map<String, dynamic>>> status(String eventId);
@@ -184,6 +187,21 @@ class CoreBackend implements ChatBackend {
         _fetchBytes('/v1/console/chat/messages/$eventId/images/$slot')
             .catchError((Object error) {
               _messageImages.remove(key);
+              throw error;
+            });
+  }
+
+  final _stickers = <String, Future<Uint8List>>{};
+
+  @override
+  Future<Uint8List> replySticker(String messageId) {
+    if (!RegExp(r'^msg_[A-Za-z0-9_]{1,64}$').hasMatch(messageId)) {
+      return Future.error(const BackendError('NATIVE_IMAGE_NOT_FOUND'));
+    }
+    return _stickers[messageId] ??=
+        _fetchBytes('/v1/console/chat/replies/$messageId/sticker')
+            .catchError((Object error) {
+              _stickers.remove(messageId);
               throw error;
             });
   }

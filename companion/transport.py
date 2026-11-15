@@ -333,7 +333,8 @@ def reply_group(store, message_id, *, require_sent=False):
                 or not isinstance(content["text"], str)
                 or not mixed and not tail and not content["text"].strip()
                 or mixed and (source["kind"] != "chat" or row["action_type"] != "qq.private.reply")
-                or tail and (source["kind"] != "chat" or row["action_type"] != "qq.private.reply")
+                or tail and (source["kind"] != "chat" or row["action_type"] not in {
+                    "qq.private.reply", "native.private.reply"})
                 or part["content_sha256"] != digest(content)
             ):
                 raise ValueError("invalid part")

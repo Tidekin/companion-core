@@ -129,16 +129,21 @@ class ChatReply {
     required this.text,
     required this.state,
     this.quote,
+    this.sticker = false,
   });
   final String id;
   final String text;
   final String state;
   final ChatQuote? quote;
+
+  /// The reply carries a meme; its bytes are fetched through the session.
+  final bool sticker;
   factory ChatReply.fromJson(Map<String, dynamic> value) => ChatReply(
     id: value['message_id'] as String,
     text: value['text'] as String,
     state: value['state'] as String,
     quote: ChatQuote.fromJson(value['quote']),
+    sticker: value['sticker'] == true,
   );
 }
 

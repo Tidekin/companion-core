@@ -130,6 +130,11 @@ def diverse(ranked, categories):
 
 # Only a missing or irrelevant library is a reason to fetch more material.
 REPLENISH = frozenset({"NO_ASSETS", "NOT_RELEVANT"})
+# Usable assets below which an ordinary (ambient) chat may start one discovery.
+AMBIENT_LIBRARY_TARGET = 12
+# At most one ambient-started discovery per this many seconds, whatever its outcome.
+AMBIENT_REPLENISH_SECONDS = 6 * 3600
+REPLENISH_INTENTS = ("like", "playful", "celebrate", "comfort", "surprised", "morning", "sleep")
 
 
 def empty_reason(seen, facts, proofs, skipped, fallback, dropped):
@@ -291,15 +296,16 @@ class MemeRetrieval:
         ):
             raise CoreError("MEME_ASSET_UNAVAILABLE", 409)
         capture, original = self._capture(caption["event_id"])
-        custody = {
-            "identity": [
-                self.settings.owner_qq_id,
-                self.settings.bot_qq_id,
-                "onebot-direct:FriendMessage:" + self.settings.owner_qq_id,
-                capture.protocol_epoch,
-            ],
-            "capture_public_key": original.policy.capture.public_key,
-        }
+        source = s.one("SELECT source FROM events WHERE event_id = %s", (caption["event_id"],))
+        native = bool(source) and source["source"] == "native.chat"
+        try:
+            custody = meme_assets.custody_for(
+                self.settings, source["source"] if source else "",
+                meme_assets.NATIVE_SESSION if native
+                else "onebot-direct:FriendMessage:" + self.settings.owner_qq_id,
+                capture, original)
+        except ValueError as error:
+            raise CoreError("MEME_ASSET_UNAVAILABLE", 409) from error
         if (
             meme_assets.custody_digest(custody) != asset["custody_sha256"]
             or meme_assets.asset_id(custody, item) != asset_id
@@ -618,8 +624,12 @@ class MemeRetrieval:
             self._bounded(value)
             freeze_offer(s, job["event_id"], value)
             self.check(job)
-            if not query["intent"] or selected or ambient:
-                return  # Optional ambient misses are routine, never a replenish signal.
+            if not query["intent"] or selected:
+                return
+            # An ambient miss replenishes only a short library, at a slow pace; the
+            # discovery job itself runs later in idle time under its daily limits.
+            if ambient and not self._library_short():
+                return
             reason = empty_reason(seen, facts, proofs, skipped, fallback, dropped)
             s.audit(
                 "meme.offer_empty",
@@ -649,11 +659,27 @@ class MemeRetrieval:
                     meme_service.DiscoveryRequest(
                         event_id=job["event_id"],
                         reply_revision=event["reply_revision"],
-                        intent=query["intent"],
+                        intent=self._replenish_intent() if ambient else query["intent"],
                         provider=meme_service.acquisition_profile(self.settings)["provider"],
                     ),
                     origin_job=job,
                 )
+
+    def _replenish_intent(self):
+        """Ambient replenishment rotates through every intent so the library grows evenly."""
+        done = self.store.one("SELECT count(*) AS n FROM jobs WHERE kind = 'meme_discovery'")["n"]
+        return REPLENISH_INTENTS[done % len(REPLENISH_INTENTS)]
+
+    def _library_short(self):
+        s = self.store
+        excluded = list(self.settings.meme_excluded_sha256)
+        usable = s.one(
+            "SELECT count(*) AS n FROM meme_assets WHERE state = 'STAGED' AND NOT "
+            "(asset_sha256 = ANY(%s))", (excluded,))["n"]
+        recent = s.one(
+            "SELECT 1 FROM jobs WHERE kind = 'meme_discovery' AND created_at > %s LIMIT 1",
+            (after(self.clock(), -AMBIENT_REPLENISH_SECONDS),))
+        return usable < AMBIENT_LIBRARY_TARGET and not recent
 
     @staticmethod
     def _bounded(value):

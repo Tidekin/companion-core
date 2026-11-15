@@ -235,6 +235,14 @@ class DemoBackend implements ChatBackend {
     },
   );
 
+  @override
+  Future<Uint8List> replySticker(String messageId) async =>
+      demoStickers[messageId] ??
+      (throw const BackendError('NATIVE_IMAGE_NOT_FOUND'));
+
+  /// Meme bytes by reply id, standing in for Core's catalog.
+  final demoStickers = <String, Uint8List>{};
+
   /// Attached image bytes by "event/slot", standing in for Core's previews.
   final demoImages = <String, Uint8List>{};
 
