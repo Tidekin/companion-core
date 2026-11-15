@@ -16,7 +16,7 @@ from tests.support.care import caring as caring
 from tests.support.care import owner_job, plan
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
-from tests.test_owner_channel_history import move_to_native
+from tests.support.owner_channel import move_to_native
 
 
 def grant(core, tmp_path, *, history=False, proactive=True):

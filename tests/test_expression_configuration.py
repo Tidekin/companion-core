@@ -159,7 +159,7 @@ def test_expression_values_keep_contracts_and_still_obey_real_input_limit(hot, t
 def legacy_binding(core, job):
     # Independent reproduction of 0055's signed bytes, including its original cold fields.
     raw = operator_config._raw(core.settings)
-    for field in ("video_models", "meme_gallery_source", "meme_excluded_sha256"):
+    for field in ("video_models", "meme_gallery_source", "meme_excluded_sha256", "care"):
         raw.pop(field)  # These fields were absent from the original signed settings.
     for field in ("chat_time_labels", "operator_hot_reload", "conversation_guidance"):
         raw.pop(field)
