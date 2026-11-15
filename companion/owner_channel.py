@@ -34,15 +34,14 @@ def action(platform, kind):
 
 
 def private_conversations(store, conversation_id):
-    """Every private owner conversation when `conversation_id` is one of them, else itself."""
-    row = store.one("SELECT platform, scope, owner_actor_id FROM conversations WHERE "
-                    "conversation_id = %s", (conversation_id,))
-    if (row is None or row["platform"] not in SOURCES or row["scope"] != "private"
-            or row["owner_actor_id"] != "owner"):
-        return [conversation_id]
-    return [item["conversation_id"] for item in store.rows(
+    """Every private owner conversation when `conversation_id` is one of them, else itself.
+
+    One read: history collection runs inside a snapshot guard, so it stays minimal.
+    """
+    found = [row["conversation_id"] for row in store.rows(
         "SELECT conversation_id FROM conversations WHERE platform IN " + SQL_SOURCES
         + " AND scope = 'private' AND owner_actor_id = 'owner' ORDER BY conversation_id")]
+    return found if conversation_id in found else [conversation_id]
 
 
 def recent_sources(store, conversation_id, current_event_id, max_turns, *, cutoff_rowid=None):
@@ -53,16 +52,16 @@ def recent_sources(store, conversation_id, current_event_id, max_turns, *, cutof
     """
     from companion.dialogue_history import recent_context_sources
 
+    conversations = private_conversations(store, conversation_id)
+    if len(conversations) == 1:
+        return recent_context_sources(store, conversation_id, current_event_id, max_turns,
+                                      cutoff_rowid=cutoff_rowid)
     merged = []
-    for conversation in private_conversations(store, conversation_id):
+    for conversation in conversations:
         merged += recent_context_sources(store, conversation, current_event_id, max_turns,
                                          cutoff_rowid=cutoff_rowid)
-    if len(merged) <= 1:
-        return merged
-    order = {row["event_id"]: row["rowid"] for row in store.rows(
-        "SELECT event_id, record_sequence AS rowid FROM events WHERE event_id = ANY(%s)",
-        ([item["event_id"] for item in merged],))}
-    return sorted(merged, key=lambda item: order[item["event_id"]])[-max_turns:]
+    # Each source row carries its global event sequence; no further read is needed.
+    return sorted(merged, key=lambda item: item["record_sequence"])[-max_turns:]
 
 
 LABELS = {"qq.onebot": "在QQ上", "native.chat": "在客户端上"}
