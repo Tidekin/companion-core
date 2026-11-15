@@ -437,7 +437,10 @@ def attach(core, job, messages, sources, turns, current, snapshots, *, priority_
     groups = [(source["event_id"], next(message for message in reversed(turn)
                                        if message["role"] == "user"))
               for source, turn in zip(sources, turns, strict=True)
-              if any(message is turn[0] for message in messages)]
+              if any(message is turn[0] for message in messages)
+              # Another channel's history turns carry no images into this one.
+              and source.get("conversation_id", job["conversation_id"])
+              == job["conversation_id"]]
     groups.append((job["event_id"], current))
     selected, count = [], 0
     maximum = core.settings.paid_model.image_input.max_images_per_request

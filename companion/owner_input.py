@@ -9,7 +9,14 @@ from datetime import datetime
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from companion import cumulative, input_recall, owner_authority, paid_budget, reply_revision
+from companion import (
+    cumulative,
+    input_recall,
+    owner_authority,
+    owner_channel,
+    paid_budget,
+    reply_revision,
+)
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import OwnerCapture
 from companion.privacy import epoch
@@ -545,7 +552,7 @@ def history_for_owner(store, settings, clock, job, view):
 
 def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid, *,
                      batch_sources=False, read=None, purpose="chat"):
-    from companion.dialogue_history import recent_context_sources, turn_messages
+    from companion.dialogue_history import turn_messages
 
     if "history" not in view.policy.purposes:
         return []
@@ -555,7 +562,7 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
     # may select fewer recent pairs and leave room for episodic continuation.
     max_turns = min(scope.max_turns, settings.max_recent_messages // 2)
     candidates = read.history if (read is not None and read.history is not None
-                                  and cutoff_rowid is None) else recent_context_sources(
+                                  and cutoff_rowid is None) else owner_channel.recent_sources(
         store, job["conversation_id"], job["event_id"], max_turns, cutoff_rowid=cutoff_rowid
     )
     frozen = store.frozen_scope

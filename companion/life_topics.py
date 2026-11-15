@@ -301,11 +301,11 @@ def _source(store, settings, event_id, now):
     ):
         raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409)
     body, reading_fingerprint = json.loads(row["body_json"]), {}
-    if row["source"] == "qq.onebot":
+    if row["source"] in {"qq.onebot", "native.chat"}:
         text = body.get("text", "")
         if (
             row["actor_id"] != "owner"
-            or row["platform"] != "qq.onebot"
+            or row["platform"] != row["source"]
             or row["event_type"] not in {"message.received", "message.media_received"}
             or body.get("control_command")
             or body.get("diary_command")
@@ -853,7 +853,8 @@ class LifeTopics:
             self.delivery_material(job_id)
             existing = s.rows(
                 "SELECT message_id, state FROM outbox WHERE origin_event_id = %s AND "
-                "action_type = 'qq.private.proactive' ORDER BY record_sequence NULLS FIRST",
+                "action_type IN ('qq.private.proactive', 'native.private.proactive') ORDER BY "
+                "record_sequence NULLS FIRST",
                 (data["job"]["event_id"],),
             )
             if not existing:
@@ -877,6 +878,10 @@ class LifeTopics:
                     action="qq.private.proactive",
                 )
                 record(s, self.settings, self.clock, data["job"], messages)
+                from companion import native_delivery
+
+                # A native conversation has no Bridge lease; publish in this transaction.
+                native_delivery.publish(s, self.settings, self.clock, messages)
                 s.audit(
                     "life.draft_consumed",
                     job_id,
@@ -887,10 +892,13 @@ class LifeTopics:
                 )
                 existing = s.rows(
                     "SELECT message_id, state FROM outbox WHERE origin_event_id = %s "
-                    "AND action_type = 'qq.private.proactive' ORDER BY record_sequence NULLS FIRST",
+                    "AND action_type IN ('qq.private.proactive', 'native.private.proactive') "
+                    "ORDER BY record_sequence NULLS FIRST",
                     (data["job"]["event_id"],),
                 )
             for delivery in existing:
+                if delivery["state"] == "SENT":
+                    continue  # A published native message is already delivered.
                 try:
                     owner_delivery.check_delivery(
                         s, self.settings, self.clock, delivery["message_id"]
@@ -955,7 +963,8 @@ class LifeTopics:
                     'j.authority_json::jsonb=%s::jsonb AND NOT '
                     'EXISTS(SELECT 1 FROM outbox o WHERE '
                     'o.origin_event_id=j.event_id AND '
-                    "o.action_type='qq.private.proactive') AND NOT "
+                    "o.action_type IN ('qq.private.proactive','native.private.proactive')) "
+                    "AND NOT "
                     'EXISTS(SELECT 1 FROM social_autonomy_plans p WHERE '
                     "p.idempotency_key='life:qzone:' || j.job_id) AND NOT "
                     'EXISTS(SELECT 1 FROM runtime_meta m WHERE '
@@ -1099,7 +1108,8 @@ class LifeTopics:
         candidates = []
         if self.settings.life_loop.mode != "OFF":
             for row in self.store.rows(
-                "SELECT event_id FROM events WHERE redacted = 0 AND (source = 'qq.onebot' OR "
+                "SELECT event_id FROM events WHERE redacted = 0 AND (source IN ('qq.onebot', "
+                "'native.chat') OR "
                 "source LIKE 'observation.%%') AND NOT event_id IN (SELECT event_id FROM "
                 "life_topic_sources) ORDER BY record_sequence DESC NULLS LAST LIMIT 32"
             ):
@@ -1159,8 +1169,9 @@ class LifeTopics:
                 "events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
                 "events.redacted AS redacted, events.memory_processed AS memory_processed, "
                 "events.reply_revision AS reply_revision FROM events AS events WHERE "
-                "events.event_id = %s AND events.actor_id = 'owner' AND events.source = "
-                "'qq.onebot' AND events.redacted = 0 AND events.privacy_scope = 'private'",
+                "events.event_id = %s AND events.actor_id = 'owner' AND events.source IN "
+                "('qq.onebot', 'native.chat') AND events.redacted = 0 AND "
+                "events.privacy_scope = 'private'",
                 (source_event_id,),
             )
             if not topic or not event or topic["conversation_id"] != event["conversation_id"]:
@@ -1231,7 +1242,7 @@ class LifeTopics:
                 (
                     (
                         'SELECT event_id FROM events WHERE conversation_id = %s '
-                        "AND source = 'qq.onebot' AND actor_id = 'owner' AND "
+                        "AND source IN ('qq.onebot', 'native.chat') AND actor_id = 'owner' AND "
                         'record_sequence < (SELECT record_sequence AS rowid '
                         'FROM events WHERE event_id = %s) ORDER BY '
                         'record_sequence DESC NULLS LAST LIMIT 1'
@@ -1409,7 +1420,7 @@ class LifeTopics:
             rows = s.rows(
                 (
                     'SELECT e.event_id FROM events e WHERE e.redacted=0 AND '
-                    "e.ingested_at>=%s AND (e.source='qq.onebot' OR "
+                    "e.ingested_at>=%s AND (e.source IN ('qq.onebot','native.chat') OR "
                     "(e.source IN ('observation.bilibili',"
                     "'observation.heybox','observation.web',"
                     "'observation.qzone') AND EXISTS (SELECT 1 FROM "
@@ -1444,8 +1455,8 @@ class LifeTopics:
                             'd.event_id=a.event_id) SELECT e.conversation_id FROM '
                             'ancestors a JOIN events e USING(event_id) JOIN '
                             'conversations c USING(conversation_id) WHERE '
-                            "e.source='qq.onebot' AND e.actor_id='owner' AND "
-                            "e.redacted=0 AND c.platform='qq.onebot' AND "
+                            "e.source IN ('qq.onebot','native.chat') AND "
+                            "e.actor_id='owner' AND e.redacted=0 AND c.platform=e.source AND "
                             "c.scope='private' ORDER BY e.record_sequence DESC "
                             'LIMIT 1'
                         ),
@@ -1725,7 +1736,8 @@ class LifeTopics:
         if conversation["last_event_at"] > after(now, -self.settings.proactive_idle_seconds):
             raise CoreError(reply_revision.SUPERSEDED, 409)
         latest_owner = s.one(
-            "SELECT event_id FROM events WHERE conversation_id = %s AND source = 'qq.onebot' AND "
+            "SELECT event_id FROM events WHERE conversation_id = %s AND source IN "
+            "('qq.onebot', 'native.chat') AND "
             "actor_id = 'owner' AND event_type IN ('message.received', 'message.media_received') "
             "ORDER BY record_sequence DESC NULLS LAST LIMIT 1",
             (topic["conversation_id"],),
@@ -1858,7 +1870,12 @@ class LifeTopics:
         try:
             decision = LifeDecision.model_validate_json(_unfenced(text))
         except ValidationError as error:
-            raise CoreError("LIFE_INVALID_PROPOSAL", 400) from error
+            from companion.meme_caption_output import failure_detail
+
+            failure = CoreError("LIFE_INVALID_PROPOSAL", 400)
+            # Which contract field broke, never the proposal itself; audited on failure.
+            failure.safe_detail = failure_detail(error)
+            raise failure from error
         if (
             not set(decision.source_event_ids) <= set(data["source_events"])
             or (
