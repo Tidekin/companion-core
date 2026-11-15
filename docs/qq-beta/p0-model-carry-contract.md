@@ -421,6 +421,22 @@ and [SQLite transaction semantics](https://www.sqlite.org/lang_transaction.html)
 were rechecked on 2026-11-02. They preserve execution/settlement boundaries; the
 owner capability contract remains Core's own.
 
+## Existing private Life conversation revision
+
+For an existing `owner_private_history` Life grant, the native
+STOP/preview/activate path may change only `life_shadow.conversation_id`.
+The Life authorization evidence, purposes, source scope, quota, expiry and every
+other owner-policy field must remain identical. Runtime input and delivery still
+require the authenticated owner's private conversation. Historical UNKNOWN
+liabilities retain their original admission, full reservation and custody;
+nonterminal work or UNKNOWN under the immediately preceding authority still
+blocks a policy change. This does not rebind or replay old tasks.
+
+`tests/test_model_carry_life_revision.py` exercises the real HTTP control entry
+point, reversal through a later STOP/activation, original financial rows, scope
+drift and current UNKNOWN refusal. After this revision, recovery must retain a
+Core image that understands the bounded Life conversation transition.
+
 ## Closing an attempt that never started I/O
 
 A refusal after admission but before `io_started` (for example a background yield,

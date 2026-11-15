@@ -892,7 +892,7 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
 
 
 def purpose_revision(old, new):
-    """A scoped device, private-purpose or existing voice/meme permission revision."""
+    """A scoped device, private-purpose or existing capability permission revision."""
     if old == new:
         return
     before, after = old.model_dump(mode="json"), new.model_dump(mode="json")
@@ -902,6 +902,12 @@ def purpose_revision(old, new):
     if (old.native_devices != new.native_devices
             and {k: v for k, v in before.items() if k != "native_devices"}
             == {k: v for k, v in after.items() if k != "native_devices"}):
+        return
+    if (old.life_shadow is not None and new.life_shadow is not None
+        and old.life_shadow.source_scope == "owner_private_history"
+        and old.life_shadow.conversation_id != new.life_shadow.conversation_id
+        and after == {**before, "life_shadow": {**before["life_shadow"],
+                      "conversation_id": new.life_shadow.conversation_id}}):
         return
     for capability in ("voice", "meme"):
         fingerprint = new.capability_policies.get(capability)
