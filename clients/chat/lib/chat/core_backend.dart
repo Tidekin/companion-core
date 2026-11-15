@@ -17,7 +17,9 @@ class ConnectionReview {
 }
 
 abstract interface class ChatBackend {
+  Future<bool> resume();
   Future<ConnectionReview> login(String credential);
+  Future<void> logout();
   Future<void> approve(ConnectionReview review);
   Future<bool> canPrepare();
   Future<PendingMessage> prepare(
@@ -96,6 +98,29 @@ class CoreBackend implements ChatBackend {
   Map<String, dynamic>? _authority;
   String? _csrf;
   String? _cookie;
+  String get _sessionKey => 'companion_${bot.id}_session';
+  int _sessionGeneration = 0;
+  Future<void> _sessionWrites = Future.value();
+
+  void _checkSession(int generation) {
+    if (generation != _sessionGeneration) {
+      throw const BackendError('SESSION_CHANGED');
+    }
+  }
+
+  Future<void> _saveSession(String? value, int generation) {
+    final next = _sessionWrites.then((_) async {
+      if (generation != _sessionGeneration) return;
+      if (value == null) {
+        await vault.delete(_sessionKey);
+      } else {
+        await vault.write(_sessionKey, value);
+      }
+    });
+    _sessionWrites = next.catchError((Object _) {});
+    return next;
+  }
+
   CancelToken? _events;
   final _profiles = StreamController<CompanionProfile>.broadcast();
 
@@ -284,7 +309,9 @@ class CoreBackend implements ChatBackend {
     String path, {
     Object? body,
     Map<String, dynamic>? query,
+    Map<String, dynamic>? headers,
   }) async {
+    final generation = _sessionGeneration;
     if (!(path.startsWith('/v1/console/chat/') ||
         path == '/v1/console/session')) {
       throw const BackendError('CLIENT_CHAT_SCOPE_REQUIRED');
@@ -294,7 +321,7 @@ class CoreBackend implements ChatBackend {
         path,
         data: body,
         queryParameters: query,
-        options: Options(method: method, headers: _headers),
+        options: Options(method: method, headers: headers ?? _headers),
       );
       final status = response.statusCode ?? 503;
       final value = response.data is Map
@@ -307,6 +334,7 @@ class CoreBackend implements ChatBackend {
         );
       }
       if (path == '/v1/console/session' && method == 'POST') {
+        _checkSession(generation);
         final cookies = response.headers[HttpHeaders.setCookieHeader] ?? [];
         final cookie = cookies
             .map(Cookie.fromSetCookieValue)
@@ -325,7 +353,10 @@ class CoreBackend implements ChatBackend {
 
   @override
   Future<ConnectionReview> login(String credential) async {
+    final generation = ++_sessionGeneration;
     _cookie = _csrf = null;
+    await _saveSession(null, generation);
+    _checkSession(generation);
     final response = await _request(
       'POST',
       '/v1/console/session',
@@ -334,14 +365,77 @@ class CoreBackend implements ChatBackend {
         'device_public_key': await publicIdentity(),
       },
     );
+    _checkSession(generation);
     _csrf = response['csrf_token'] as String;
+    await _saveSession(
+      jsonEncode({
+        'origin': bot.endpoint.origin,
+        'cookie': _cookie,
+        'csrf': _csrf,
+      }),
+      generation,
+    );
+    _checkSession(generation);
     final preview = await _request(
       'POST',
       '/v1/console/chat/devices/preview',
       body: {'public_key': await publicIdentity()},
     );
+    _checkSession(generation);
     if (preview['registered'] == true) await _bind(preview);
     return ConnectionReview(preview['registered'] == true, preview);
+  }
+
+  @override
+  Future<bool> resume() async {
+    final generation = _sessionGeneration;
+    final saved = await vault.read(_sessionKey);
+    _checkSession(generation);
+    if (saved == null) return false;
+    try {
+      final value = jsonDecode(saved);
+      if (value is! Map ||
+          value['origin'] != bot.endpoint.origin ||
+          value['cookie'] is! String ||
+          value['csrf'] is! String ||
+          !RegExp(r'^companion_owner_session=[A-Za-z0-9_-]+$')
+              .hasMatch(value['cookie'] as String)) {
+        throw const FormatException('Invalid saved session');
+      }
+      _cookie = value['cookie'] as String;
+      _csrf = value['csrf'] as String;
+    } on FormatException {
+      _cookie = _csrf = null;
+      await _saveSession(null, generation);
+      return false;
+    }
+    try {
+      final session = await _request('GET', '/v1/console/session');
+      _checkSession(generation);
+      _csrf = session['csrf_token'] as String;
+      return true;
+    } on BackendError catch (error) {
+      if (error.status != 401 && error.status != 403) rethrow;
+      _checkSession(generation);
+      _cookie = _csrf = null;
+      await _saveSession(null, generation);
+      return false;
+    }
+  }
+
+  @override
+  Future<void> logout() async {
+    final headers = _headers;
+    final generation = ++_sessionGeneration;
+    _cookie = _csrf = null;
+    await _saveSession(null, generation);
+    try {
+      if (headers.containsKey(HttpHeaders.cookieHeader)) {
+        await _request('DELETE', '/v1/console/session', headers: headers);
+      }
+    } on BackendError catch (error) {
+      if (error.status != 401) rethrow;
+    }
   }
 
   Future<void> _bind(Map<String, dynamic> value) async {
@@ -545,6 +639,7 @@ class CoreBackend implements ChatBackend {
 
   @override
   void close() {
+    _sessionGeneration++;
     stopWatching();
     unawaited(_profiles.close());
     _cookie = _csrf = null;

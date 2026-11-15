@@ -201,6 +201,10 @@ class DemoBackend implements ChatBackend {
   @override
   void stopWatching() {}
   @override
+  Future<bool> resume() async => false;
+  @override
+  Future<void> logout() async {}
+  @override
   Future<ConnectionReview> login(String credential) async =>
       const ConnectionReview(true, {});
   @override

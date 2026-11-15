@@ -953,7 +953,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     ('sync', Icons.sync_rounded, '同步全部历史'),
     ('identity', Icons.key_rounded, '复制设备公钥'),
     ('discard', Icons.delete_sweep_outlined, '移除被拒绝的待发送消息'),
-    ('disconnect', Icons.link_off_rounded, '断开连接'),
+    ('disconnect', Icons.link_off_rounded, '退出登录'),
   ];
 
   Widget actionsButton() {

@@ -513,7 +513,8 @@ function acceptSession(value) {
 function updateSessionLeft() {
   if (!state.session) return;
   const left = Math.max(0, Math.round((Date.parse(state.session.expires_at) - Date.now()) / 60000));
-  $("#session-left").textContent = left > 0 ? "剩余 " + left + " 分钟" : "即将过期";
+  $("#session-left").textContent = left >= 1440 ? "剩余 " + Math.floor(left / 1440) + " 天"
+    : left > 0 ? "剩余 " + left + " 分钟" : "即将过期";
 }
 
 function renderNav() {
@@ -806,7 +807,7 @@ PAGES.activity = data => {
 
 /* ================= 记忆 ================= */
 const MEM_KIND = { preference: "偏好", fact: "事实", plan: "计划", habit: "习惯", relation: "关系", profile: "资料", event: "事件", communication: "沟通", goal: "目标" };
-const MEM_SUBJECT = { user: "关于你", owner: "关于你", self: "关于她", companion: "关于她" };
+const MEM_SUBJECT = { user: "关于鲸鲸", owner: "关于鲸鲸", self: "关于她", companion: "关于她" };
 function memSearch(v) { state.memQ = v; clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRoute({ reset: true }), 300); }
 const JARGON_STATE = { CANDIDATE: ["还在观察", "run"], INFERRED: ["已推测含义", "ok"], NOT_JARGON: ["是普通说法", "off"] };
 function jargonView(data) {
@@ -853,7 +854,7 @@ PAGES.memories = data => {
     oninput: e => { if (e.isComposing) return; memSearch(e.target.value); }, oncompositionend: e => memSearch(e.target.value) });
   const batch = state.memTab === "new" && state.memView === "list" ? items.filter(m => m.status === "HYPOTHESIS" && !m.detail?.needs_review) : [];
   const tabCount = k => k === "conflicts" ? state.nav?.review : 0;
-  return el("div", {}, head("记忆", "新记住的内容会自动保存并在对话中使用，不确认也可以。只有互相矛盾的说法需要你判断；忘记会同时清除来源和由此衍生的内容。"),
+  return el("div", {}, head("记忆", "新记住的内容会自动保存并在对话中使用，不确认也可以。记错时可以只删除这条记忆，保留原始消息和日记；忘记会同时清除来源和由此衍生的内容。"),
     el("div", { class: "toolbar" }, el("div", { class: "seg", role: "group" },
       [["conflicts", "有冲突"], ["new", "新记住的"], ["all", "全部"], ["recall", "召回测试"], ["jargon", "黑话"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
         n, tabCount(k) ? el("span", { class: "count" }, String(tabCount(k))) : null))),
@@ -870,7 +871,9 @@ PAGES.memories = data => {
           Array.isArray(d.evidence_ids) ? el("span", {}, "来自 " + d.evidence_ids.length + " 条消息") : null),
           d.needs_review ? el("div", { class: "alert mt" }, icon("warn"), el("span", {}, "这条记忆和其他说法可能冲突，需要你核对。")) : null),
         el("div", { class: "acts" }, m.status !== "CONFIRMED" ? btn("确认", () => memoryAction(m, "confirm"), { cls: "sm primary", symbol: "check" }) : null,
-          btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }), btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })));
+          btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }),
+          btn("删除这条记忆（记忆有误）", () => memoryAction(m, "delete"), { cls: "sm danger", symbol: "trash" }),
+          btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })));
     })) : empty(state.memQ ? "没有匹配的记忆" : state.memTab === "conflicts" ? "没有互相矛盾的记忆" : state.memTab === "new" ? "没有未确认的新记忆" : "还没有记忆",
       state.memQ ? "换个关键词试试。" : state.memTab === "conflicts" ? "新记住的内容在“新记住的”里，可以随时浏览。" : "新提取的记忆会显示在“新记住的”中，也可以在“全部”查看。"),
     state.memTab !== "jargon" && state.memTab !== "recall" && data.meta?.more ? el("p", { class: "note mt" }, "只显示最近 60 条，可以用搜索找更早的记忆。") : null);
@@ -907,20 +910,23 @@ function confirmMany(items) {
   openDialog("批量确认记忆", form);
 }
 function memoryAction(item, decision) {
-  const titles = { confirm: "确认这条记忆", correct: "纠正这条记忆", forget: "忘记这条记忆？" };
+  const titles = { confirm: "确认这条记忆", correct: "纠正这条记忆", delete: "删除这条记忆（记忆有误）", forget: "忘记这条记忆？" };
   const form = el("form", { class: "dlg-form" });
   let input;
   if (decision === "forget") form.append(el("p", {}, "“" + item.title + "”"), el("ul", { class: "consequence" },
     el("li", {}, "清除这条记忆和它引用的原始消息"), el("li", {}, "失效可能复述它的近期回复、摘要与自我观察"),
     el("li", {}, "从旧备份恢复时也会重新执行这次遗忘"), el("li", {}, "已经发到 QQ 的消息无法撤回")));
+  else if (decision === "delete") form.append(el("p", {}, "“" + item.title + "”"),
+    el("p", {}, "只删除这条记忆，原始消息、日记和其他记忆都保留。"),
+    el("p", { class: "muted" }, "从旧备份恢复时也会保留这次删除。"));
   else if (decision === "correct") {
     input = el("textarea", { class: "input", id: "memory-correction", required: true, rows: "4", maxlength: "500", value: item.title });
     form.append(el("p", { class: "muted" }, "会创建一条替代记录，原记录保留修订关系，不会被直接覆盖。"),
       el("label", { class: "field" }, el("span", {}, "原内容"), el("input", { class: "input", value: item.title, disabled: true })),
       el("label", { class: "field" }, el("span", {}, "正确的内容"), input));
   } else form.append(el("p", {}, "“" + item.title + "”"), el("p", { class: "muted" }, "确认会把这条记忆标为你已认可。"));
-  const submit = el("button", { type: "submit", class: "btn " + (decision === "forget" ? "danger solid" : "primary") },
-    decision === "forget" ? "忘记这条记忆" : decision === "correct" ? "保存纠正" : "确认");
+  const submit = el("button", { type: "submit", class: "btn " + (["delete", "forget"].includes(decision) ? "danger solid" : "primary") },
+    decision === "delete" ? "删除这条记忆（记忆有误）" : decision === "forget" ? "忘记这条记忆" : decision === "correct" ? "保存纠正" : "确认");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
     e.preventDefault();
@@ -928,7 +934,7 @@ function memoryAction(item, decision) {
     if (input && !body.corrected_content) { formError(form, "请填写正确的内容。"); return; }
     perform(form, submit, () => api.write("/memories/" + encodeURIComponent(item.id) + "/decision", body, "POST",
       r => typeof r.memory_id === "string" && typeof r.state === "string" && (r.memory_id === String(item.id) || decision === "correct" && String(r.supersedes) === String(item.id))),
-      async r => { closeDialog(); toast({ confirm: "已确认", correct: "已保存纠正", forget: "已忘记" }[decision] + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+      async r => { closeDialog(); toast(decision === "delete" ? "已删除这条记忆" : { confirm: "已确认", correct: "已保存纠正", forget: "已忘记" }[decision] + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
   });
   openDialog(titles[decision], form);
 }
@@ -2129,7 +2135,7 @@ const isSensitiveSub = k => /(_sha256|private_key|_socket|parser_image|token|sec
    并把引用同一条来源消息的记忆连起来；实体与关系抽取需要后端新增后再接入。 */
 const GPOS = new Map();
 function graphModel(items) {
-  const nodes = [{ id: "me", label: "你", type: "self" }], edges = [];
+  const nodes = [{ id: "me", label: "鲸鲸", type: "self" }], edges = [];
   const herItems = items.filter(m => ["self", "companion"].includes(m.detail?.subject));
   if (herItems.length) { nodes.push({ id: "her", label: "她", type: "her" }); edges.push({ a: "me", b: "her", kind: "root" }); }
   const kinds = new Map();
@@ -2194,7 +2200,7 @@ function graphSummary(items, nodes, edges) {
   return el("div", {}, el("h3", {}, "关系概览"), el("div", { class: "gstats" },
       el("div", {}, el("b", { class: "num" }, String(items.length)), el("span", {}, "条记忆")), el("div", {}, el("b", { class: "num" }, String(kinds.length)), el("span", {}, "个类型")),
       el("div", {}, el("b", { class: "num" }, String(items.filter(m => m.status !== "CONFIRMED").length)), el("span", {}, "条待确认"))),
-    el("p", { class: "note mt" }, "点一个节点，右边会列出相关的记忆，可以直接确认、纠正或忘记。"),
+    el("p", { class: "note mt" }, "点一个节点，右边会列出相关的记忆，可以直接确认、纠正、删除或忘记。"),
     el("h4", { class: "gsub" }, "各类型"), el("ul", { class: "gtop" }, kinds.map(k => el("li", {}, el("button", { type: "button", onclick: () => pick(k.id) }, el("i"), k.label,
       el("span", { class: "num" }, String(nodes.filter(n => n.cat === k.id).length)))))));
 }
@@ -2207,7 +2213,9 @@ function graphPanel(sel, nodes, edges) {
     mems.map(m => el("article", { class: "gmem" + (m.status !== "CONFIRMED" ? " review" : "") }, el("b", {}, m.title),
       el("div", { class: "meta" }, tag(m.status), m.detail?.memory_kind ? el("span", { class: "chip" }, MEM_KIND[m.detail.memory_kind] || "其他") : null, el("span", { class: "note" }, fmtDate(m.occurred_at))),
       el("div", { class: "acts" }, m.status !== "CONFIRMED" ? btn("确认", () => memoryAction(m, "confirm"), { cls: "sm primary", symbol: "check" }) : null,
-        btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }), btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })))));
+        btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }),
+        btn("删除这条记忆（记忆有误）", () => memoryAction(m, "delete"), { cls: "sm danger", symbol: "trash" }),
+        btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })))));
 }
 function pick(id) { state.gSel = id; rerender(); if (id) $(`[data-gn="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }); }
 function bindGraphEvents(svg, edges) {

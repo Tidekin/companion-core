@@ -75,5 +75,9 @@ def test_flutter_tls_entry_worker_and_restart_without_qq(core, tmp_path):
             assert (directory / 'client-saw-preview').exists()
             await client('restart')
             assert len(core.store.rows('SELECT 1 FROM model_usage')) == 1
+            # Initial login plus the explicit logout/login inside the live stream.
+            # Both separate client-process restarts restore their saved session.
+            assert core.store.one("SELECT count(*) AS n FROM audit_log WHERE "
+                "action='console.login'")["n"] == 2
 
     run(scenario())
