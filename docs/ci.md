@@ -286,6 +286,40 @@ from summed job/case time and queue delays. Each shard adds runner startup and
 session-fixture overhead; any shard-count change must update the matrix, partitioner,
 reuse job set and consumer-tool pin together.
 
+### November 15 rerun and balance audit
+
+Full run [43675753132](https://github.com/Tidekin/companion-core/actions/runs/43675753132)
+completed in 21m38s. The displayed 76m33s for
+[43698900330](https://github.com/Tidekin/companion-core/actions/runs/43698900330)
+includes an initial failed attempt, the wait before a complete rerun, and runner
+queues. Its first attempt took 22m20s; the second attempt's longest runner queue
+was 14m31s while another full workflow was active. Measure each attempt's
+execution and queue separately from the run's creation-to-completion interval.
+
+All sixteen successful JUnit reports from that run contain the same 11,759 cases
+per platform across 760 files, including five previously unmeasured files. The
+existing refresh CLI produces these summed case-load estimates on those reports:
+
+| Platform | Previous per-shard case seconds | Refreshed per-shard case seconds |
+|---|---|---|
+| Ubuntu | 1344 / 1284 / 946 / 909 / 1210 / 1260 / 1280 / 950 | 1190 / 1223 / 1165 / 1179 / 1116 / 1033 / 1123 / 1155 |
+| Windows | 1652 / 2328 / 1645 / 2306 / 1413 / 2251 / 2138 / 1929 | 1919 / 1922 / 1968 / 1968 / 1961 / 1969 / 1983 / 1972 |
+
+The maximum Windows case load falls by 14.8% in this replay; the candidate's
+full CI receipt supplies its actual workflow time. Eight shards per platform,
+two workers, complete test collection and the 23-job evidence contract remain.
+The existing recorded partitioner, xdist and DSH research still applies.
+
+Two test-infrastructure repairs address failures that triggered complete reruns.
+The owned-history check now verifies every original source's recall check and
+allows each source at most three checks when native snapshot churn discards both
+bounded batches before the conservative pass. An unchanged snapshot still
+requires exactly one check per source and two custody checks. The signed
+memory/history HTTP fixture uses a thirty-second request watchdog;
+all admission, source, permission, accounting and
+independent-worker assertions remain. Real foreign commits and a delayed HTTP
+operation reproduce the previous failures for qualification.
+
 ### November 14 concurrency and redundant-work review
 
 The previous full run took 39m43s. Its 11,739 Windows cases totaled 16,519 case

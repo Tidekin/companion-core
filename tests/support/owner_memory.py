@@ -34,7 +34,7 @@ async def environment(core, tmp_path, *, history=True, additional_purposes=(),
     reference = activate(core, policy, revision=1, operation="memory-context-authority")[0][
         "authority"]
     async with real_core_http(core) as port, httpx.AsyncClient(
-        base_url=f"http://127.0.0.1:{port}", trust_env=False,
+        base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=30,
         headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
     ) as client:
         async def admit(number, text, *, ingest_event=True):
