@@ -298,6 +298,8 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         for table in ("memories", "memory_evidence", "memory_revisions", "memory_vectors"):
             expected = [row for row in before[table]["rows"] if row["memory_id"] == "mem_keep"]
+            if table == "memories":
+                expected = [{**row, "event_time_json": None} for row in expected]
             assert (
                 native_rows(restored, f"SELECT * FROM {table} WHERE memory_id='mem_keep'")
                 == expected

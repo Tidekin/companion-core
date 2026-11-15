@@ -165,7 +165,9 @@ def seed_passages(doc, query, budget=SECOND_HOP_CHARS):
                 break
     if not fragments or budget <= 0:
         return []
-    scores = lexical(query, [part["text"] for part in fragments])
+    # A single fitting passage needs no local ranking. In particular, a short
+    # whole document already has its grams in parts()'s shared document bags.
+    scores = lexical(query, [part["text"] for part in fragments]) if len(fragments) > 1 else [0.]
     selected, used = [], 0
     for index in sorted(range(len(fragments)), key=lambda i: (-scores[i], i)):
         part = fragments[index]
