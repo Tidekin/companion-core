@@ -68,7 +68,7 @@ class ConversationRead:
 
     def prepare(self, core, job, snapshots, view):
         """Batch only the current input and the history candidates the guard will consume."""
-        from companion.dialogue_history import recent_context_sources
+        from companion import owner_channel
 
         self._check()
         self.history = None
@@ -76,7 +76,7 @@ class ConversationRead:
         if ("history" in view.policy.purposes
             and any(item["kind"] == "history" and item["proof"] for item in snapshots)):
             limit = min(view.policy.history.max_turns, core.settings.max_recent_messages // 2)
-            self.history = recent_context_sources(
+            self.history = owner_channel.recent_sources(
                 self.store, job["conversation_id"], job["event_id"], limit)
             keys.extend(item["event_id"] for item in self.history)
         self.sources(keys)

@@ -1,7 +1,12 @@
 from companion.contracts import LeaseRequest
 from companion.model import ModelResponse
 from companion.transport import lease_deliveries
-from companion.turn_taking import TurnTakingConfig
+from companion.turn_taking import (
+    FOLLOW_UP_RULES,
+    SKIP,
+    TurnTakingConfig,
+    follow_up_answer,
+)
 from tests.conftest import ingest, run
 
 
@@ -12,7 +17,12 @@ class Model:
     async def complete(self, messages, scenario):
         self.calls.append((messages, scenario))
         queue = self.chat if scenario == "chat" else self.activity
-        return ModelResponse(queue.pop(0) if queue else "嗯嗯，我也这么觉得。", 100, 20, 40)
+        text = queue.pop(0) if queue else "嗯嗯，我也这么觉得。"
+        # Tests script what a follow-up says; the model answers in the follow-up shape.
+        if (scenario == "activity" and FOLLOW_UP_RULES in messages[0]["content"]
+                and not text.lstrip().startswith("{")):
+            text = follow_up_answer(None if text == SKIP else text)
+        return ModelResponse(text, 100, 20, 40)
 
 
 def enable(core, **values):
