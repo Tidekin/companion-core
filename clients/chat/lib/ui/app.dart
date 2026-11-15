@@ -1187,6 +1187,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                       onQuoteTap: (id) => jumpTo(id, timeline),
                       loadImage: (slot) =>
                           session.backend.messageImage(turn.id, slot),
+                      loadSticker: session.backend.replySticker,
                     ),
                   );
                 }
@@ -1544,8 +1545,12 @@ class TurnView extends StatelessWidget {
     this.quotes,
     this.onQuoteTap,
     this.loadImage,
+    this.loadSticker,
   });
   final ChatTurn turn;
+
+  /// Fetches the meme a reply carries; null shows none.
+  final Future<Uint8List> Function(String messageId)? loadSticker;
 
   /// Fetches one attached image's preview; null shows none.
   final Future<Uint8List> Function(int slot)? loadImage;
@@ -1571,7 +1576,10 @@ class TurnView extends StatelessWidget {
                 'CANCELLED': '这条回复已取消',
               }[turn.state] ??
               turn.state;
-    final replies = turn.replies.where((r) => r.text.isNotEmpty).toList();
+    // A meme-only part has no text but is still a bubble.
+    final replies = turn.replies
+        .where((r) => r.text.isNotEmpty || r.sticker && loadSticker != null)
+        .toList();
     final preview = turn.redacted || replies.isNotEmpty ? null : turn.preview;
     final previewLines = preview == null
         ? const <String>[]
@@ -1608,6 +1616,9 @@ class TurnView extends StatelessWidget {
                 child: Bubble(
                   text: reply.text,
                   bot: index == 0 ? bot : null,
+                  content: reply.sticker && reply.text.trim().isEmpty
+                      ? MessageImages(images: [loadSticker!(reply.id)])
+                      : null,
                   // A message the companion started carries its own send time.
                   time: turn.proactive && index == 0
                       ? sentAt(turn.createdAt)

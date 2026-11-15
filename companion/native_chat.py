@@ -179,7 +179,41 @@ def _reply(item, erased):
     # Only a reference: the client shows the quoted text from its own synchronized copy.
     if visible and content.get("quote"):
         value["quote"] = content["quote"]
+    # A meme's bytes are read per request, so an erased or excluded asset disappears.
+    if visible and content.get("image"):
+        value["sticker"] = True
     return value
+
+
+def sticker(context, message_id):
+    """The meme a delivered native reply carries, re-resolved from its frozen offer."""
+    from companion import owner_delivery
+    from companion.meme_core import MemeCaptionService
+    from companion.meme_retrieval import AssetBinding, MemeRetrieval, core_owned
+
+    device_view(context)
+    store = context.store
+    row = store.one(
+        "SELECT o.message_id, o.origin_event_id, o.action_type, o.state, o.content_json "
+        "FROM outbox o JOIN events e ON e.event_id = o.origin_event_id JOIN conversations c "
+        "ON c.conversation_id = o.conversation_id WHERE o.message_id = %s AND "
+        "o.action_type = 'native.private.reply' AND o.state = 'SENT' AND e.redacted = 0 AND "
+        "c.platform = 'native.chat' AND c.platform_session_key = %s AND c.scope = 'private' "
+        "AND c.owner_actor_id = 'owner'", (message_id, SESSION))
+    image = json.loads(row["content_json"]).get("image") if row else None
+    saved = store.one("SELECT value FROM runtime_meta WHERE key = %s",
+                      (owner_delivery.DELIVERY + message_id,)) if image else None
+    if not image or not saved or not core_owned(context.settings):
+        raise CoreError("NATIVE_IMAGE_NOT_FOUND", 404)
+    job = store.one("SELECT * FROM jobs WHERE job_id = %s",
+                    (json.loads(saved["value"])["job_id"],))
+    retrieval = MemeRetrieval(MemeCaptionService(store, context.settings, None, context.clock))
+    try:
+        binding = AssetBinding.model_validate(retrieval.selected(job, image))
+        _, _, _, _, original = retrieval._resolve(binding.asset_id, binding.caption_job_id)
+    except (CoreError, ValueError):
+        raise CoreError("NATIVE_IMAGE_NOT_FOUND", 404) from None
+    return original.data, original.mime_type
 
 
 _HISTORY = (

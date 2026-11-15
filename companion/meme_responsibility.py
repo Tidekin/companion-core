@@ -41,7 +41,8 @@ def _lineage(store, job_id):
             'e ON e.event_id = j.event_id JOIN conversations AS v ON v.conversation_id = '
             'e.conversation_id WHERE c.job_id = %s', (job_id,),
         )
-        if (not row or row["kind"] != "meme_caption" or row["source"] != "qq.onebot"
+        if (not row or row["kind"] != "meme_caption"
+            or row["source"] not in {"qq.onebot", "native.chat"}
             or row["event_type"] != "message.received" or row["actor_id"] != "owner"
             or row["scope"] != "private" or row["owner_actor_id"] != "owner"
             or not store.one('SELECT 1 FROM job_sources WHERE job_id = %s AND event_id = %s',

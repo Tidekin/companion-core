@@ -242,6 +242,13 @@ def register_routes(app, settings, prefix, auth, authenticate):
         return Response(data, media_type=mime, headers={
             "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
+    @app.get(prefix + "/replies/{message_id}/sticker", dependencies=auth)
+    async def reply_sticker(message_id: str, request: Request):
+        data, mime = await execute(request, lambda ctx, check: native_chat.sticker(
+            ctx, message_id), readonly=True)
+        return Response(data, media_type=mime, headers={
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
     @app.get(prefix + "/messages/{event_id}", dependencies=auth)
     async def status(event_id: str, request: Request):
         return await execute(request, lambda ctx, check: native_chat.history(
