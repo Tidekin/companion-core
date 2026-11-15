@@ -365,3 +365,8 @@ Core 继续要求每份衍生内容有当前有效来源；摘要、观察或画
 
 本次隔离 PostgreSQL 已停止。自动审批审查拒绝递归删除测试目录，仅返回
 `blocked by policy`，因此 `.local/verification/postgres/` 和相应辅助文件保留，未绕过策略。
+
+合并前完整 CI 另补齐两项回归合同：历史备份恢复明确断言新增的 `event_time_json`
+为空；只含一个可用片段的短文档不再重复分词，维持现有文档词袋复用。对应 56 项相关
+回归通过。主分支既有控制台错误状态码断言单独修复，最终合并资格以
+[PR #475 的 checks 汇总](https://github.com/Tidekin/companion-core/pull/475/checks)为准。
