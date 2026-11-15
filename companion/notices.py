@@ -86,6 +86,10 @@ def _source(store, event_id):
 
 
 def _material(store, settings, kind, ref, now, *, mood_at=None):
+    if kind == "care":
+        from companion import care
+
+        return care.material(store, settings, ref, now)
     if kind == "life":
         from companion.life_topics import LifeTopics
 
@@ -243,6 +247,8 @@ def schedule(store, settings, kind, ref, conversation_id, now):
         body = {"text": "", "notice": {"kind": kind, "ref": ref, "material_sha256": sha(data)}}
         if kind == "life":
             body["life_material"] = data
+        elif kind == "care":
+            body["care_material"] = data
         store.insert(
             "events",
             event_id=event_id,
@@ -308,7 +314,7 @@ def validate(store, settings, job, now):
     if (
         not isinstance(value, dict)
         or set(value) != {"kind", "ref", "material_sha256"}
-        or value["kind"] not in {"share", "commitment", "life", "followup"}
+        or value["kind"] not in {"share", "commitment", "life", "followup", "care"}
         or not isinstance(value["ref"], str)
         or not 1 <= len(value["ref"]) <= 128
         or not isinstance(value["material_sha256"], str)
@@ -331,7 +337,16 @@ def validate(store, settings, job, now):
         return LifeTopics(store, settings, lambda: now).delivery_material(job["job_id"])
     frozen = json.loads(current["body_json"]).get("life_material", {})
     mood_at = (frozen.get("decision_context", {}).get("mood") or {}).get("evaluated_at")
-    data = _material(store, settings, value["kind"], value["ref"], now, mood_at=mood_at)
+    from companion import care
+
+    if (value["kind"] == "care" and current["job_state"] == "SUCCEEDED"
+        and care.delivered(store, current["event_id"])):
+        # A later plan update cannot rewrite an already acknowledged contact's evidence.
+        data = json.loads(current["body_json"])["care_material"]
+        if data["source_events"] != {key: _source(store, key) for key in data["source_events"]}:
+            raise CoreError("NOTICE_SOURCE_CHANGED", 409)
+    else:
+        data = _material(store, settings, value["kind"], value["ref"], now, mood_at=mood_at)
     dependencies = {
         row["source_event_id"]
         for row in store.rows(
@@ -470,6 +485,15 @@ def messages(store, settings, job, now, principles, *, data=None, prior_contacts
         time_messages.append(
             time_context.now_message(now, settings.timezone, reference="本次生活判断的时间")
         )
+    elif data["kind"] == "care":
+        from companion.care import RULES as CARE_RULES
+
+        rules = CARE_RULES + SEMANTIC_RULES
+        payload["plan"] = {**data["plan"], "check_at": time_context.stamp(
+            data["plan"]["check_at"], settings.timezone)}
+        payload["due_at"] = time_context.stamp(data["due_at"], settings.timezone)
+        time_messages.append(time_context.now_message(
+            now, settings.timezone, reference="这次关心的当前时间"))
     elif data["kind"] == "followup":
         from companion.turn_taking import FOLLOW_UP_RULES, silent_minutes
 
@@ -548,6 +572,11 @@ def parts(store, settings, job, text, now):
 def record(store, settings, job, message_ids, now):
     value = reference(job)
     if not value:
+        return
+    if value["kind"] == "care":
+        from companion import care
+
+        care.record(store, value["ref"], message_ids, now)
         return
     if value["kind"] in {"life", "followup"}:
         return

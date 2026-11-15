@@ -14,10 +14,11 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0009_memory_time"
+TARGET_REVISION = "pg0010_care_plans"
 # Native-only tables created after the SQLite era; an offline import leaves them empty.
 NATIVE_ONLY_TABLES = frozenset({"companion_profile", "companion_profile_settings",
-                                "companion_profile_changes", "companion_avatar_assets"})
+                                "companion_profile_changes", "companion_avatar_assets",
+                                "care_plans"})
 
 
 def migrate_sqlite(path, revision="head"):

@@ -301,6 +301,25 @@ def test_pre_gallery_default_snapshot_survives_restart(hot, monkeypatch):
         hot.context(job)
 
 
+def test_pre_care_default_snapshot_survives_and_changed_limits_still_fence(hot, monkeypatch):
+    original = operator_config._raw
+
+    def before_care(settings, *, reveal=True):
+        value = original(settings, reveal=reveal)
+        if isinstance(settings, Settings):
+            value.pop("care", None)
+        return value
+
+    with monkeypatch.context() as old:
+        old.setattr(operator_config, "_raw", before_care)
+        job = task(hot)
+        baseline = runtime_config.check(hot.store, hot.settings, "job:" + job["job_id"])
+    assert runtime_config.check(hot.store, hot.settings, "job:" + job["job_id"]) == baseline
+    hot.settings.care.daily_limit = 1
+    with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
+        hot.context(job)
+
+
 def test_owner_revocation_cannot_activate_a_new_runtime_version(hot, tmp_path):
     capture, _ = captured(hot, tmp_path)
     old_contract = paid_budget.snapshot(hot.settings)

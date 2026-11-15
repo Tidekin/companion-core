@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from companion.bili_video_config import BiliVideoConfig
+from companion.care_protocol import CareConfig
 from companion.cloud_budget import CloudBudgetConfig
 from companion.conversation_policy import ConversationPolicyConfig
 from companion.cumulative import CumulativeApproval
@@ -443,6 +444,7 @@ class Settings(BaseModel):
     _operator_config_error: str | None = PrivateAttr(default=None)
     operator_hot_reload: bool = True
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
+    care: CareConfig = Field(default_factory=CareConfig)
     cloud_budget: CloudBudgetConfig = Field(default_factory=CloudBudgetConfig)
     owner_qq_id: str
     bot_qq_id: str

@@ -268,6 +268,8 @@ class Store:
             "events": {"event_id", "redacted", "memory_processed", "fingerprint", "reply_revision"},
             "jobs": {"lease_token", "state", "context_tracked", "authority_json"},
             "job_sources": {"job_id", "event_id"},
+            "care_plans": {"plan_id", "source_event_id", "intent_event_id", "version", "state",
+                           "detail_json", "due_at", "expires_at", "job_id", "message_id"},
             "rem_records": {
                 "rem_id",
                 "job_id",

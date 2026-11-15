@@ -66,7 +66,8 @@ def proactive_counts(store, settings, now):
             (
                 'WITH reservations(created_at) AS (SELECT j.created_at '
                 'FROM jobs j JOIN events e USING(event_id) WHERE '
-                "j.kind='activity' AND COALESCE((CASE WHEN e.body_json "
+                "j.kind='activity' AND j.idempotency_key NOT LIKE 'notice:care:%%' "
+                "AND COALESCE((CASE WHEN e.body_json "
                 "IS JSON THEN (e.body_json::json#>>'{notice,kind}') "
                 "END),'') NOT IN ('commitment','life','followup') AND "
                 "NOT (j.state='SUCCEEDED' AND EXISTS (SELECT 1 FROM "

@@ -96,7 +96,7 @@ LABELS = {
     "image_generation": "AI 生图（接口地址、密钥与额度）",
     "private_files": "私聊文件解析与资源限制",
     "bili_video": "B站视频抽样与片段分析",
-    "console": "控制台与公网地址", "segmented_reply": "分段回复",
+    "console": "控制台与公网地址", "care": "约好的关心", "segmented_reply": "分段回复",
     "poke_policy": "拍一拍回应",
     "voice": "本地语音节点与资源限制", "social_autonomy": "QQ空间与账号资料自主行为",
     "expression_enabled": "自动选择表情", "expression_learning_enabled": "表达习惯学习",

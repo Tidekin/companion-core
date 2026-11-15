@@ -46,6 +46,7 @@ def cleanup_contracts():
     from companion.agent_images import erase_images
     from companion.agent_persistence import erase_conversations
     from companion.bili_video import erase_bili_video
+    from companion.care import erase as erase_care
     from companion.consolidation import erase_consolidation
     from companion.content import erase_content
     from companion.evaluation import erase as erase_evaluation
@@ -98,6 +99,7 @@ def cleanup_contracts():
         event_cleanup("memory-references", erase_memory_references),
         event_cleanup("mood-appraisals", erase_mood_appraisals),
         event_cleanup("goals", erase_goals),
+        event_cleanup("care-plans", erase_care),
         event_cleanup("life-topics", erase_topics),
         event_cleanup("reading", erase_reading),
         event_cleanup("exploration", erase_exploration),

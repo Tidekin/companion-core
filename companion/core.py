@@ -619,6 +619,11 @@ class Core(Runtime):
                 rules += CHARACTER_RULES
         if followup:
             rules += "\n" + turn_taking.FOLLOW_UP_RULES
+        if (job["kind"] == "chat" and cfg.care.enabled and cfg.proactive_enabled
+            and turn.permits("proactive") and "schedule_care" in model_tools):
+            from companion.care_tools import RULES as CARE_RULES
+
+            rules += "\n" + CARE_RULES
         affect = self._affect_context(authority)
         rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
             rules, policy,

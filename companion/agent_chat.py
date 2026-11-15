@@ -61,6 +61,10 @@ async def reply(core, job, snapshots):
     with phase("context_tools", job["trace_id"]):
         text_only = transport.native_text(core.store, job["event_id"])
         tools = [core_query_tools(core, job, snapshots)]
+        from companion import care_tools
+
+        if care_tools.available(core, view):
+            tools.append(care_tools.toolset(core, job, snapshots))
         from companion.agent_singing import toolset
 
         if not text_only and (singing_tools := toolset(core, job, snapshots, persistence)):
