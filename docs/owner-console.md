@@ -249,7 +249,7 @@ paid endpoint、窗口配置/凭据快照和 ModelClient 最终 HTTP 请求检�
 
 记忆列表和关系图用“鲸鲸”标注主人。每条记忆提供“删除这条记忆（记忆有误）”：
 `POST /v1/console/memories/{memory_id}/decision` 传入 `{"decision":"delete"}`，
-沿用主人会话、Origin、CSRF 与 `Idempotency-Key` 校验。仅该记忆的正文、修订和证据链接被清除，
+沿用主人会话、Origin、CSRF 与 `Idempotency-Key` 校验。仅该记忆的正文、时间标注、修订和证据链接被清除，
 原始消息、日记、同源记忆和修订链上的其他记忆保留。“忘记”仍执行来源与衍生内容的完整遗忘。
 两者都返回 `FORGOTTEN`，删除范围由请求中的明确决定区分。
 

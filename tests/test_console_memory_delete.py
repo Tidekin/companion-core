@@ -6,7 +6,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
-from companion.contracts import CoreError
+from companion.contracts import Candidate, CoreError, EventTime
 from companion.postgres import Database
 from companion.privacy import ErasureLedger, epoch
 from companion.retrieval import SemanticIndex
@@ -14,7 +14,7 @@ from companion.store import Store, encode
 from tests.conftest import run
 from tests.support.diary import DAY, seed_day
 from tests.support.owner_console import client as client
-from tests.support.owner_console import login, stored_memory
+from tests.support.owner_console import login
 
 WARMUP = SemanticIndex.warmup
 
@@ -38,9 +38,17 @@ def facts_and_diary(core):
     core.diary.schedule_day(DAY)
     assert run(core.diary.generate_once('memory-delete-diary'))
     source = core.store.one("SELECT * FROM events WHERE event_id='evt_test_1'")
-    wrong, _ = stored_memory(core, source=source, content='主人每周读十本书')
-    other, _ = stored_memory(core, 2, source=source, content='主人喜欢科幻小说')
-    return wrong, other
+    ids = []
+    with core.store.transaction(control_write=True):
+        for number, content in enumerate(('主人每周读十本书', '主人喜欢科幻小说'), 1):
+            ids.append(core.memory.add(Candidate(
+                subject='project', kind='fact', fact_key=f'console_{number}', content=content,
+                evidence_event_id=source['event_id'], evidence_quote='项目目录',
+                event_time=EventTime(start='2026-01-01T00:00:00+08:00',
+                    end='2026-01-02T00:00:00+08:00', precision='day',
+                    assertion='planned', quote='今天'),
+            ), core.clock(), confirmed=True))
+    return ids
 
 
 def originals(store, other):
@@ -67,8 +75,9 @@ def test_console_delete_keeps_sources_diary_and_shared_fact(client, core, monkey
     assert first.json() == {'memory_id': wrong, 'state': 'FORGOTTEN'}
     assert client.post(path, json={'decision': 'delete'}, headers=headers).json() == first.json()
     assert originals(core.store, other) == before
-    assert core.store.one('SELECT content,status FROM memories WHERE memory_id=%s', (wrong,)) == {
-        'content': '', 'status': 'FORGOTTEN'}
+    assert core.store.one('SELECT content,status,event_time_json FROM memories WHERE memory_id=%s',
+                          (wrong,)) == {
+        'content': '', 'status': 'FORGOTTEN', 'event_time_json': None}
     assert not core.store.rows('SELECT * FROM memory_evidence WHERE memory_id=%s', (wrong,))
     listed = client.get('/v1/console/memories?view=all').json()['items']
     assert {item['id'] for item in listed} == {other}
@@ -106,9 +115,9 @@ def test_fsynced_memory_only_delete_replays_after_database_rollback(core, monkey
     assert originals(core.store, other) == before
 
 
-@pytest.mark.parametrize('complete', [False, True])
+@pytest.mark.parametrize('projection', ['old_backup', 'complete_fact', 'complete_time'])
 def test_memory_only_delete_replays_into_old_and_complete_backups(
-    client, core, empty_database, tmp_path, complete,
+    client, core, empty_database, tmp_path, projection,
 ):
     wrong, other = facts_and_diary(core)
     before = originals(core.store, other)
@@ -116,23 +125,27 @@ def test_memory_only_delete_replays_into_old_and_complete_backups(
     evidence = core.store.rows('SELECT * FROM memory_evidence WHERE memory_id=%s', (wrong,))
     headers = login(client)
     archive, key = tmp_path / 'before-delete.enc', Fernet.generate_key()
-    if not complete:
+    if projection == 'old_backup':
         backup(core.settings.database, archive, key)
     result = client.post(f'/v1/console/memories/{wrong}/decision',
                          json={'decision': 'delete'}, headers=headers)
     assert result.status_code == 200, result.text
-    if complete:
+    if projection == 'complete_fact':
         # An old COMPLETE snapshot can still contain a stale local projection.
         core.store.execute('UPDATE memories SET content=%s,status=%s WHERE memory_id=%s',
                            (memory['content'], memory['status'], wrong))
         for row in evidence:
             core.store.insert('memory_evidence', **row)
+    if projection != 'old_backup':
+        core.store.execute('UPDATE memories SET event_time_json=%s WHERE memory_id=%s',
+                           (memory['event_time_json'], wrong))
         backup(core.settings.database, archive, key)
     state = tmp_path / 'restored-state'
     restore(archive, empty_database, key, core.settings.erasure_ledger, state_directory=state)
     with Database(empty_database) as database, closing(Store(database, state)) as store:
-        assert store.one('SELECT content,status FROM memories WHERE memory_id=%s', (wrong,)) == {
-            'content': '', 'status': 'FORGOTTEN'}
+        assert store.one('SELECT content,status,event_time_json FROM memories WHERE memory_id=%s',
+                         (wrong,)) == {
+            'content': '', 'status': 'FORGOTTEN', 'event_time_json': None}
         assert originals(store, other) == before
         current = epoch(store)
         core.ledger.replay(store)

@@ -144,10 +144,53 @@ def _fused(settings, query, docs, *, bags=None):
     return [index for index, _ in fused.most_common()]
 
 
-def _evidence(doc):
-    """A doc's owner words and attachments, without its time stamp or the reply."""
-    body = doc.split("\n你当时回复：", 1)[0]
-    return body.split("] ", 1)[-1][:SECOND_HOP_CHARS]
+def seed_passages(doc, query, budget=SECOND_HOP_CHARS):
+    """Question-focused exact slices, with character offsets in the original document.
+
+    Long single lines are windowed too. Offsets retain negation, speaker and time
+    in the original source; an extracted fragment never becomes a separate fact.
+    """
+    if budget <= 0:
+        return []
+    end = doc.find("\n你当时回复：")
+    body = doc if end < 0 else doc[:end]
+    start = body.find("] ") + 2 if "] " in body else 0
+    fragments = []
+    for match in re.finditer(r"[^。！？!?；;\n]+[。！？!?；;\n]?", body[start:]):
+        left, right = start + match.start(), start + match.end()
+        for offset in range(left, right, max(1, budget - budget // 4)):
+            stop = min(right, offset + budget)
+            fragments.append({"start": offset, "end": stop, "text": body[offset:stop]})
+            if stop == right:
+                break
+    if not fragments or budget <= 0:
+        return []
+    # A single fitting passage needs no local ranking. In particular, a short
+    # whole document already has its grams in parts()'s shared document bags.
+    scores = lexical(query, [part["text"] for part in fragments]) if len(fragments) > 1 else [0.]
+    selected, used = [], 0
+    for index in sorted(range(len(fragments)), key=lambda i: (-scores[i], i)):
+        part = fragments[index]
+        if any(part["start"] < old["end"] and old["start"] < part["end"] for old in selected):
+            continue
+        if used + len(part["text"]) + bool(selected) > budget:
+            continue
+        selected.append(part)
+        used += len(part["text"]) + (len(selected) > 1)
+        if len(selected) == 2:
+            break
+    return sorted(selected, key=lambda part: part["start"])
+
+
+def _seed(doc, query):
+    date = re.match(r"\[[^\]\n]{1,64}\] ", doc)
+    label = date[0] if date else ""
+    return label, seed_passages(doc, query, SECOND_HOP_CHARS - len(label))
+
+
+def _evidence(doc, query=""):
+    label, passages = _seed(doc, query)
+    return label + "\n".join(part["text"] for part in passages)
 
 
 def parts(settings, query, docs, pool_size=CANDIDATES):
@@ -169,7 +212,7 @@ def parts(settings, query, docs, pool_size=CANDIDATES):
     extra = getattr(settings, "turn_recall_second_hop", 0)
     if not extra or not pool:
         return pool, []
-    seeds = " ".join(_evidence(docs[index]) for index in pool[:2])
+    seeds = " ".join(_evidence(docs[index], query) for index in pool[:2])
     ranked = _fused(settings, query + " " + seeds, docs, bags=bags)
     # Enough hop candidates to survive later filtering of the first hop's head.
     return pool, [index for index in ranked if index not in pool[:2]][:pool_size]
@@ -324,7 +367,12 @@ async def _prefetch(store, settings, job, query):
         work.mark("turn_rank_timeout")
         return []  # Not None: context() must not fall back to ranking inline on the loop.
     return {"first": [rows[index]["event_id"] for index in first],
-            "hop": [rows[index]["event_id"] for index in hop]}
+            "hop": [rows[index]["event_id"] for index in hop],
+            "seeds": [{"event_id": rows[index]["event_id"],
+                       "document_sha256": hashlib.sha256(docs[index].encode()).hexdigest(),
+                 "passages": [{key: part[key] for key in ("start", "end")}
+                              for part in _seed(docs[index], query)[1]]}
+                      for index in first[:2]] if hop else []}
 
 
 def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
@@ -390,6 +438,17 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
     if ranked_ids is not None:
         if not isinstance(ranked_ids, dict):
             ranked_ids = {"first": list(ranked_ids), "hop": []}
+        seeds = ranked_ids.get("seeds", [])
+        if seeds and ranked_ids["hop"]:
+            keys = [seed["event_id"] for seed in seeds]
+            seed_rows, seed_notes = (_candidates(store, settings, job, keys)
+                                     if allowed(keys) else ([], []))
+            hashes = {row["event_id"]: hashlib.sha256(_document(
+                row, note, settings.timezone).encode()).hexdigest()
+                for row, note in zip(seed_rows, seed_notes, strict=True)}
+            if not allowed(keys) or any(hashes.get(seed["event_id"]) != seed["document_sha256"]
+                                        for seed in seeds):
+                ranked_ids = {**ranked_ids, "hop": [], "seeds": []}
 
         def keep(keys):
             return [key for key in keys if key not in exclude_ids and allowed([key])]
@@ -437,7 +496,10 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
             max_bytes - sum(other.values()))) if history_costs is not None else max_bytes
         if len(other) + len(ranked) <= max_turns and cost <= allowance:
             return {"data": data, "cost_bytes": cost,
-                    "event_ids": [rows[index]["event_id"] for index in sorted(ranked)]}
+                    "event_ids": [rows[index]["event_id"] for index in sorted(ranked)],
+                    **({"retrieval_seeds": ranked_ids["seeds"]} if (
+                        isinstance(ranked_ids, dict) and ranked_ids.get("seeds")
+                        and chosen_ids & set(ranked_ids["hop"])) else {})}
         ranked = ranked[:-1]
     return None
 
@@ -503,7 +565,8 @@ def add_reply_reference(store, settings, clock, job, text, sources, turns, scope
             history_costs={source["event_id"]: sum(len(message["content"].encode())
                                                   for message in turn)
                            for source, turn in zip(sources, turns, strict=True)})
-        proof = memory_context.pin(clock(), event_ids=set(recalled["event_ids"])) if (
+        proof = memory_context.pin(clock(), event_ids={*recalled["event_ids"],
+            *(seed["event_id"] for seed in recalled.get("retrieval_seeds", []))}) if (
             recalled) else None
         return recalled, proof
 
@@ -512,5 +575,6 @@ def add_reply_reference(store, settings, clock, job, text, sources, turns, scope
     if recalled:
         message = selection.add(HEADING, recalled["data"], recalled["event_ids"],
                       priority=RELATED, required=True, module="memory",
-                      proofs=[{"kind": "memory", "proof": proof}])
+                      proofs=[{"kind": "memory", "proof": proof, "retrieval": {
+                          "stage": "turns", "seeds": recalled.get("retrieval_seeds", [])}}])
     return recalled, message

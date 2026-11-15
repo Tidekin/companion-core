@@ -353,7 +353,8 @@ class ErasureLedger:
                             (record["erasure_id"],))
         remaining = store.one(
             "SELECT 1 FROM memories m WHERE memory_id=%s AND (status<>'FORGOTTEN' OR content<>'' "
-            "OR confidence<>0 OR fact_key<>'' OR EXISTS(SELECT 1 FROM memory_evidence e WHERE "
+            "OR confidence<>0 OR fact_key<>'' OR event_time_json IS NOT NULL "
+            "OR EXISTS(SELECT 1 FROM memory_evidence e WHERE "
             "e.memory_id=m.memory_id) OR EXISTS(SELECT 1 FROM memory_revisions r WHERE "
             "r.memory_id=m.memory_id))",
             (record["memory_id"],))
@@ -1135,7 +1136,7 @@ class ErasureLedger:
         for memory_id in memory_ids:
             store.execute(
                 "UPDATE memories SET content = '', status = 'FORGOTTEN', fact_key = '', confidence "
-                "= 0, updated_at = %s WHERE memory_id = %s",
+                "= 0, event_time_json = NULL, updated_at = %s WHERE memory_id = %s",
                 (at, memory_id),
             )
             store.execute("DELETE FROM memory_revisions WHERE memory_id = %s", (memory_id,))

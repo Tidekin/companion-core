@@ -308,6 +308,7 @@ async def prepare_memories(
             candidate.content,
             subjects=[candidate.subject],
             limit=6,
+            review=candidate,
             now=self.clock(),
             source_check=check_candidates,
             clock=self.clock,

@@ -152,8 +152,8 @@ def _feedback_clause(text):
     return chosen[-1]
 
 
-def owner_feedback(store, settings, event_id, now):
-    """Revalidate original, retained owner wording; no summaries or inferred mood."""
+def owner_feedback_text(store, settings, event_id, now):
+    """Original plain owner text under the existing feedback custody rules."""
     event = store.one(
         'SELECT e.body_json, e.ingested_at, e.occurred_at FROM events AS e JOIN conversations AS c '
         "USING (conversation_id) WHERE e.event_id = %s AND e.redacted = 0 AND e.actor_id = 'owner' "
@@ -183,6 +183,18 @@ def owner_feedback(store, settings, event_id, now):
     text = body.get("text", "")
     if not isinstance(text, str):
         return None
+    return event, text.strip()
+
+
+def owner_feedback(store, settings, event_id, now):
+    """Revalidate original, retained owner wording; no summaries or inferred mood."""
+    value = owner_feedback_text(store, settings, event_id, now)
+    if value is None:
+        return None
+    return _owner_feedback(event_id, *value)
+
+
+def _owner_feedback(event_id, event, text):
     matched = _feedback_clause(text.strip())
     if not matched:
         return None

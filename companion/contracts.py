@@ -163,6 +163,41 @@ class MemoryDecision(StrictModel):
     corrected_content: str | None = Field(default=None, min_length=1, max_length=500)
 
 
+class EventTime(StrictModel):
+    start: AwareDatetime
+    end: AwareDatetime
+    precision: Literal["instant", "day", "month", "year", "range"]
+    assertion: Literal["occurred", "planned", "uncertain"]
+    quote: str = Field(min_length=2, max_length=200)
+
+    @model_validator(mode="after")
+    def bounds(self):
+        if self.start >= self.end:
+            raise ValueError("EVENT_TIME_REQUIRES_NONEMPTY_HALF_OPEN_INTERVAL")
+        return self
+
+
+class TimeQuery(StrictModel):
+    basis: Literal["mentioned", "occurred", "known"]
+    start: AwareDatetime | None = None
+    end: AwareDatetime | None = None
+    as_of: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def bounds(self):
+        if self.basis == "known":
+            if self.as_of is None or self.start is not None or self.end is not None:
+                raise ValueError("KNOWN_TIME_REQUIRES_ONLY_AS_OF")
+        elif (self.start is None or self.end is None or self.start >= self.end
+              or self.as_of is not None):
+            raise ValueError("TIME_RANGE_REQUIRES_NONEMPTY_HALF_OPEN_INTERVAL")
+        return self
+
+    @property
+    def historical(self):
+        return self.basis == "known"
+
+
 class Candidate(StrictModel):
     subject: Literal["user", "self", "relationship", "project"]
     kind: Literal["fact", "preference", "boundary", "episode", "skill"]
@@ -170,6 +205,7 @@ class Candidate(StrictModel):
     content: str = Field(min_length=1, max_length=500)
     evidence_event_id: str
     evidence_quote: str = Field(min_length=2, max_length=500)
+    event_time: EventTime | None = Field(default=None, exclude_if=lambda value: value is None)
     evidence_reference_id: str | None = Field(default=None, min_length=1, max_length=128,
                                              exclude_if=lambda value: value is None)
     salience: int | None = Field(default=None, ge=1, le=10, strict=True)

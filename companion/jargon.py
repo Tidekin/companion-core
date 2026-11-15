@@ -16,6 +16,7 @@ at c6429547af711555e3d4d1b8d04b413572cb616c), narrowed to this project's rules:
 """
 
 import json
+import re
 
 from pydantic import Field, ValidationError
 
@@ -117,7 +118,40 @@ def _refs(row):
     return json.loads(row["refs_json"])
 
 
-def _upsert(store, term, event_ids, now):
+_MATCH_TRANSLATION = {**{i: i - 0xFEE0 for i in range(0xFF01, 0xFF5F)}, 0x3000: 0x20}
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def match_key(text):
+    """A matching projection only; original terms and exact evidence stay untouched."""
+    return " ".join(text.translate(_MATCH_TRANSLATION).translate(_ASCII_LOWER).split())
+
+
+def matches(term, text):
+    key, value = match_key(term), match_key(text)
+    if not key:
+        return False
+    if key.isascii() and re.fullmatch(r"[a-z0-9_]+", key):
+        return bool(re.search(r"(?<![a-z0-9_])" + re.escape(key) + r"(?![a-z0-9_])", value))
+    return key in value
+
+
+def _variants(store, term, rows=None):
+    key = match_key(term)
+    return [row for row in (store.rows("SELECT term,state FROM jargon_terms")
+                            if rows is None else rows)
+            if match_key(row["term"]) == key]
+
+
+def _upsert(store, term, event_ids, now, *, variants=None):
+    variants = _variants(store, term) if variants is None else variants
+    if any(row["state"] == "FORGOTTEN" for row in variants):
+        return
+    if not any(row["term"] == term for row in variants):
+        if len(variants) > 1:
+            return  # Existing distinct entries are not automatically merged.
+        if variants:
+            term = variants[0]["term"]
     row = store.one(
         "SELECT jargon_terms.term AS term, jargon_terms.refs_json AS refs_json, "
         "jargon_terms.uses AS uses, jargon_terms.state AS state, jargon_terms.meaning AS meaning, "
@@ -192,11 +226,17 @@ def scan(store, settings, now):
         + ' ORDER BY e.record_sequence LIMIT 200',
         (start,),
     )
-    terms = [row["term"] for row in store.rows("SELECT term FROM jargon_terms")]
+    variants = {}
+    for item in store.rows("SELECT term,state FROM jargon_terms"):
+        variants.setdefault(match_key(item["term"]), []).append(item)
     for row in rows:
-        for term in terms:
-            if term in row["text"]:
-                _upsert(store, term, [row["event_id"]], now)
+        for group in variants.values():
+            if any(item["state"] == "FORGOTTEN" for item in group):
+                continue
+            for item in group:
+                term = item["term"]
+                if matches(term, row["text"]):
+                    _upsert(store, term, [row["event_id"]], now, variants=group)
     pending = store.one("SELECT value FROM runtime_meta WHERE key = %s", (CURSOR + ":batch",))
     batch = (json.loads(pending["value"]) if pending else []) + [r["event_id"] for r in rows]
     batch = list(_texts(store, batch))  # Erased messages leave the batch.
@@ -502,9 +542,7 @@ def context(store, text, limit):
         "AND relname='jargon_terms' AND relkind IN ('r','p')"
     ):
         return [], set()
-    found = [
-        row
-        for row in store.rows(
+    records = store.rows(
 
                 'SELECT jargon_terms.term AS term, '
                 'jargon_terms.refs_json AS refs_json, jargon_terms.uses '
@@ -514,12 +552,25 @@ def context(store, text, limit):
                 'jargon_terms.created_at AS created_at, '
                 'jargon_terms.updated_at AS updated_at FROM '
                 'jargon_terms AS jargon_terms WHERE jargon_terms.state '
-                "= 'INFERRED' ORDER BY jargon_terms.uses DESC NULLS "
+                "IN ('INFERRED','FORGOTTEN') ORDER BY jargon_terms.uses DESC NULLS "
                 'LAST, jargon_terms.term NULLS FIRST'
 
         )
-        if row["term"] in text
-    ][:limit]
+    blocked = {match_key(row["term"]) for row in records if row["state"] == "FORGOTTEN"}
+    found = [row for row in records if row["state"] == "INFERRED"
+             and match_key(row["term"]) not in blocked and matches(row["term"], text)]
+    # A legacy database may already contain case variants with different meanings.
+    # Only exact spellings disambiguate those; similarity must not choose an identity.
+    groups = {}
+    for row in found:
+        groups.setdefault(match_key(row["term"]), []).append(row)
+    selected = []
+    for group in groups.values():
+        if len({row["meaning"] for row in group}) > 1:
+            selected.extend(row for row in group if row["term"] in text)
+        else:
+            selected.append(next((row for row in group if row["term"] in text), group[0]))
+    found = selected[:limit]
     return (
         [{"term": row["term"], "meaning": row["meaning"]} for row in found],
         {event_id for row in found for event_id in _refs(row)},
@@ -559,14 +610,15 @@ def items(store, limit=60):
 def forget(store, term):
     """Owner removes a learned term for good; source messages stay. Only the term and its
     references remain, so it is not learned again and still dies with its sources."""
-    if not store.one(
-        "SELECT 1 FROM jargon_terms WHERE term = %s AND state <> 'FORGOTTEN'", (term,)
-    ):
+    variants = [row["term"] for row in _variants(store, term) if row["state"] != "FORGOTTEN"]
+    if not variants:
         raise CoreError("JARGON_TERM_NOT_FOUND", 404)
     store.execute(
-        "UPDATE jargon_terms SET state = 'FORGOTTEN', meaning = NULL WHERE term = %s", (term,)
+        "UPDATE jargon_terms SET state = 'FORGOTTEN', meaning = NULL "
+        "WHERE term=ANY(%s::text[])", (variants,)
     )
     store.execute(
-        "DELETE FROM jargon_work WHERE term = %s AND NOT state IN ('RUNNING', 'UNKNOWN')", (term,)
+        "DELETE FROM jargon_work WHERE term=ANY(%s::text[]) "
+        "AND NOT state IN ('RUNNING', 'UNKNOWN')", (variants,)
     )
     return {"state": "FORGOTTEN", "term": term}

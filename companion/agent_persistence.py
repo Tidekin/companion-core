@@ -11,6 +11,7 @@ from copy import deepcopy
 from pydantic_ai import Conversation, DeferredToolRequests
 from pydantic_ai.conversation import ConversationTypeAdapter
 from pydantic_ai.exceptions import CallDeferred
+from pydantic_core import to_jsonable_python
 
 from companion import context_planner, job_queue
 from companion.agent_runtime import check_conversation
@@ -219,7 +220,10 @@ class ConversationStore:
 
     async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
         key = self.job["job_id"], call.tool_call_id
-        fingerprint = digest(args)
+        arguments = to_jsonable_python(args)
+        if call.tool_name == "memory_recall" and arguments.get("time") is None:
+            arguments.pop("time", None)
+        fingerprint = digest(arguments)
         with self.store.transaction():
             self.check()
             prior = self.store.one('SELECT agent_tool_calls.job_id AS job_id, '
