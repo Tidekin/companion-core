@@ -272,7 +272,7 @@ def test_conflict_and_new_views_split_candidates_from_conflicts(client, core):
     assert {item["id"] for item in every} == {candidate, candidate_conflict, confirmed_conflict,
                                               confirmed}
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 2
-    assert client.get("/v1/console/memories?view=pending").status_code == 422
+    assert client.get("/v1/console/memories?view=pending").status_code == 400
     result = client.get("/v1/console/memories?view=conflicts&q=候选冲突").json()["items"]
     assert [item["id"] for item in result] == [candidate_conflict]
     assert result[0]["detail"]["needs_review"] is True
