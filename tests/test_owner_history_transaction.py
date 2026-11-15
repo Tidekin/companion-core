@@ -74,7 +74,7 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
             return native(*args, **kwargs)
 
         def recall(*args, **kwargs):
-            recalls.append(1)
+            recalls.append(args[1])
             return native_recall(*args, **kwargs)
 
         monkeypatch.setattr(authority_custody, "check", custody)
@@ -98,13 +98,20 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
                 assert len(calls) == 2
             else:
                 # Another database's parallel fixture also advances the native
-                # snapshot. One bounded reread keeps the original full checks.
+                # snapshot. Two bounded batches may precede the per-source fallback.
                 assert 2 <= len(calls) <= 2 * (len(expected) + 2)
         else:
             actual = owner_input.history_sources(core.store, core.settings, core.clock, job)
             assert len(calls) == 2
         assert actual == expected
-        assert len(recalls) in (range(3, 7) if not same_snapshot else {3})
+        sources = core.store.rows("SELECT source_event_id FROM events WHERE event_id=ANY(%s)",
+                                  ([item["event_id"] for item in expected],))
+        expected_sources = {item["source_event_id"] for item in sources}
+        assert len(expected_sources) == len(expected)
+        assert set(recalls) == expected_sources
+        # Each discarded batch and the final conservative pass may check a source.
+        limit = 1 if same_snapshot else 3
+        assert all(recalls.count(source) <= limit for source in expected_sources)
         assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check))
