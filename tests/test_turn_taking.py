@@ -444,7 +444,7 @@ def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(
                                      additional_purposes=("proactive",))
             core.clock.advance(900)
             observed = await process_worker(core, tmp_path, "followup", "evt_test_2",
-                                             wording=turn_taking.follow_up_answer(wording))
+                                             wording=wording)
             assert observed["provider_calls"] == 1
             assert observed["materials"][0]["kind"] == "followup"
             material = observed["materials"][0]
