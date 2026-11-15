@@ -21,7 +21,7 @@ def exact_terms(query):
         r"[A-Za-z0-9_-]{2,64}", query[:4096])]))[:24]
 
 
-def nominate(memory, query, subjects, memory_ids, semantic_ids=(), *, review=None):
+def nominate(memory, query, subjects, memory_ids, semantic_ids=(), *, review=None, temporal=None):
     work = retrieval_work.current()
     if not work.take("searches"):
         return [], []
@@ -31,9 +31,16 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=(), *, review=Non
         return [], []
     if len(query) > 4096:
         work.mark("query_text")
-    base = ("FROM memories m WHERE m.status IN ('CONFIRMED','HYPOTHESIS') "
+    statuses = "'CONFIRMED','HYPOTHESIS'" + (
+        ",'SUPERSEDED'" if temporal and temporal.historical else "")
+    base = (f"FROM memories m WHERE m.status IN ({statuses}) "
             "AND m.privacy_scope='private' AND m.confidence>0 ")
     params = []
+    from companion.memory_time import predicate
+
+    clause, bindings = predicate(temporal)
+    base += clause
+    params.extend(bindings)
     if memory_ids is not None:
         base += "AND m.memory_id = ANY(%s::text[]) "
         params.append(list(memory_ids))
@@ -128,7 +135,7 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=(), *, review=Non
             + " FROM memories m JOIN unnest(%s::text[],%s::bigint[]) "
             "AS h(memory_id,text_bytes) USING(memory_id) "
             "WHERE octet_length(m.content)=h.text_bytes "
-            "AND m.status IN ('CONFIRMED','HYPOTHESIS') AND m.privacy_scope='private' "
+            f"AND m.status IN ({statuses}) AND m.privacy_scope='private' "
             "AND m.confidence>0", ([h["memory_id"] for h in selected],
                                   [h["text_bytes"] for h in selected]), limit=len(selected))
     except retrieval_work.WorkLimit:

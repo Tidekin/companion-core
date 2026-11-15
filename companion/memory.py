@@ -153,13 +153,14 @@ class Memory:
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
     def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None,
-               explain=None, trace=None):
+               explain=None, trace=None, temporal=None):
         """`explain`, when a dict, receives each returned memory's ranking evidence."""
         with retrieval_work.scope():
             return self._search(query, actor, subjects, limit, memory_ids=memory_ids, now=now,
-                                explain=explain, trace=trace)
+                                explain=explain, trace=trace, temporal=temporal)
 
-    def _search(self, query, actor, subjects, limit, *, memory_ids, now, explain, trace):
+    def _search(self, query, actor, subjects, limit, *, memory_ids, now, explain, trace,
+                temporal=None):
         self.require_owner(actor)
         nominated = []
         try:
@@ -170,7 +171,7 @@ class Memory:
         importance = {}
         version, sources, rows, lexical, proof = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now, semantic_ids=nominated,
-            importance=importance,
+            importance=importance, temporal=temporal,
         )
         try:
             similarities = self.index.scores(query, rows) if query != "*" and rows else {}
@@ -182,14 +183,15 @@ class Memory:
 
     async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
                            memory_ids=None, now=None, source_check=None, clock=None,
-                           explain=None, trace=None, _consume=None, review=None):
+                           explain=None, trace=None, _consume=None, review=None, temporal=None):
         with retrieval_work.scope():
             return await self._search_async(query, actor, subjects, limit, memory_ids=memory_ids,
                 now=now, source_check=source_check, clock=clock, explain=explain, trace=trace,
-                consume=_consume, review=review)
+                consume=_consume, review=review, temporal=temporal)
 
     async def _search_async(self, query, actor, subjects, limit, *, memory_ids, now,
-                            source_check, clock, explain, trace, consume=None, review=None):
+                            source_check, clock, explain, trace, consume=None, review=None,
+                            temporal=None):
         self.require_owner(actor)
         if source_check:
             source_check()
@@ -206,6 +208,7 @@ class Memory:
         version, sources, rows, lexical, proof = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now,
             semantic_ids=nominated, pin=True, importance=importance, review=review,
+            temporal=temporal,
         )
         similarities = {}
         if query != "*" and rows:
@@ -271,14 +274,18 @@ class Memory:
 
     def _prepare_candidates(self, query, actor="owner", subjects=(), limit=6, *,
                         memory_ids=None, now=None, semantic_ids=(), pin=False, importance=None,
-                        review=None):
+                        review=None, temporal=None):
         from companion.memory_candidates import nominate
         from companion.memory_enrichment import IMPORTANCE, ranking_importance
 
         self.require_owner(actor)
         work = retrieval_work.current()
+        from companion import memory_time
+
+        memory_time.validate_query(temporal, now)
         nominated, lexical = nominate(self, query, subjects, memory_ids, semantic_ids,
-                                      **({"review": review} if review is not None else {}))
+            **({"review": review} if review is not None else {}),
+            **({"temporal": temporal} if temporal is not None else {}))
         metadata = work.source_rows(self.store,
             "SELECT m.memory_id,r.key IS NOT NULL AS enriched,EXISTS(SELECT 1 "
             "FROM memory_evidence v JOIN events e ON e.event_id=v.event_id "
@@ -323,11 +330,16 @@ class Memory:
             for row in repaired:
                 try:
                     evidence = sources.evidence(row["memory_id"])
-                    if not evidence or not sources.current(row):
+                    if not evidence or not memory_time.supported(row, evidence, temporal):
+                        continue
+                    if temporal and temporal.historical:
+                        sources.reference(row)
+                    elif not sources.current(row):
                         continue
                     if pin:
                         part = MemoryContext(self).pin(now, rows=[{
                             **row, "evidence_ids": [e["event_id"] for e in evidence]}],
+                            historical=bool(temporal and temporal.historical),
                             work=work, source_view=sources if self.store.in_read_snapshot else None)
                         parts.append(part)
                     rows.append(row)
@@ -342,7 +354,7 @@ class Memory:
                           reverse=True)
             allowed = {row["memory_id"] for row in rows}
             proof = {"rows": [row for part in parts for row in part["rows"]],
-                     "event_ids": [], "historical": False,
+                     "event_ids": [], "historical": bool(temporal and temporal.historical),
                      "sources": {key: value for part in parts
                                  for key, value in part["sources"].items()}}
             proof["source_event_ids"] = sorted(proof["sources"])
@@ -516,6 +528,8 @@ class Memory:
             text = reference["text"]
         if not text.strip() or candidate.evidence_quote not in text:
             raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
+        if candidate.event_time and candidate.event_time.quote not in text:
+            raise CoreError("UNSUPPORTED_MEMORY_TIME")
         if not confirmed and self.store.one(
             'SELECT 1 FROM memories AS newer JOIN memories AS older ON newer.supersedes_memory_id '
             '= older.memory_id WHERE older.subject = %s AND older.content = %s AND newer.content '
@@ -655,6 +669,8 @@ class Memory:
                 self.confirm(memory_id, now)
         else:
             memory_id = uid("mem")
+            from companion.memory_time import record
+
             s.insert(
                 "memories",
                 memory_id=memory_id,
@@ -672,6 +688,7 @@ class Memory:
                 fact_key=(candidate.fact_key if replaced else
                           conflicts[0]["fact_key"] if conflicts else candidate.fact_key),
                 needs_review=int(bool(conflicts)),
+                event_time_json=record(candidate),
             )
         if conflicts:
             for row in [*conflicts, same or {"memory_id": memory_id}]:

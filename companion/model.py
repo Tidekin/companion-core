@@ -122,7 +122,9 @@ needs_review=true 表示记录互相矛盾，
 third_party或document保留具体说话人和转述链，不能因转成自然口吻把主人说的话变成‘我说过’。
 涉及当前值、最早值、截至某日或变更顺序时，沿memory_id调用memory_history核对完整链条；
 历史链被截断或检索覆盖不足时不能断言已经找到最早值。记录时间和真实生效时间分别判断。
-事情发生在哪天先看资料明确的发言日期；没有才参考 happened_on（来源消息的时间）。
+event_time是有原文支持的事件时间；assertion=planned只表示计划，不能说已完成。
+source_message_on是来源消息日期，不是事情发生日期。按发生时间、提及时间、截至某日已知事实回想时，
+给memory_recall传time，分别使用occurred、mentioned、known；缺失时间不能自行补全。
 近况和在忙的事据此判断，隔得久就当以前的事说。没想起来不等于主人没提过；主人纠正了就改口。"""
 
 EXTRACT_RULES = """从提供的主人（owner）对话事件中提取值得长期保留的明确偏好、事实和约定。
@@ -138,6 +140,10 @@ content写清是谁说的、谁做的：主人本人、第三方（写名字和�
 没有明确发言日期才使用该事件的occurred_at，写进content并保留原说法和时间依据；
 上传或导入日期不覆盖资料中的发言日期。未给出的年份不自行补全，日期矛盾保留而不擅自消解。
 晚上传不构成发言日期矛盾，不能仅因上传日期不同而另算一个日期或断言机器听错了日期。
+能确定完整日期与时区时可附event_time={start,end,precision,assertion,quote}，
+start/end为带时区ISO时间、左闭右开区间；precision为instant/day/month/year/range。
+assertion为occurred/planned/uncertain；未来计划不填occurred。quote必须是来源原文连续子串，
+包含该时间依据；资料里的发言日期优先于导入日期。日期或年份不明、矛盾时省略event_time。
 机器转写中的专名保留原字与机器来源；有已知名称只能列为待核对候选，不按同音自动合并实体。
 助手提出的候选只证明助手曾猜测，不能记成机器转写原字或主人已确认的人名、地点。
 梦、猜测、设想、条件计划、故事设定和你补写的情节要在content里明确标出，不能写成已发生的事；

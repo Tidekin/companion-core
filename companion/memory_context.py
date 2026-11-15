@@ -17,7 +17,7 @@ MEMORY_FIELDS = (
 MEMORY_COLUMNS = (
     "memory_id", "subject", "kind", "content", "status", "origin", "confidence",
     "importance", "privacy_scope", "supersedes_memory_id", "created_at", "updated_at",
-    "valid_from", "valid_to", "last_reviewed_at", "fact_key", "needs_review",
+    "valid_from", "valid_to", "last_reviewed_at", "fact_key", "needs_review", "event_time_json",
 )
 EVENT_COLUMNS = (
     "event_id", "schema_version", "source", "source_event_id", "conversation_id", "actor_id",
@@ -494,6 +494,8 @@ class MemoryContext:
 
     @staticmethod
     def _fact(row, sources):
+        from companion.memory_time import metadata
+
         result = {**{key: row[key] for key in MEMORY_FIELDS},
                 "origin": row["origin"],
                 "evidence_ids": [source["event_id"] for source in sources],
@@ -507,6 +509,8 @@ class MemoryContext:
                    if source["source"] == "owner.history"]
         if origins:
             result["historical_provenance"] = origins[:2]
+        if value := metadata(row, sources):
+            result["event_time"] = value
         return result
 
     def reply_source_check(self, settings, clock, authority):
@@ -555,15 +559,18 @@ class MemoryContext:
                 proofs=[{"kind": "memory", "proof": self.pin(
                     clock(), rows=standing)}], module="memory")
         for rank, h in enumerate(hits):
+            from companion.memory_time import metadata
+
+            event_time = metadata(h, [{"event_id": key} for key in h["evidence_ids"]])
             memory = {**{k: h[k] for k in (
                 "memory_id", "subject", "kind", "content", "status", "needs_review",
                 "evidence_ids")},
                 **({"origin": h["origin"]} if h.get("origin") else {}),
                 **relations.get(h["memory_id"], {}),
-                **({("source_message_on" if h.get("origin") == "event_observed"
-                     else "happened_on"): happened}
+                **({"event_time": event_time} if event_time else {}),
+                **({"source_message_on": source_day}
                    if chat and settings.chat_time_labels
-                   and (happened := self._memory_happened_on(h, settings.timezone)) else {})}
+                   and (source_day := self._memory_source_days(h, settings.timezone)) else {})}
             reference = selection.add(MEMORY_HEADING,
                 {"memories": [memory], "self_observations": [], "memory_status": "available"},
                 h["evidence_ids"], priority=context_selection.RELATED,
@@ -593,13 +600,13 @@ class MemoryContext:
                  "memory_status": "核对暂不可用，不能断言没有历史记录"}, (), required=True)
         return memory_references
 
-    def _memory_happened_on(self, row, zone):
+    def _memory_source_days(self, row, zone):
         """Source event dates of a memory, not its later extraction date."""
         from companion import time_context
 
         ids = row.get("evidence_ids") or []
         if not ids:
-            return time_context.day(row["created_at"], zone) if row.get("created_at") else None
+            return None
         days = sorted({time_context.day(item["occurred_at"], zone) for item in self.store.rows(
             "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join('%s' for _ in ids)
             + ") AND occurred_at IS NOT NULL ORDER BY occurred_at", tuple(ids))},
@@ -693,7 +700,8 @@ class MemoryContext:
                 or row["status"] not in (
                     {"CONFIRMED", "HYPOTHESIS", "SUPERSEDED"} if historical
                     else {"CONFIRMED", "HYPOTHESIS"}
-                ) or any(row[key] != expected[key] for key in MEMORY_FIELDS)):
+                ) or any(row[key] != expected[key] for key in MEMORY_FIELDS)
+                or row.get("event_time_json") != expected.get("event_time_json")):
                 raise CoreError("PRIVACY_CHANGED", 409)
             reference = None
             if not historical:
@@ -704,6 +712,8 @@ class MemoryContext:
             if not ids or ids != sorted(expected["evidence_ids"]):
                 raise CoreError("PRIVACY_CHANGED", 409)
             memories.append({**{key: row[key] for key in MEMORY_FIELDS}, "evidence_ids": ids})
+            if row.get("event_time_json") is not None:
+                memories[-1]["event_time_json"] = row["event_time_json"]
             roots.update(ids)
             if historical:
                 reference = sources.reference(row)
@@ -735,7 +745,8 @@ class MemoryContext:
     def _limit(self):
         return getattr(self.memory.settings, "memory_recall_limit", 6)
 
-    def recall(self, query, now, *, actor="owner", memory_ids=None, project_query=None, trace=None):
+    def recall(self, query, now, *, actor="owner", memory_ids=None, project_query=None, trace=None,
+               temporal=None):
         """`memory_recall_limit` facts plus at most two unresolved conflicts; no model call.
 
         NO_RECORD means this eligible scope has no hit. Index/custody errors propagate
@@ -743,42 +754,45 @@ class MemoryContext:
         """
         with retrieval_work.scope():
             return self._recall(query, now, actor=actor, memory_ids=memory_ids,
-                                project_query=project_query, trace=trace)
+                                project_query=project_query, trace=trace, temporal=temporal)
 
-    def _recall(self, query, now, *, actor, memory_ids, project_query, trace):
+    def _recall(self, query, now, *, actor, memory_ids, project_query, trace, temporal=None):
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         rows = self.memory.search(query, actor=actor, memory_ids=memory_ids,
                                   limit=self._limit() + 2, now=now,
-                                  trace=trace)
-        return self._recall_result(rows, version, query, now, memory_ids, project_query, trace)
+                                  trace=trace, temporal=temporal)
+        return self._recall_result(rows, version, query, now, memory_ids, project_query, trace,
+                                   temporal=temporal)
 
     async def recall_async(self, query, now, *, actor="owner", memory_ids=None,
-                           project_query=None, source_check=None, clock=None, trace=None):
+                           project_query=None, source_check=None, clock=None, trace=None,
+                           temporal=None):
         with retrieval_work.scope():
             return await self._recall_async(query, now, actor=actor, memory_ids=memory_ids,
-                project_query=project_query, source_check=source_check, clock=clock, trace=trace)
+                project_query=project_query, source_check=source_check, clock=clock, trace=trace,
+                temporal=temporal)
 
     async def _recall_async(self, query, now, *, actor, memory_ids, project_query,
-                             source_check, clock, trace):
+                             source_check, clock, trace, temporal=None):
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         return await self.memory.search_async(
             query, actor=actor, memory_ids=memory_ids, limit=self._limit() + 2, now=now,
-            source_check=source_check, clock=clock, trace=trace,
+            source_check=source_check, clock=clock, trace=trace, temporal=temporal,
             _consume=lambda rows, sources: self._recall_result(
                 rows, version, query, sources.now, memory_ids, project_query, trace,
-                source_view=sources),
+                source_view=sources, temporal=temporal),
         )
 
     def _recall_result(self, rows, version, query, now, memory_ids, project_query, trace=None, *,
-                       source_view=None):
+                       source_view=None, temporal=None):
         if not self.store.in_transaction:
             return self.store.read_or_write(lambda: self._recall_result(
-                rows, version, query, now, memory_ids, project_query, trace))
-        if not rows and project_query is not None:
+                rows, version, query, now, memory_ids, project_query, trace, temporal=temporal))
+        if not rows and project_query is not None and temporal is None:
             rows = self.memory.project_recall_candidates(
                 project_query, memory_ids=memory_ids, limit=6, now=now,
             )
@@ -797,7 +811,17 @@ class MemoryContext:
                 break
             if not evidence:
                 continue
-            item = self._fact(row, evidence)
+            shown_evidence = evidence
+            if temporal and temporal.historical:
+                shown_evidence = [event for event in evidence
+                    if datetime.fromisoformat(event["ingested_at"]) <= temporal.as_of
+                    and datetime.fromisoformat(event["occurred_at"]) <= temporal.as_of]
+            item = self._fact(row, shown_evidence)
+            if temporal and temporal.historical:
+                # These fields may describe a later correction, outside this snapshot.
+                item.pop("updated_at", None)
+                item.pop("valid_to", None)
+                item["historical"] = True
             try:
                 reference = sources.reference(row)
             except retrieval_work.WorkLimit as error:
@@ -828,6 +852,10 @@ class MemoryContext:
                 **({"retrieval_coverage": coverage, "note": retrieval_work.NOTE}
                    if coverage["coverage_limited"] else {}),
                 "privacy_epoch": version[0], "as_of": now, "facts": facts,
+                **({"time_scope": temporal.model_dump(mode="json", exclude_none=True),
+                    "time_note": "仅检索有来源支持的已存事实；"
+                    "未标注发生时间的事实不参与发生时间筛选。"}
+                   if temporal else {}),
                 "conflicts": conflicts[:2], "conflicts_truncated": len(conflicts) > 2,
                 "rows": [row for row in rows if row["memory_id"] in selected],
                 "requires_relevance_review": bool(rows)}
