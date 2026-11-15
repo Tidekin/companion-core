@@ -13,7 +13,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from companion import capabilities, meme_wiki, reply_revision, retrieval_work
 from companion.agent_runtime import check_conversation
-from companion.contracts import CoreError
+from companion.contracts import CoreError, TimeQuery
 from companion.paid_budget import sha
 
 RECALL_IDLE_LIMIT = 2  # calls in a row without new memories; the next call stops
@@ -160,7 +160,8 @@ Each tool requires its current purpose on the original owner-authorized job.
                 core.store, core.settings, job, query, set(), source_ok, ranked_ids=ranking,
                 max_turns=min(RAW_TURNS, policy.history.max_turns),
                 max_bytes=min(RAW_BYTES, policy.history.max_utf8_bytes))
-            proof = core.memory_context.pin(core.clock(), event_ids=set(result["event_ids"])) if (
+            proof = core.memory_context.pin(core.clock(), event_ids={*result["event_ids"],
+                *(seed["event_id"] for seed in result.get("retrieval_seeds", []))}) if (
                 result) else None
             return result, proof
 
@@ -170,13 +171,15 @@ Each tool requires its current purpose on the original owner-authorized job.
         if not result:
             return None
         reply_revision.remember_sources(core.store, job, proof["source_event_ids"])
-        snapshot = {"kind": "memory", "proof": proof}
+        snapshot = {"kind": "memory", "proof": proof, "retrieval": {
+            "stage": "tool_raw_turns", "seeds": result.get("retrieval_seeds", [])}}
         if snapshot not in snapshots:
             snapshots.append(snapshot)
         check("memory", also=("history",))
         return result["data"]
 
-    async def memory_recall(query: Annotated[str, Field(min_length=1, max_length=2000)]) -> dict:
+    async def memory_recall(query: Annotated[str, Field(min_length=1, max_length=2000)],
+                            time: TimeQuery | None = None) -> dict:
         """Find bounded memory candidates; assess relevance and conflicts before answering.
 
         Args:
@@ -184,6 +187,11 @@ Each tool requires its current purpose on the original owner-authorized job.
                 If coverage permits and nothing matches, try a shorter specific phrase.
                 Stop when search_can_continue is false. No hit does not prove
                 the owner never mentioned it. This query cannot change memory.
+            time: Optional temporal scope. mentioned filters source message time; occurred
+                filters explicitly sourced event intervals (check assertion: planned is not
+                completed); known returns stored facts known as_of. Use timezone-aware ISO
+                bounds, inclusive start and exclusive end. Resolve relative dates using the
+                conversation timezone. Unknown event dates are excluded, not guessed.
         """
         check("memory")
         work = retrieval_work.current()
@@ -199,12 +207,14 @@ Each tool requires its current purpose on the original owner-authorized job.
             result = await core.memory_context.recall_async(
                 query, core.clock(), project_query=query, clock=core.clock,
                 source_check=lambda: check("memory"), trace=trace,
+                temporal=time,
             )
         except CoreError as error:
             if error.code == "PRIVACY_CHANGED":
                 raise CoreError(reply_revision.CANCELLED, 409) from error
             raise
-        pin(result["rows"], retrieval={"stage": "tool", "query_sha256": sha(query),
+        pin(result["rows"], historical=bool(time and time.historical),
+            retrieval={"stage": "tool", "query_sha256": sha(query),
                                        "selection": trace})
         value = {key: item for key, item in result.items() if key != "rows"}
         value["search_can_continue"] = work is None or not work.exhausted()
@@ -224,7 +234,7 @@ Each tool requires its current purpose on the original owner-authorized job.
             recall_state["idle"] = 0
             return value
         recall_state["idle"] += 1
-        if not recall_state["raw_used"] and value["search_can_continue"]:
+        if time is None and not recall_state["raw_used"] and value["search_can_continue"]:
             recall_state["raw_used"] = True
             if turns := await raw_turns(query):
                 value["raw_turns"] = turns

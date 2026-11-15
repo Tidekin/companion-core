@@ -5,12 +5,13 @@ from contextlib import nullcontext
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from companion.affect import feedback_reset_at, owner_feedback
+from companion import expression_context
+from companion.affect import feedback_reset_at
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.store import after, encode
 
-POLICY_VERSION = "expression-feedback-1"
+POLICY_VERSION = "expression-feedback-2"
 MAX_EVENTS = 500
 EXPRESSION_DIMENSIONS = {"interaction_tone", "cognitive_load"}
 
@@ -25,7 +26,7 @@ class ExpressionLearning:
     def __init__(self, store, settings, clock):
         self.store, self.settings, self.clock = store, settings, clock
 
-    def reply_reference(self, settings, job, affect):
+    def reply_reference(self, settings, job, affect, *, context_sources=()):
         from companion import private_life, reply_revision
 
         cfg, s = settings, self.store
@@ -37,20 +38,36 @@ class ExpressionLearning:
         if learned["truncated"]:
             return None
         transient = {row["dimension"] for row in affect["evidence"]}
+        current = expression_context.feedback(s, cfg, job["event_id"], self.clock())
+        if current:
+            transient.add(current["dimension"])
+        situation, context_ids = expression_context.context(
+            s, cfg, job, self.clock(), context_sources)
         items = [item for item in learned["items"] if item["status"] == "STABLE"
-                 and 0 < item["strength"] <= 0.5 and item["dimension"] not in transient]
-        sources = {e["event_id"] for item in items for e in item["evidence"]}
+                 and 0 < item["strength"] <= 0.5 and item["dimension"] not in transient
+                 and item.get("situation") in (None, situation)]
+        items.sort(key=lambda item: (item.get("situation") != situation,
+                                    -item["independent_days"], item["dimension"]))
+        chosen = {}
+        for item in items:
+            chosen.setdefault(item["dimension"], item)
+        items = list(chosen.values())[:2]
+        sources = {e["event_id"] for item in items for e in item["evidence"]} | set(context_ids)
         if not items or any(not reply_revision.source_active(s, source) for source in sources):
             return None
-        selected = [{key: item[key] for key in ("dimension", "value", "strength", "version")}
+        selected = [{key: item[key] for key in ("dimension", "value", "strength", "version",
+                                               "situation") if key in item}
                     for item in items]
         return {"message": {"role": "user", "content":
                     "主人长期表达偏好参考（仅调整表达；短时反馈优先，不改变事实或权限）：\n"
                     + encode(selected)}, "source_event_ids": sorted(sources),
-                "snapshot": selected}
+                "snapshot": {"items": selected, "context_ids": context_ids}}
 
     def revalidate_reply(self, settings, job, affect, proof):
-        current = self.reply_reference(settings, job, affect)
+        if not isinstance(proof, dict):
+            raise CoreError("PRIVACY_CHANGED", 409)
+        current = self.reply_reference(settings, job, affect,
+            context_sources=[{"event_id": key} for key in proof["context_ids"]])
         if current is None or current["snapshot"] != proof:
             raise CoreError("PRIVACY_CHANGED", 409)
 
@@ -74,10 +91,10 @@ class ExpressionLearning:
             truncated = len(rows) > MAX_EVENTS
             streaks, stopped = {}, set()
             for row in rows[:MAX_EVENTS]:
-                feedback = owner_feedback(s, self.settings, row["event_id"], now)
+                feedback = expression_context.feedback(s, self.settings, row["event_id"], now)
                 if feedback is None or feedback["dimension"] not in EXPRESSION_DIMENSIONS:
                     continue
-                dimension = feedback["dimension"]
+                dimension = (feedback["dimension"], feedback.get("situation", ""))
                 if dimension in stopped:
                     continue
                 streak = streaks.setdefault(dimension, [])
@@ -88,7 +105,7 @@ class ExpressionLearning:
                     continue
                 streak.append(feedback)
             items = []
-            for dimension, evidence in sorted(streaks.items()):
+            for (dimension, situation), evidence in sorted(streaks.items()):
                 days = {
                     datetime.fromisoformat(row["occurred_at"])
                     .astimezone(ZoneInfo(self.settings.timezone)).date().isoformat()
@@ -102,6 +119,7 @@ class ExpressionLearning:
                 item = {
                     "namespace": "owner.expression_preference",
                     "dimension": dimension,
+                    **({"situation": situation} if situation else {}),
                     "value": evidence[0]["new_state"],
                     "status": status,
                     "independent_days": len(days),

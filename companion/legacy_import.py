@@ -14,7 +14,7 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0008_companion_avatar"
+TARGET_REVISION = "pg0009_memory_time"
 # Native-only tables created after the SQLite era; an offline import leaves them empty.
 NATIVE_ONLY_TABLES = frozenset({"companion_profile", "companion_profile_settings",
                                 "companion_profile_changes", "companion_avatar_assets"})
@@ -118,6 +118,8 @@ def _copy_table(source, target, name, actual):
     identifier = sql.Identifier(name)
     quoted, columns = _columns(source, name)
     projection = {"preview_json", "preview_version"} if name == "agent_conversations" else set()
+    if name == "memories":
+        projection.add("event_time_json")
     if actual != set(columns) | {"record_sequence"} | projection:
         raise RuntimeError("SQLITE_IMPORT_COLUMN_SET_MISMATCH")
     rows = source.execute(f"SELECT rowid,* FROM {quoted} ORDER BY rowid")

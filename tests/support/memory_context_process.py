@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import sys
+import traceback
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +24,7 @@ def run_worker(settings_path, now, mode="normal"):
     assert settings.model_url == "https://synthetic.invalid/v1"
     original_client, original_run = httpx.AsyncClient, Core.run_once
     original_tool = ConversationStore.wrap_tool_execute
+    original_fail = Core.fail_job
     calls = []
 
     class Finished(BaseException):
@@ -33,7 +36,12 @@ def run_worker(settings_path, now, mode="normal"):
         calls.append(payload)
         exam = "台布前后" in str(payload["messages"])
         has_tool = any(message["role"] == "tool" for message in payload["messages"])
-        if exam and not has_tool:
+        if mode == "temporal" and not has_tool:
+            result = answer(calls=[call("recall-date", "memory_recall", {
+                "query": "取钥匙", "time": {"basis": "occurred",
+                    "start": "2026-01-01T00:00:00+08:00",
+                    "end": "2026-01-02T00:00:00+08:00"}})])
+        elif exam and not has_tool:
             result = answer(calls=[call("recall-colors", "memory_recall", {"query": "台布颜色"})])
         else:
             result = answer("前面说靛青，后来又说砂黄，两个说法都保留。" if exam else "记住了。")
@@ -52,6 +60,11 @@ def run_worker(settings_path, now, mode="normal"):
         self.store.one("SELECT pg_sleep(2)")
         raise AssertionError("restore SQL deadline was not enforced")
 
+    def fail(self, job, code):
+        if code == "INTERNAL_ERROR":
+            traceback.print_exception(sys.exception())
+        return original_fail(self, job, code)
+
     async def once(self, *args, **kwargs):
         try:
             await original_run(self, *args, **kwargs)
@@ -66,6 +79,7 @@ def run_worker(settings_path, now, mode="normal"):
         ConversationStore.load = blocked_load
     ConversationStore.wrap_tool_execute = tool
     Core.run_once = once
+    Core.fail_job = fail
     core_module.Core = partial(Core, clock=lambda: now)
     entrypoint.httpx = SimpleNamespace(AsyncClient=client)
     try:
