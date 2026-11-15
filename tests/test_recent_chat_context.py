@@ -2,22 +2,25 @@
 
 import asyncio
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
 
 from companion.store import encode
 from tests.conftest import run
+from tests.native_continuous_support import frame
 from tests.support.live_image_input import image_parts, options, png, resolve
 from tests.support.native_images import image_host, upload
-from tests.support.onebot_events import raw_event
 from tests.support.onebot_images import image_segment
 from tests.support.owner_image_recovery import run_worker
 
 
-@pytest.mark.parametrize("image_count,image_limit", [(3, 3), (5, 5), (8, "unlimited"), (5, 3)])
+@pytest.mark.parametrize("image_count,image_limit,clock_skew", [
+    (3, 3, 0), (5, 5, 0), (8, "unlimited", 0), (5, 3, 0), (3, 3, 1),
+], ids=['3-3', '5-5', '8-unlimited', '5-3', 'clock-skew'])
 def test_image_burst_keeps_recent_complete_dialogue_in_independent_worker(
-    core, tmp_path, image_count, image_limit,
+    core, tmp_path, image_count, image_limit, clock_skew,
 ):
     incoming = asyncio.Queue()
 
@@ -36,11 +39,12 @@ def test_image_burst_keeps_recent_complete_dialogue_in_independent_worker(
                            else min(image_count, image_limit))
         async with image_host(core, tmp_path, source, options=scope, history=True,
                               independent_api=True) as (active, _, sends, _):
+            # The fixture's Core clock may differ from the Bridge's UTC receive clock.
+            core.clock.now += timedelta(seconds=clock_skew)
             async def accept(number, text=None):
                 message = ([{'type': 'text', 'data': {'text': text}}] if text is not None
                            else [image_segment(f'https://gchat.qpic.cn/synthetic-{number}')])
-                await incoming.put(encode(raw_event(number,
-                    time=int(core.clock.now.timestamp()), message=message)))
+                await incoming.put(frame(number, message=message))
                 await active.capture(number)
                 await active.flush()
 
