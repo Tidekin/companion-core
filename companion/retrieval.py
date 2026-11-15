@@ -250,3 +250,15 @@ def fuse(lexical, semantic):
         for rank, key in enumerate(ranking, 1):
             scores[key] = scores.get(key, 0) + 1 / (60 + rank)
     return scores
+
+
+def review_order(attributes, semantic, lexical, fallback, head=2):
+    """Cover each review arm before ordinary ranking fills the bounded catalog.
+
+    A semantic-only paraphrase must reach relation review even when dual-channel
+    distractors win RRF. This is nomination, never evidence of factual identity.
+    Mechanism: Hindsight fusion.py::interleave_fusion, pinned in the source study.
+    """
+    return list(dict.fromkeys([
+        *attributes[:head], *semantic[:head], *lexical[:head], *fallback,
+    ]))

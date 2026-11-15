@@ -21,7 +21,7 @@ def exact_terms(query):
         r"[A-Za-z0-9_-]{2,64}", query[:4096])]))[:24]
 
 
-def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
+def nominate(memory, query, subjects, memory_ids, semantic_ids=(), *, review=None):
     work = retrieval_work.current()
     if not work.take("searches"):
         return [], []
@@ -40,6 +40,9 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
     if subjects:
         base += "AND m.subject = ANY(%s::text[]) "
         params.append(list(subjects))
+    if review is not None:
+        base += "AND (m.kind='episode')=%s AND (m.origin='event_observed')=%s "
+        params.extend([review.kind == "episode", bool(review.evidence_reference_id)])
     projection = "SELECT m.memory_id,octet_length(m.content) AS text_bytes,m.updated_at "
     headers, lexical = {}, []
     channels = []
@@ -54,6 +57,10 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
         if query != "*":
             exact = exact_terms(query)
             channel = min(24, ceiling)
+            if review is not None:
+                collect(projection + base + "AND m.fact_key=%s "
+                        "ORDER BY m.updated_at DESC,m.memory_id LIMIT %s",
+                        (*params, review.fact_key, channel + 1), channel)
             collect(projection + base + "AND m.memory_id = ANY(%s::text[]) "
                     "ORDER BY m.updated_at DESC,m.memory_id LIMIT %s",
                     (*params, exact, channel + 1), channel, lexical=True)

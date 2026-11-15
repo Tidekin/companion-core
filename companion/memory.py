@@ -182,14 +182,14 @@ class Memory:
 
     async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
                            memory_ids=None, now=None, source_check=None, clock=None,
-                           explain=None, trace=None, _consume=None):
+                           explain=None, trace=None, _consume=None, review=None):
         with retrieval_work.scope():
             return await self._search_async(query, actor, subjects, limit, memory_ids=memory_ids,
                 now=now, source_check=source_check, clock=clock, explain=explain, trace=trace,
-                consume=_consume)
+                consume=_consume, review=review)
 
     async def _search_async(self, query, actor, subjects, limit, *, memory_ids, now,
-                            source_check, clock, explain, trace, consume=None):
+                            source_check, clock, explain, trace, consume=None, review=None):
         self.require_owner(actor)
         if source_check:
             source_check()
@@ -205,7 +205,7 @@ class Memory:
         importance = {}
         version, sources, rows, lexical, proof = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now,
-            semantic_ids=nominated, pin=True, importance=importance,
+            semantic_ids=nominated, pin=True, importance=importance, review=review,
         )
         similarities = {}
         if query != "*" and rows:
@@ -233,8 +233,10 @@ class Memory:
             except retrieval_work.WorkLimit as error:
                 retrieval_work.current().mark(error.reason)
         rerank_scores = None
-        fused = self._fused_order(query, rows, lexical, similarities, importance)
-        model, pool = self._rerank_pool(query, fused[0], limit)
+        fused = self._fused_order(query, rows, lexical, similarities, importance,
+                                  **({"review": review} if review is not None else {}))
+        model, pool = ((None, []) if review is not None
+                       else self._rerank_pool(query, fused[0], limit))
         if pool:
             from companion import reranker
 
@@ -252,7 +254,8 @@ class Memory:
             sources = MemorySources(self, clock(), bounded=True, work=retrieval_work.current())
         return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
                                    explain=explain, trace=trace, rerank_scores=rerank_scores,
-                                   fused=fused, importance=importance, consume=consume)
+                                   fused=fused, importance=importance, consume=consume,
+                                   review=review)
 
     def _prepare_search(self, *args, **kwargs):
         work = retrieval_work.current()
@@ -267,13 +270,15 @@ class Memory:
                 "historical": False, "sources": {}, "source_event_ids": []}
 
     def _prepare_candidates(self, query, actor="owner", subjects=(), limit=6, *,
-                        memory_ids=None, now=None, semantic_ids=(), pin=False, importance=None):
+                        memory_ids=None, now=None, semantic_ids=(), pin=False, importance=None,
+                        review=None):
         from companion.memory_candidates import nominate
         from companion.memory_enrichment import IMPORTANCE, ranking_importance
 
         self.require_owner(actor)
         work = retrieval_work.current()
-        nominated, lexical = nominate(self, query, subjects, memory_ids, semantic_ids)
+        nominated, lexical = nominate(self, query, subjects, memory_ids, semantic_ids,
+                                      **({"review": review} if review is not None else {}))
         metadata = work.source_rows(self.store,
             "SELECT m.memory_id,r.key IS NOT NULL AS enriched,EXISTS(SELECT 1 "
             "FROM memory_evidence v JOIN events e ON e.event_id=v.event_id "
@@ -357,14 +362,14 @@ class Memory:
 
     def _finish_search(self, query, rows, lexical, similarities, limit, version, sources, *,
                        explain=None, trace=None, rerank_scores=None, fused=None, importance=None,
-                       consume=None):
+                       consume=None, review=None):
         """`rerank_scores` (memory_id -> score) lets async callers rescore off the loop."""
         eligible, lexical_raw = len(rows), len(lexical)
         rows, ranks, lexical_count, semantic_count = (
             fused if fused is not None else self._fused_order(
                 query, rows, lexical, similarities, importance))
         matched = len(rows)
-        model, pool = self._rerank_pool(query, rows, limit)
+        model, pool = (None, []) if review is not None else self._rerank_pool(query, rows, limit)
         if pool:
             if rerank_scores is None or any(row["memory_id"] not in rerank_scores
                                             for row in pool):
@@ -384,7 +389,7 @@ class Memory:
                                      explain=explain, trace=trace, importance=importance,
                                      consume=consume)
 
-    def _fused_order(self, query, rows, lexical, similarities, importance=None):
+    def _fused_order(self, query, rows, lexical, similarities, importance=None, *, review=None):
         from companion.memory_candidates import exact_terms
 
         ranks = {}
@@ -413,6 +418,10 @@ class Memory:
                 reverse=True,
             )
             scores = fuse(lexical, semantic)
+            attributes = [row["memory_id"] for row in rows
+                          if review is not None and row["fact_key"] == review.fact_key]
+            for mid in attributes:
+                scores.setdefault(mid, 0.)
             lexical_count, semantic_count = len(lexical), len(semantic)
             lexical_ranks = {}
             for rank, key in enumerate(lexical, 1):
@@ -433,6 +442,15 @@ class Memory:
                 ),
                 reverse=True,
             )
+            if review is not None:
+                from companion.retrieval import review_order
+
+                order = review_order(attributes, semantic, lexical,
+                                     [row["memory_id"] for row in rows])
+                positions = {mid: index for index, mid in enumerate(order)}
+                rows.sort(key=lambda row: positions[row["memory_id"]])
+                for row in rows:
+                    ranks[row["memory_id"]]["review_attribute"] = row["memory_id"] in attributes
         return rows, ranks, lexical_count, semantic_count
 
     def _complete_search(self, rows, ranks, eligible, lexical_raw, lexical_count,
