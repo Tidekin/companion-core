@@ -102,7 +102,10 @@ def test_prefetch_ranks_in_a_worker_thread_without_blocking_the_loop(core, monke
         return ranked, ticks
 
     ranked, ticks = asyncio.run(scenario())
-    assert ranked == {"first": ["evt_2", "evt_0"], "hop": ["evt_1"]}
+    assert {key: ranked[key] for key in ("first", "hop")} == {
+        "first": ["evt_2", "evt_0"], "hop": ["evt_1"]}
+    assert [seed["event_id"] for seed in ranked["seeds"]] == ["evt_2", "evt_0"]
+    assert all(len(seed["document_sha256"]) == 64 for seed in ranked["seeds"])
     assert seen["thread"] and ticks >= 5
 
 

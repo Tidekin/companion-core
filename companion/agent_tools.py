@@ -160,7 +160,8 @@ Each tool requires its current purpose on the original owner-authorized job.
                 core.store, core.settings, job, query, set(), source_ok, ranked_ids=ranking,
                 max_turns=min(RAW_TURNS, policy.history.max_turns),
                 max_bytes=min(RAW_BYTES, policy.history.max_utf8_bytes))
-            proof = core.memory_context.pin(core.clock(), event_ids=set(result["event_ids"])) if (
+            proof = core.memory_context.pin(core.clock(), event_ids={*result["event_ids"],
+                *(seed["event_id"] for seed in result.get("retrieval_seeds", []))}) if (
                 result) else None
             return result, proof
 
@@ -170,7 +171,8 @@ Each tool requires its current purpose on the original owner-authorized job.
         if not result:
             return None
         reply_revision.remember_sources(core.store, job, proof["source_event_ids"])
-        snapshot = {"kind": "memory", "proof": proof}
+        snapshot = {"kind": "memory", "proof": proof, "retrieval": {
+            "stage": "tool_raw_turns", "seeds": result.get("retrieval_seeds", [])}}
         if snapshot not in snapshots:
             snapshots.append(snapshot)
         check("memory", also=("history",))
