@@ -52,15 +52,40 @@ def test_strict_empty_offer_enqueues_once_and_staged_file_waits_for_original_cap
     run(scenario())
 
 
-@pytest.mark.parametrize("kind", ["no_intent", "disabled"])
+@pytest.mark.parametrize("kind", ["full_library", "disabled"])
 def test_optional_empty_states_do_not_start_native_discovery(core, tmp_path, monkeypatch, kind):
+    from companion import meme_retrieval
+
+    # An ambient miss with enough usable assets is routine, never a replenish signal.
+    monkeypatch.setattr(meme_retrieval, "AMBIENT_LIBRARY_TARGET", 0)
+
     async def scenario():
         async with native_case(core, tmp_path, monkeypatch,
-            text="普通的合成闲聊" if kind == "no_intent" else "太棒了，成功了",
+            text="普通的合成闲聊" if kind == "full_library" else "太棒了，成功了",
             discovery=kind != "disabled") as c:
             await c.retrieval.prepare(c.job)
             assert not c.upstream.calls
             assert not core.store.rows("SELECT * FROM jobs WHERE kind='meme_discovery'")
+
+    run(scenario())
+
+
+def test_an_ambient_miss_with_a_short_library_starts_one_paced_discovery(
+    core, tmp_path, monkeypatch,
+):
+    from companion import meme_retrieval
+
+    async def scenario():
+        async with native_case(core, tmp_path, monkeypatch, text="普通的合成闲聊") as c:
+            await c.retrieval.prepare(c.job)
+            jobs = core.store.rows("SELECT * FROM jobs WHERE kind='meme_discovery'")
+            assert len(jobs) == 1
+            assert not c.upstream.calls  # It runs later in idle time, not in the chat.
+            meta = json.loads(core.store.one(
+                "SELECT value FROM runtime_meta WHERE key = %s",
+                (meme_service.META + jobs[0]["job_id"],))["value"])
+            assert meta["intent"] in meme_retrieval.REPLENISH_INTENTS
+            assert not c.retrieval._library_short()  # Paced: no second start this window.
 
     run(scenario())
 
