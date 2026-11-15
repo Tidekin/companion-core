@@ -406,7 +406,8 @@ def test_a_lull_on_the_native_client_gets_its_follow_up_there(client, core, tmp_
     core.settings.quiet_start = core.settings.quiet_end = 0
     key = Ed25519PrivateKey.generate()
     headers, authority = enroll(client, key)
-    replies = ['结局你喜欢吗？', '我也觉得后半段太赶了。', '对了，里面那个配角其实挺出彩的。']
+    replies = ['结局你喜欢吗？', '我也觉得后半段太赶了。',
+               turn_taking.follow_up_answer('对了，里面那个配角其实挺出彩的。')]
 
     def provider(request):
         return response(answer(replies.pop(0)), stream=json.loads(request.content).get('stream'))

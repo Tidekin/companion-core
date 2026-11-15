@@ -498,3 +498,18 @@ def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(
             assert core.store.rows("SELECT * FROM model_usage WHERE scenario='activity'") == usage
 
     run(exercise())
+
+
+@pytest.mark.parametrize(("answer", "sent"), [
+    ('{"send": true, "text": "对了，那个配角挺出彩。"}', "对了，那个配角挺出彩。"),
+    ('```json\n{"send": true, "text": "嗨"}\n```', "嗨"),
+    ('{"send": false}', None),
+    # A model that explains its decision instead of choosing sends nothing.
+    ("上一条把话说完了，这会儿没新东西，就先不接了吧。", None),
+    ("[SKIP]", None),
+    ('{"send": true}', None),
+    ('{"send": "true", "text": "x"}', None),
+    ('{"send": true, "text": "x", "why": "y"}', None),
+])
+def test_a_follow_up_sends_only_a_well_formed_choice(answer, sent):
+    assert turn_taking.follow_up_text(answer) == sent

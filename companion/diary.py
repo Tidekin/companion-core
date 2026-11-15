@@ -1090,6 +1090,13 @@ class DiaryService:
                 if isinstance(error, ValidationError)
                 else "DIARY_INTERNAL_ERROR"
             )
+            if isinstance(error, ValidationError) and not self.store.in_transaction:
+                from companion.meme_caption_output import failure_detail
+
+                # Which draft field broke the contract, never the draft itself.
+                with self.store.transaction():
+                    self.store.audit("diary.draft_invalid", run["run_id"], run["run_id"],
+                                     self.clock(), **failure_detail(error))
             state, retry_at = "FAILED", None
             unknown = self.store.one(
                 "SELECT 1 FROM model_usage WHERE request_id = %s AND state = 'UNKNOWN'",

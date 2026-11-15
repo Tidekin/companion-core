@@ -130,10 +130,14 @@ class ChatReply {
     required this.state,
     this.quote,
     this.sticker = false,
+    this.createdAt,
   });
   final String id;
   final String text;
   final String state;
+
+  /// When Core created the reply; shown on the first bubble.
+  final DateTime? createdAt;
   final ChatQuote? quote;
 
   /// The reply carries a meme; its bytes are fetched through the session.
@@ -144,6 +148,10 @@ class ChatReply {
     state: value['state'] as String,
     quote: ChatQuote.fromJson(value['quote']),
     sticker: value['sticker'] == true,
+    createdAt: switch (value['created_at']) {
+      final String at => DateTime.tryParse(at),
+      _ => null,
+    },
   );
 }
 

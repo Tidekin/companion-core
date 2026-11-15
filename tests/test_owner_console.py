@@ -215,7 +215,7 @@ def test_nested_configuration_errors_do_not_echo_or_persist_secret_input(client,
     assert secret not in encode(core.store.rows("SELECT * FROM audit_log"))
 
 
-def test_extracted_candidate_appears_in_pending_and_leaves_after_owner_confirmation(client, core):
+def test_extracted_candidate_is_listed_as_new_without_owner_work_until_confirmed(client, core):
     from companion.core import Core
 
     core.settings.extraction_min_events = 1
@@ -231,14 +231,16 @@ def test_extracted_candidate_appears_in_pending_and_leaves_after_owner_confirmat
         assert run(worker.extract_once())
     candidate = core.store.one("SELECT * FROM memories")
     assert candidate["status"] == "HYPOTHESIS" and candidate["needs_review"] == 0
-    assert client.get("/v1/console/memories?review=true").status_code == 401
+    assert client.get("/v1/console/memories?view=new").status_code == 401
     headers = login(client)
-    listed = client.get("/v1/console/memories?review=true").json()
-    assert listed["meta"]["pending_count"] == 1
+    assert client.get("/v1/console/memories?view=conflicts").json()["items"] == []
+    listed = client.get("/v1/console/memories?view=new").json()
+    assert listed["meta"] == {"conflict_count": 0, "more": False}
     pending = listed["items"]
     assert [item["id"] for item in pending] == [candidate["memory_id"]]
     assert pending[0]["detail"]["needs_review"] is False
-    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 1
+    counts = client.get("/v1/console/overview").json()["counts"]
+    assert counts["review_memories"] == 0 and "new_memories" not in counts
     assert core.store.one("SELECT * FROM memories") == candidate
     usage = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
     path = f"/v1/console/memories/{candidate['memory_id']}/decision"
@@ -247,9 +249,8 @@ def test_extracted_candidate_appears_in_pending_and_leaves_after_owner_confirmat
     assert response.json()["state"] == "CONFIRMED"
     duplicate = client.post(path, json={"decision": "confirm"}, headers=headers)
     assert duplicate.json() == response.json()
-    listed = client.get("/v1/console/memories?review=true").json()
-    assert listed["items"] == [] and listed["meta"]["pending_count"] == 0
-    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 0
+    listed = client.get("/v1/console/memories?view=new").json()
+    assert listed["items"] == [] and listed["meta"] == {"conflict_count": 0, "more": False}
     assert client.get("/v1/console/memories").json()["items"][0]["status"] == "CONFIRMED"
     assert core.store.one("SELECT * FROM memories")["origin"] == "user_confirmed"
     assert core.store.one("SELECT COUNT(*) n FROM audit_log WHERE action='memory.owner_decision'")[
@@ -257,34 +258,45 @@ def test_extracted_candidate_appears_in_pending_and_leaves_after_owner_confirmat
     assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == usage
 
 
-def test_pending_list_and_count_include_candidates_and_confirmed_conflicts(client, core):
+def test_conflict_and_new_views_split_candidates_from_conflicts(client, core):
     candidate, _ = stored_memory(core, confirmed=False)
     candidate_conflict, _ = stored_memory(core, 2, confirmed=False, review=True, content="候选冲突")
     confirmed_conflict, _ = stored_memory(core, 3, review=True, content="已确认冲突")
     confirmed, _ = stored_memory(core, 4, content="已确认事实")
     login(client)
-    items = client.get("/v1/console/memories?review=true").json()["items"]
-    assert {item["id"] for item in items} == {candidate, candidate_conflict, confirmed_conflict}
-    assert confirmed not in {item["id"] for item in items}
-    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 3
-    result = client.get("/v1/console/memories?review=true&q=候选冲突").json()["items"]
+    items = client.get("/v1/console/memories?view=conflicts").json()["items"]
+    assert {item["id"] for item in items} == {candidate_conflict, confirmed_conflict}
+    fresh = client.get("/v1/console/memories?view=new").json()["items"]
+    assert [item["id"] for item in fresh] == [candidate]
+    every = client.get("/v1/console/memories").json()["items"]
+    assert {item["id"] for item in every} == {candidate, candidate_conflict, confirmed_conflict,
+                                              confirmed}
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 2
+    assert client.get("/v1/console/memories?view=pending").status_code == 422
+    result = client.get("/v1/console/memories?view=conflicts&q=候选冲突").json()["items"]
     assert [item["id"] for item in result] == [candidate_conflict]
     assert result[0]["detail"]["needs_review"] is True
-    empty = client.get("/v1/console/memories?review=true&q=不存在").json()
-    assert empty["items"] == [] and empty["meta"]["pending_count"] == 3
+    empty = client.get("/v1/console/memories?view=conflicts&q=不存在").json()
+    assert empty["items"] == [] and empty["meta"] == {"conflict_count": 2, "more": False}
 
 
-def test_pending_count_covers_candidates_beyond_the_list_limit_and_sql_page(client, core):
+def test_new_view_stops_at_the_list_limit_and_conflicts_count_beyond_the_sql_page(
+    client, core,
+):
     _, source = stored_memory(core, confirmed=False)
     for number in range(2, 207):
         core.clock.advance(1)
-        stored_memory(core, number, source=source, content=f"候选事实 {number}", confirmed=False)
+        stored_memory(core, number, source=source, content=f"候选事实 {number}", confirmed=False,
+                      review=number > 3)
     login(client)
-    listed = client.get("/v1/console/memories?review=true&limit=2").json()
-    assert listed["meta"]["pending_count"] == 206
+    listed = client.get("/v1/console/memories?view=new&limit=2").json()
+    assert listed["meta"] == {"conflict_count": 203, "more": True}
     items = listed["items"]
     assert len(items) == 2 and all(item["status"] == "HYPOTHESIS" for item in items)
-    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 206
+    assert not any(item["detail"]["needs_review"] for item in items)
+    exact = client.get("/v1/console/memories?view=new&limit=3").json()
+    assert len(exact["items"]) == 3 and exact["meta"]["more"] is False
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 203
 
 
 def test_memory_projection_pages_native_candidates_and_keeps_literal_unicode_search(
@@ -304,7 +316,7 @@ def test_memory_projection_pages_native_candidates_and_keeps_literal_unicode_sea
     assert result.status_code == 200, result.text
     assert [row["id"] for row in result.json()["items"]] == [target]
     assert result.json()["items"][0]["detail"]["evidence_ids"] == [source["event_id"]]
-    result = client.get("/v1/console/memories", params={"review": "true"})
+    result = client.get("/v1/console/memories", params={"view": "conflicts"})
     assert [row["id"] for row in result.json()["items"]] == [target]
     result = client.get("/v1/console/memories", params={"q": "不存在的字面片段"})
     assert result.status_code == 200 and result.json()["items"] == []
@@ -322,9 +334,10 @@ def test_memory_projection_preserves_native_source_and_validity_filters(
     memory_id, source = stored_memory(core, confirmed=confirmed, review=confirmed)
     login(client)
     assert [row["id"] for row in client.get("/v1/console/memories").json()["items"]] == [memory_id]
-    pending = client.get("/v1/console/memories?review=true").json()["items"]
+    view = "conflicts" if confirmed else "new"
+    pending = client.get("/v1/console/memories", params={"view": view}).json()["items"]
     assert [row["id"] for row in pending] == [memory_id]
-    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 1
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == int(confirmed)
     if invalid == "negative":
         core.store.execute("UPDATE memory_evidence SET polarity=-1")
     elif invalid == "tombstone":
@@ -349,7 +362,7 @@ def test_memory_projection_preserves_native_source_and_validity_filters(
     result = client.get("/v1/console/memories")
     assert result.status_code == 200, result.text
     assert result.json()["items"] == []
-    assert client.get("/v1/console/memories?review=true").json()["items"] == []
+    assert client.get("/v1/console/memories", params={"view": view}).json()["items"] == []
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 0
 
 
@@ -457,7 +470,7 @@ def test_overview_review_count_matches_visible_sources_and_reports_disabled_as_u
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 1
     core.store.execute("INSERT INTO runtime_meta VALUES (%s, 'erased')",
                        ("erased_event:" + source["event_id"],))
-    assert client.get("/v1/console/memories", params={"review": "true"}).json()["items"] == []
+    assert client.get("/v1/console/memories", params={"view": "conflicts"}).json()["items"] == []
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 0
     core.settings.memory_enabled = False
     response = client.get("/v1/console/overview")

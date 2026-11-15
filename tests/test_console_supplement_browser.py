@@ -28,35 +28,44 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation(core, tmp_path):
+def test_new_memories_need_no_owner_work_and_confirm_in_one_batch(core, tmp_path):
     core.clock.now = datetime.now(UTC)
-    memory_id = remember(core, 1, "主人喜欢天文主题", confirmed=False)
-    before = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
+    first = remember(core, 1, "主人喜欢天文主题", confirmed=False)
+    core.clock.advance(1)
+    second = remember(core, 2, "主人周末常去爬山", confirmed=False)
+    before = core.store.rows("SELECT * FROM memories ORDER BY memory_id")
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
-            badge = page.locator("#nav a[href='#memories'] .badge")
-            await badge.wait_for()
-            assert await badge.inner_text() == "1"
-            await page.locator("#nav a[href='#memories']").click()
+            link = page.locator("#nav a[href='#memories']")
+            await link.wait_for()
+            assert await link.locator(".badge").count() == 0
+            await link.click()
             await page.locator("#page[aria-busy=false]").wait_for()
-            card = page.locator(".mem").filter(has_text="主人喜欢天文主题")
-            await card.wait_for()
-            assert "候选记忆已自动保存，可在对话中参考" in await page.locator("#page").inner_text()
-            pending = page.locator(".toolbar button[aria-pressed=true]").filter(has_text="待确认")
-            assert await pending.locator(".count").inner_text() == "1"
-            unchanged = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
-            assert unchanged == before
-            await card.get_by_role("button", name="确认", exact=True).click()
-            await submit_dialog(page, "确认", f"/memories/{memory_id}/decision")
-            await page.get_by_role("heading", name="没有待确认的记忆", exact=True).wait_for()
-            await badge.wait_for(state="detached")
-            assert await pending.locator(".count").count() == 0
-            assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,))[
-                "status"] == "CONFIRMED"
+            await page.get_by_role("heading", name="没有互相矛盾的记忆", exact=True).wait_for()
+            assert "不确认也可以" in await page.locator("#page").inner_text()
+            fresh = page.locator(".toolbar button").filter(has_text="新记住的")
+            assert await fresh.locator(".count").count() == 0
+            await fresh.click()
+            await page.locator("#page[aria-busy=false]").wait_for()
+            await page.locator(".mem").filter(has_text="主人周末常去爬山").wait_for()
+            assert core.store.rows("SELECT * FROM memories ORDER BY memory_id") == before
+            await page.get_by_role("button", name="确认这 2 条", exact=True).click()
+            async with page.expect_response(lambda r: r.url.endswith(
+                    f"/memories/{first}/decision")) as response:
+                await page.get_by_role("dialog").get_by_role(
+                    "button", name="全部确认", exact=True).click()
+            assert (await response.value).status == 200
+            await page.get_by_role("dialog").wait_for(state="hidden")
+            await page.get_by_role("heading", name="没有未确认的新记忆", exact=True).wait_for()
+            assert {row["status"] for row in core.store.rows(
+                "SELECT status FROM memories WHERE memory_id IN (%s,%s)", (first, second))} == {
+                "CONFIRMED"}
             operations = core.store.one(
                 "SELECT COUNT(*) n FROM console_operations WHERE state='COMPLETE'")
-            assert operations["n"] == 1
+            assert operations["n"] == 2
+            assert core.store.one("SELECT COUNT(*) n FROM audit_log "
+                                  "WHERE action='memory.owner_decision'")["n"] == 2
             assert not core.store.rows("SELECT * FROM model_usage")
 
     run(scenario())

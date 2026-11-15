@@ -20,6 +20,7 @@ from companion import (
     live_text,
     notices,
     owner_authority,
+    owner_channel,
     owner_delivery,
     owner_input,
     poke,
@@ -872,7 +873,11 @@ class Core(Runtime):
         if authority and job["kind"] == "chat" and turn.permits("image"):
             # Recalled turns left the ordinary window but stay in the authorized
             # source set: an explicit objection may still target their images.
-            window = sorted([*zip(sources, turns, strict=True), *recalled_history],
+            # Images stay with their own channel; another channel's turns are text only.
+            window = sorted([pair for pair in [*zip(sources, turns, strict=True),
+                                               *recalled_history]
+                             if pair[0].get("conversation_id", job["conversation_id"])
+                             == job["conversation_id"]],
                             key=lambda pair: original_order.get(pair[0]["event_id"], -1))
             window_sources = [source for source, _ in window]
             image_review_target = image_review.target(self, job, turn.body, window_sources)
@@ -904,6 +909,15 @@ class Core(Runtime):
                                         for source, turn in history.recalled_history]
             rules.append(reply_quote.RULES)
         current_input = []
+        if any(source.get("conversation_id", job["conversation_id"]) != job["conversation_id"]
+               for source in sources):
+            platforms = {row["conversation_id"]: row["platform"] for row in s.rows(
+                "SELECT conversation_id, platform FROM conversations WHERE conversation_id = "
+                "ANY(%s)", (list({source["conversation_id"] for source in sources}),))}
+            # Say where each turn from another channel was said; quotes above stay exact.
+            turns = [owner_channel.tag_turn(turn, source, platforms.get(source["conversation_id"]))
+                     if source["conversation_id"] != job["conversation_id"] else turn
+                     for turn, source in zip(turns, sources, strict=True)]
         if (job["kind"] == "chat" and cfg.chat_time_labels) or followup:
             turns = [time_context.stamp_turn(turn, source, cfg.timezone)
                      for turn, source in zip(turns, sources, strict=True)]
@@ -1808,6 +1822,10 @@ class Core(Runtime):
                     budget_micro_usd=usage["billed_micro_usd"] if usage else None,
                     model_usage_state=usage["state"] if usage else None,
                 )
+            if detail := getattr(error, "safe_detail", None):
+                with self.store.transaction():
+                    self.store.audit("job.contract_invalid", job["job_id"], job["trace_id"],
+                                     self.clock(), code=error.code, **detail)
             self.fail_job(job, error.code if isinstance(error, CoreError) else "INTERNAL_ERROR")
         finally:
             if qq_images.enabled(self.settings):

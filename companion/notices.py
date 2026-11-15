@@ -520,6 +520,11 @@ def parts(store, settings, job, text, now):
         return None
     if not _settled(store, job["job_id"]):
         raise CoreError("NOTICE_JOB_UNSETTLED", 409)
+    if data["kind"] == "followup":
+        from companion.turn_taking import follow_up_text
+
+        # A follow-up answers in a fixed shape; a malformed answer sends nothing.
+        text = follow_up_text(text) or ""
     if text.strip() in {"", "[SKIP]"}:
         if data["kind"] == "commitment":
             raise CoreError("NOTICE_MODEL_REPLY_REQUIRED", 409)

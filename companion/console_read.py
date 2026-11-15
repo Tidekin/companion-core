@@ -55,19 +55,30 @@ def _memory_page(core, now, ids):
             yield {**row, "evidence_ids": [event["event_id"] for event in evidence]}
 
 
-def _memory_rows(core, now, review=False):
-    """Pending means unconfirmed or conflicted; native source eligibility still applies."""
-    offset, batch_size = 0, 200
+# Conflicts need the owner's judgment and are counted completely. Unconfirmed candidates are
+# already in use, so they are listed for browsing without a full-population count: every
+# memory needs a complete source check, and counting them all made each page load scale with
+# the whole memory store.
+MEMORY_VIEWS = {
+    "all": "TRUE",
+    "conflicts": "m.needs_review = 1",
+    "new": "(m.status = 'HYPOTHESIS' AND m.needs_review = 0)",
+}
+
+
+def _memory_rows(core, now, view="all", batch_size=200):
+    """Native source eligibility applies to every view and count."""
+    offset = 0
     while True:
         candidates = core.store.rows(
             "SELECT m.memory_id FROM memories AS m WHERE m.status IN ('CONFIRMED', 'HYPOTHESIS') "
-            "AND m.privacy_scope = 'private' AND m.confidence > 0 AND (%s = 0 OR m.status = "
-            "'HYPOTHESIS' OR m.needs_review = 1) AND EXISTS(SELECT 1 FROM memory_evidence AS v "
+            "AND m.privacy_scope = 'private' AND m.confidence > 0 AND " + MEMORY_VIEWS[view]
+            + " AND EXISTS(SELECT 1 FROM memory_evidence AS v "
             'JOIN events AS e ON e.event_id = v.event_id WHERE v.memory_id = m.memory_id AND '
             "v.polarity = 1 AND e.redacted = 0 AND e.actor_id = 'owner' AND e.privacy_scope = "
             "'private') ORDER BY m.needs_review NULLS FIRST, m.status = 'CONFIRMED' DESC NULLS "
             'LAST, m.updated_at DESC NULLS LAST, m.memory_id NULLS FIRST LIMIT %s OFFSET '
-            '%s', (int(review), batch_size, offset),
+            '%s', (batch_size, offset),
         )
         if not candidates:
             return
@@ -81,34 +92,45 @@ def _memory_rows(core, now, review=False):
         offset += len(ids)
 
 
-def _pending_memory(row):
-    return row["status"] == "HYPOTHESIS" or bool(row["needs_review"])
+def _memory_view(row):
+    if row["needs_review"]:
+        return "conflicts"
+    return "new" if row["status"] == "HYPOTHESIS" else "confirmed"
 
 
-def memories(core, query="", review=False, limit=30):
+def _conflict_count(core, now):
+    return sum(1 for _ in _memory_rows(core, now, "conflicts"))
+
+
+def _in_view(row, view):
+    return view == "all" or _memory_view(row) == view
+
+
+def memories(core, query="", view="all", limit=30):
     core.memory.require_owner("owner")
     version, now = read_version(core.memory), core.clock()
-    selected, folded, pending_count = [], query.casefold(), 0
-    for row in _memory_rows(core, now):
-        pending = _pending_memory(row)
-        pending_count += int(pending)
-        if ((not review or pending) and folded in row["content"].casefold()
-            and len(selected) < limit):
+    selected, folded, more = [], query.casefold(), False
+    # Without a search the first SQL page already holds the list and its overflow marker.
+    for row in _memory_rows(core, now, view, 200 if folded else min(200, limit + 1)):
+        if folded in row["content"].casefold():
+            if len(selected) == limit:
+                more = True
+                break
             selected.append(row["memory_id"])
+    conflicts = _conflict_count(core, now)
     # Recheck early pages after the complete scan, without returning stale evidence.
     rows = {row["memory_id"]: row for row in _memory_page(core, now, selected)}
     check_version(core.memory, version)
     items = []
     for memory_id in selected:
         row = rows.get(memory_id)
-        if (row is None or (review and not _pending_memory(row))
-            or folded not in row["content"].casefold()):
+        if row is None or not _in_view(row, view) or folded not in row["content"].casefold():
             continue
         items.append(entry(row["memory_id"], "memory", row["content"], row["status"],
                            row["updated_at"], subject=row["subject"], memory_kind=row["kind"],
                            needs_review=bool(row["needs_review"]),
                            evidence_ids=row["evidence_ids"]))
-    return {**collection(core, items), "meta": {"pending_count": pending_count}}
+    return {**collection(core, items), "meta": {"conflict_count": conflicts, "more": more}}
 
 
 def recall(core, query, limit=10):
@@ -225,7 +247,7 @@ def _review_count(core):
     if not core.settings.memory_enabled:
         return None
     version, now = read_version(core.memory), core.clock()
-    count = sum(1 for _ in _memory_rows(core, now, review=True))
+    count = _conflict_count(core, now)
     check_version(core.memory, version)
     return count
 

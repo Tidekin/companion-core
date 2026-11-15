@@ -190,7 +190,7 @@ const SECRET_KEY = /password|cookie|authorization|api_key|access_token|refresh_t
 const state = {
   session: null, epoch: 0, generation: 0, route: "overview", sub: "", data: null, controller: null,
   tz: undefined, updatedAt: null, toastTimer: null, searchTimer: null,
-  actKind: "all", memTab: "review", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
+  actKind: "all", memTab: "conflicts", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
   capMobile: false, contentF: "all", draft: new Map(), configSave: null, budgetDraft: new Map(), budgetSave: null,
   deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, meterScale: "call", meterDrawn: null, contentTab: "items", expanded: new Set(),
 };
@@ -443,7 +443,7 @@ const LOADERS = {
   },
   memories: signal => state.memTab === "jargon" ? api.get("/jargon", signal) : state.memTab === "recall"
     ? (state.memQ.trim() ? api.get("/memories/recall?q=" + encodeURIComponent(state.memQ.trim()), signal) : Promise.resolve({ items: [], query: "" }))
-    : api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
+    : api.get("/memories?limit=60&view=" + state.memTab + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: async signal => {
     const [life, goals, reflections, topics] = await Promise.all([
       api.get("/life", signal), api.get("/goals", signal), api.get("/reflections", signal),
@@ -589,8 +589,8 @@ async function loadRoute({ reset = false, more = false } = {}) {
       value = { ...value, items: [...unique.values()] };
     }
     if (route === "overview" || route === "caps") updateNavFrom(value);
-    if (route === "memories" && Number.isSafeInteger(value.meta?.pending_count) && value.meta.pending_count >= 0) {
-      state.nav = { ...(state.nav || {}), review: value.meta.pending_count };
+    if (route === "memories" && Number.isSafeInteger(value.meta?.conflict_count) && value.meta.conflict_count >= 0) {
+      state.nav = { ...(state.nav || {}), review: value.meta.conflict_count };
     }
     if (route === "overview" && value.diagnostics?.items) state.nav.uncertain = value.diagnostics.items.filter(i => i.status === "DELIVERY_UNCERTAIN").length;
     state.data = value; state.updatedAt = new Date().toISOString();
@@ -713,7 +713,7 @@ function todoList(data) {
   const out = [], counts = data.counts || {}, b = data.budget || {};
   const uncertain = (data.diagnostics?.items || []).filter(i => i.status === "DELIVERY_UNCERTAIN");
   if (uncertain.length) out.push(["bad", uncertain.length, "条投递结果不明", "不会自动重发,请到 QQ 里看看是否已出现", "去核对", "diagnostics"]);
-  if (counts.review_memories) out.push(["", counts.review_memories, "条记忆可以核对", "查看候选内容，或核对相互矛盾的说法", "去确认", "memories"]);
+  if (counts.review_memories) out.push(["", counts.review_memories, "条记忆互相矛盾", "她不确定哪个说法对，需要你判断", "去核对", "memories"]);
   if (counts.companion_proposals) out.push(["info", counts.companion_proposals, "条她的调整提议", "她想少打扰或休息一下,等你批准", "去看看", "caps/wake"]);
   if (counts.pending_goals) out.push(["", counts.pending_goals, "个目标等你决定", "她提出了新目标,需要你接受或取消", "去看看", "life"]);
   if (counts.pending_reflections) out.push(["", counts.pending_reflections, "条反思等你批准", "每日反思已完成,需要你批准或拒绝", "去看看", "life"]);
@@ -740,7 +740,7 @@ function budgetCard(b, counts = {}) {
       .map(([n, v, c]) => el("div", { style: { "--c": c } }, n, el("b", {}, yuan(v))))),
     el("div", { class: "queues" }, el("div", {}, el("b", {}, count(counts.pending_jobs)), el("span", {}, "排队中的任务")),
       el("div", {}, el("b", {}, count(counts.pending_deliveries)), el("span", {}, "待发送消息")),
-      el("div", {}, el("b", {}, count(counts.review_memories)), el("span", {}, "待确认记忆"))),
+      el("div", {}, el("b", {}, count(counts.review_memories)), el("span", {}, "冲突记忆"))),
     el("p", { class: "note mt" }, "按配置费率和汇率估算，不等于服务商的最终账单。")], linkTo("configuration/money", "费用换算"));
 }
 function recentCard(recent) {
@@ -851,13 +851,17 @@ PAGES.memories = data => {
   const items = data.items || [];
   const searchInput = el("input", { class: "input", id: "mem-q", type: "search", maxlength: "100", placeholder: "搜索记忆内容", value: state.memQ,
     oninput: e => { if (e.isComposing) return; memSearch(e.target.value); }, oncompositionend: e => memSearch(e.target.value) });
-  return el("div", {}, head("记忆", "候选记忆已自动保存，可在对话中参考。确认表示你认可其内容；忘记会同时清除来源和由此衍生的内容。"),
+  const batch = state.memTab === "new" && state.memView === "list" ? items.filter(m => m.status === "HYPOTHESIS" && !m.detail?.needs_review) : [];
+  const tabCount = k => k === "conflicts" ? state.nav?.review : 0;
+  return el("div", {}, head("记忆", "新记住的内容会自动保存并在对话中使用，不确认也可以。只有互相矛盾的说法需要你判断；忘记会同时清除来源和由此衍生的内容。"),
     el("div", { class: "toolbar" }, el("div", { class: "seg", role: "group" },
-      [["review", "待确认"], ["all", "全部"], ["recall", "召回测试"], ["jargon", "黑话"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
-        n, k === "review" && state.nav?.review ? el("span", { class: "count" }, String(state.nav.review)) : null))),
+      [["conflicts", "有冲突"], ["new", "新记住的"], ["all", "全部"], ["recall", "召回测试"], ["jargon", "黑话"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
+        n, tabCount(k) ? el("span", { class: "count" }, String(tabCount(k))) : null))),
       el("label", { class: "search" }, icon("search"), searchInput), el("span", { class: "spacer" }),
       el("div", { class: "seg", role: "group", "aria-label": "视图" }, [["list", "列表", "timeline"], ["graph", "关系图", "spark"]].map(([k, n, ic]) =>
         el("button", { type: "button", "aria-pressed": String(state.memView === k), onclick: () => { state.memView = k; rerender(); } }, icon(ic), n)))),
+    batch.length ? el("div", { class: "row-gap mt" }, el("span", { class: "note" }, "这些记忆已经在对话中使用。确认只是标记你认可，可以跳过。"), el("span", { class: "spacer" }),
+      btn("确认这 " + batch.length + " 条", () => confirmMany(batch), { cls: "sm", symbol: "check" })) : null,
     state.memTab === "jargon" ? jargonView(data) : state.memTab === "recall" ? recallView(data) : state.memView === "graph" ? memoryGraph(items) : items.length ? el("div", { class: "mem-list" }, items.map(m => {
       const d = m.detail || {}, review = m.status !== "CONFIRMED" || d.needs_review;
       return el("article", { class: "mem" + (review ? " review" : "") },
@@ -867,9 +871,41 @@ PAGES.memories = data => {
           d.needs_review ? el("div", { class: "alert mt" }, icon("warn"), el("span", {}, "这条记忆和其他说法可能冲突，需要你核对。")) : null),
         el("div", { class: "acts" }, m.status !== "CONFIRMED" ? btn("确认", () => memoryAction(m, "confirm"), { cls: "sm primary", symbol: "check" }) : null,
           btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }), btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })));
-    })) : empty(state.memQ ? "没有匹配的记忆" : state.memTab === "review" ? "没有待确认的记忆" : "还没有记忆",
-      state.memQ ? "换个关键词试试。" : "新提取的候选会显示在“待确认”中，也可以在“全部”查看。"));
+    })) : empty(state.memQ ? "没有匹配的记忆" : state.memTab === "conflicts" ? "没有互相矛盾的记忆" : state.memTab === "new" ? "没有未确认的新记忆" : "还没有记忆",
+      state.memQ ? "换个关键词试试。" : state.memTab === "conflicts" ? "新记住的内容在“新记住的”里，可以随时浏览。" : "新提取的记忆会显示在“新记住的”中，也可以在“全部”查看。"),
+    state.memTab !== "jargon" && state.memTab !== "recall" && data.meta?.more ? el("p", { class: "note mt" }, "只显示最近 60 条，可以用搜索找更早的记忆。") : null);
 };
+// 逐条调用单条确认接口：每条记忆各有自己的幂等键、审计和回执，遇到错误就停下，不跳过继续。
+function confirmMany(items) {
+  const form = el("form", { class: "dlg-form" });
+  form.append(el("p", {}, "确认当前列出的 " + items.length + " 条新记忆？"),
+    el("ul", { class: "consequence" }, items.slice(0, 5).map(m => el("li", {}, m.title)), items.length > 5 ? el("li", { class: "muted" }, "还有 " + (items.length - 5) + " 条") : null),
+    el("p", { class: "muted" }, "确认会把它们标为你已认可。有冲突的记忆不在其中，需要单独核对。"));
+  const submit = el("button", { type: "submit", class: "btn primary" }, "全部确认");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  let done = 0;
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, async () => {
+      for (const item of items.slice(done)) {
+        try {
+          await api.write("/memories/" + encodeURIComponent(item.id) + "/decision", { decision: "confirm" }, "POST",
+            r => r.memory_id === String(item.id) && typeof r.state === "string");
+        } catch (error) {
+          if (!done) throw error;
+          return { error };
+        }
+        done += 1;
+      }
+      return {};
+    }, async ({ error }) => {
+      // 再次提交会从没完成的那一条继续，结果不明的那条沿用原来的幂等键。
+      if (error) { formError(form, "已确认 " + done + " 条，第 " + (done + 1) + " 条没有完成：" + errorText(error)); return; }
+      closeDialog(); toast("已确认 " + done + " 条记忆"); await loadRoute({ reset: true });
+    });
+  });
+  openDialog("批量确认记忆", form);
+}
 function memoryAction(item, decision) {
   const titles = { confirm: "确认这条记忆", correct: "纠正这条记忆", forget: "忘记这条记忆？" };
   const form = el("form", { class: "dlg-form" });
@@ -2133,7 +2169,7 @@ function layoutGraph(nodes, edges) {
 function edgeD(e) { const a = GPOS.get(e.a), b = GPOS.get(e.b); const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, bend = e.kind === "shared" ? 40 : 10;
   return `M${a.x.toFixed(1)} ${a.y.toFixed(1)} Q${(mx - dy / d * bend).toFixed(1)} ${(my + dx / d * bend).toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}`; }
 function memoryGraph(items) {
-  if (!items.length) return empty("还没有可以画成关系图的记忆", state.memTab === "review" ? "切到“全部”看看。" : "记忆形成后会出现在这里。");
+  if (!items.length) return empty("还没有可以画成关系图的记忆", state.memTab !== "all" ? "切到“全部”看看。" : "记忆形成后会出现在这里。");
   const { nodes, edges } = graphModel(items); layoutGraph(nodes, edges);
   const sel = nodes.find(n => n.id === state.gSel) || null;
   const near = sel ? new Set([sel.id, ...edges.filter(e => e.a === sel.id || e.b === sel.id).flatMap(e => [e.a, e.b])]) : null;

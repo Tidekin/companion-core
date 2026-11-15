@@ -1619,10 +1619,13 @@ class TurnView extends StatelessWidget {
                   content: reply.sticker && reply.text.trim().isEmpty
                       ? MessageImages(images: [loadSticker!(reply.id)])
                       : null,
-                  // A message the companion started carries its own send time.
-                  time: turn.proactive && index == 0
-                      ? sentAt(turn.createdAt)
-                      : null,
+                  // The first bubble carries the reply's own time, like the owner's.
+                  time: index != 0
+                      ? null
+                      : switch (reply.createdAt) {
+                          final DateTime at => sentAt(at),
+                          _ => turn.proactive ? sentAt(turn.createdAt) : null,
+                        },
                   header: switch ((reply.quote, quotes)) {
                     (final ChatQuote quote, final QuoteLookup lookup) =>
                       QuoteBox(
