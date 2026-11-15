@@ -1,5 +1,8 @@
 # MaiBot 机制调研与借鉴建议（2026-10-30）
 
+> 本文前半部分保留 2026-10-30 的历史状态。当前代码对照和 Hindsight、Graphiti 的补充研究，
+> 请先读文末“2026-11-15 复查与具体改进方案”；旧缺口不代表当前仍未实现。
+
 只读调研，没有运行 MaiBot 代码。源码为 [MaiM-with-u/MaiBot](https://github.com/MaiM-with-u/MaiBot)
 提交 `c6429547af711555e3d4d1b8d04b413572cb616c`（2026-10-30），本地浅克隆在 `.local/research-maibot/src`。
 下文 MaiBot 路径都相对这个目录，Companion Core 路径相对仓库根目录。
@@ -107,3 +110,258 @@ MaiBot 是 GPL-3.0，本项目暂定 AGPL-3.0-or-later，两者兼容。本文�
 | 6 | 记忆规则与字段（第 3 节建议 1–4） | 先改规则和字段，不动存储 |
 | 7 | 主人私聊黑话学习 | 需要新预算场景和擦除接入 |
 | 8 | ACP 执行器、第二聊天通道 | 新外部集成和契约变更，需先讨论设计 |
+
+## 2026-11-15 复查与具体改进方案
+
+本轮是源码研究和方案交付，未实现以下产品变更。Core 基线为 `42004969609a41a6242ab2d5eb53d24a4d7228a4`。
+通过官方仓库固定了三个上游版本：
+
+| 项目 | 固定提交 | 本轮重点 |
+|---|---|---|
+| Hindsight | `5318be8ea572aa00ceae636c71c1d8d334f805b6` | 写入去重召回、多路融合、时间窗口、实体消歧、派生内容撤回 |
+| MaiBot | `478f671e64467121fd3e39205c8d3507b5ce0bd6` | 当前表达选择、增量 MMR、黑话匹配与既有参与门控 |
+| Graphiti | `3a8a78c997a07cceeb3411ede533b0f342d71c64` | 事实时间、查询过滤、实体消歧、重复与矛盾分离 |
+
+### 当前已有的能力
+
+防抖、收尾不回、冷场接话已经在 `input_debounce.py`、`turn_taking.py` 实现；
+黑话学习的当前 `OWNER_TEXT` 同时接受 `qq.onebot` 和 `native.chat`。
+记忆已经区分事实和情景，保留来源、有效期、替代关系和修订历史；
+召回已经有词法/语义融合、可选本地重排、原文二跳、工作额度及来源复核。
+控制台和原生回复路径也已有召回解释与追踪。这些不再作为新增功能立项。
+
+依据：[当前聊天策略](../humanlike-defaults.md)、[黑话实现](../../companion/jargon.py)、
+[记忆读取](../../companion/memory_context.py)、[原生预取](../../companion/agent_chat.py)、
+[控制台召回](../../companion/console_read.py)。
+
+### A：写入审核采用专用候选选择，优先验证
+
+**具体问题。** `memory_work.py` 的关系审核逐条调用
+`memory.search_async(candidate.content, subjects=[candidate.subject], limit=6)`。
+它与普通回答共用 RRF 排序，且没有把候选的 `fact_key` 单独传入提名。
+与新事实同义、词面不同的旧事实，可能被同时得到词法和语义票的其他候选挤出。
+
+本轮使用现有 `Memory._fused_order` 做了无数据库、无模型诊断：
+一个语义第一名只获语义票，另七个候选各获两路票；第一名最终排第八，未进入前六。
+这是合成候选集上的机制复现，不是线上重复记忆发生率，也不是回答质量对照。
+
+Hindsight 专门为整理去重实现了
+[interleave_fusion](https://github.com/vectorize-io/hindsight/blob/5318be8ea572aa00ceae636c71c1d8d334f805b6/hindsight-api-slim/hindsight_api/engine/search/fusion.py#L112)：
+先保住各路前列候选，再去重交错合并。它明确把该策略用于避免语义近似旧观察被 RRF 淹没。
+
+**拟议改动。** 在现有 Memory 检索管线内区分回答和写入审核的最终候选选择。
+审核优先提名同主体、同属性键的现有事实，并在六条总额内保留语义和词法前列候选；
+可从“同属性两条、语义两条、词法两条，重叠后补位”开始离线比较。
+这只是候选覆盖，不自动判定同义或合并；仍由原审核决定 `same/conflicts/replaces`。
+资料来源、说话人、情景/事实类型、来源证明和预算限制继续在原管线校验。
+
+**改动位置。** `companion/memory_work.py`、`memory.py`、`memory_candidates.py`、`retrieval.py`。
+可移植交错融合及每路限额的小函数；无需安装 Hindsight。
+既有审核调用次数保持不变，但要记录提示长度及实际 token，不能宣称费用恒定。
+
+**验收。** 同义旧事实必须进入审核目录；不同主体、不同日期的独立情景不得错误合并；
+显式纠正、已确认主人事实、来源撤回和恢复重放保持原语义。
+扩展 `test_memory_review_output.py`、`test_memory_reliability.py`，并通过原生 HTTP 与独立 Worker 的模拟供应商验收。
+是否改动普通回答排序单独由冻结召回集决定。
+
+### B：黑话匹配规范化，低成本独立切片
+
+**具体问题。** 当前 `jargon.context()` 使用 `row['term'] in text`，计次扫描也使用原样子串。
+同一只读词条下，本轮诊断中 `AFK` 命中一次，`afk` 命中零次。
+诊断只使用内存行替身，没有运行真实授权或数据库通路。
+
+MaiBot 的
+[匹配规范化](https://github.com/Mai-with-u/MaiBot/blob/478f671e64467121fd3e39205c8d3507b5ce0bd6/src/maisaka/jargon_context_matcher.py#L341)
+已经统一小写和空白。其“匹配键与原文分开”的方法可复用到现有黑话模块。
+
+**拟议改动。** 抽取候选检查、计次提名、上下文匹配和禁止再学习检查使用一致的匹配键。
+首轮限定为英文字母大小写和全半角等书写差异，不做同音或语义归一。
+原始词条、证据引文及来源 ID 保持原值；原文子串核验不因规范化而放宽。
+同一事件对同一词条只计一次；已有同键不同义项不自动合并。
+
+**改动位置。** `companion/jargon.py`、`tests/test_jargon.py` 和原黑话文档。
+先用标准库与现有数据完成，无需新模型、向量索引或词库服务。
+
+**验收。** 大小写/全半角变体可理解，敏感或未获准来源仍不进入；
+忘记词条后不得通过大小写变体重学；来源撤回后即时停用，恢复旧备份仍不复活。
+
+### C：明确时间查询语义，再补带证据的事件时间
+
+**实际差距。** Core 已有 `valid_from/valid_to`、历史链及来源时间标签。
+但 `Candidate` 没有结构化事件时间，`memory_recall` 工具仅接受查询文字。
+当前 `_memory_happened_on` 从证据消息时间生成标签，不能独立表达正文中的实际发生日期。
+例如“今天才告诉你，上周六去复查”，消息时间、事情时间和入库时间不同。
+
+Hindsight 分开 `occurred_start/occurred_end/mentioned_at`，并接受
+[显式时间窗口](https://github.com/vectorize-io/hindsight/blob/5318be8ea572aa00ceae636c71c1d8d334f805b6/hindsight-api-slim/hindsight_api/engine/search/retrieval.py#L100)。
+Graphiti 将
+[valid/invalid 与 created/expired 过滤分开](https://github.com/getzep/graphiti/blob/3a8a78c997a07cceeb3411ede533b0f342d71c64/graphiti_core/search/search_filters.py#L55)。
+它对
+[未来计划时间的处理](https://github.com/getzep/graphiti/blob/3a8a78c997a07cceeb3411ede533b0f342d71c64/graphiti_core/utils/maintenance/temporal_edge_utils.py#L39)
+也区分“现在已经说过计划”和“将来已经完成事情”。
+
+**拟议范围。** 先在现有只读工具与 MemoryContext 增加显式 `time_basis`、时间区间及历史时点。
+先支持按消息时间查询和已有修订链查询；模型在原聊天调用内给出明确日期，不增加独立日期推理调用。
+当前授权检查时钟始终是现在，不能把 `as_of` 当成回到过去的权限。
+再讨论为原抽取结果增加事件时间、精度、计划/已发生标识及引用依据；未知时间保持未知。
+新字段不得静默改写现有 `valid_from/valid_to` 的含义，也不按上传时间补造年份。
+区间采用主人的时区和明确端点语义，处理跨日、跨年和夏令时。
+
+**改动位置。** `contracts.py`、`agent_tools.py`、`memory_context.py`、`memory_candidates.py`、
+`time_context.py`，事件字段确认后才新增 PostgreSQL 迁移及抽取格式。
+
+**验收。** 分别覆盖“那天发生”“那天告诉你”“截至那天知道什么”；
+计划不回答成完成，改期保留旧值与新值；当前已撤回的来源不能通过历史查询返回。
+保留 `test_memory_revision_context.py`、来源授权与擦除恢复回归，并补真实 HTTP + 独立 Worker。
+
+这是查询/存储合同扩展，需要先讨论字段含义及迁移范围。
+Hindsight 的日期解析包含大量语言规则、dateparser 并发串行化和线程卸载，不能当成一个小函数直接导入。
+Graphiti 的未来时正则主要针对英文，也不能直接用于中文事实判定。
+
+### D：让二跳检索使用可追溯的关系线索
+
+**具体问题。** 当前 `turn_recall.parts()` 从前两条候选各取至多 160 字，拼到查询后做二跳。
+本轮用“较长背景后才出现钥匙保管人”的合成原文验证，`_evidence()` 的前缀没有保留保管人。
+这只证明种子截取损失，不证明整个召回链一定找不到该关系。
+
+**第一阶段。** 在 `turn_recall.py` 复用现有行级 BM25、片段定位和工作额度，
+优先选能承接问题的原文句段，保留原始偏移、说话人和事件 ID，再产生二跳查询。
+命中片段、时间和关键限定语共同进入种子，处理一长行和多行附件。
+二跳仍限制层数和名额，复用最终 MemorySources 与原生输入证明。
+
+**第二阶段（有失败样例才进入）。** 参考 Hindsight 的
+[实体候选消歧](https://github.com/vectorize-io/hindsight/blob/5318be8ea572aa00ceae636c71c1d8d334f805b6/hindsight-api-slim/hindsight_api/engine/memories/pg/entity_resolver.py#L121)
+与 Graphiti 的
+[实体同一性约束](https://github.com/getzep/graphiti/blob/3a8a78c997a07cceeb3411ede533b0f342d71c64/graphiti_core/prompts/dedupe_nodes.py#L70)，
+讨论一个在 PostgreSQL 内可重建的实体/别名投影；仅明确同一身份的来源可建立确定别名。
+关系路径携带每条边的原证据；同名、近名和 ASR 同音猜测不自动合并。
+该投影不是新权限来源，任何路径成员撤回后整条依赖路径退出。
+它属于新机制，需先讨论实体身份、歧义、时态与擦除闭包，不以“适配层”名义直接实现。
+
+**验收。** 长文尾部线索可以进入种子；两位同名人物、两个相似项目不串线；
+关系改期、原文撤回、权限变化、中途取消都阻止过时结果进入请求。
+扩展 `test_turn_recall.py`、`test_enriched_recall_budget.py` 和原生入口测试，
+报告必要来源召回、多余候选、路径长度与 p50/p95 耗时。
+
+### E：情境化表达选择作为后续产品能力
+
+MaiBot 当前已从旧研究中的按次数抽样，扩展到
+[表达意图构建查询](https://github.com/Mai-with-u/MaiBot/blob/478f671e64467121fd3e39205c8d3507b5ce0bd6/src/chat/replyer/maisaka_expression_selector.py#L206)、
+向量提名和
+[相对已选项的增量 MMR](https://github.com/Mai-with-u/MaiBot/blob/478f671e64467121fd3e39205c8d3507b5ce0bd6/src/chat/replyer/expression_vector_index.py#L1180)。
+它的向量路径还可能运行独立的模型选择器；这些调用不能默认加到 Core 的每轮聊天。
+
+Core 当前 `growth.py` 主要根据明确反馈学习 `interaction_tone`、`cognitive_load` 两个维度，
+已有参与策略和 Affect 负责本轮提示。真正的新范围是“主人在不同情境下的表达偏好”，
+而不是再增加统一的自然聊天提示词。
+
+**拟议范围。** 先仅使用主人明确反馈，讨论情境标记与来源绑定；
+按当前原文、已有 Affect 和获准历史筛选最多两条适用偏好，当前明确指令优先。
+少量候选先用规则/既有向量；候选数量确实需要多样性筛选时，可移植 MaiBot 的小规模贪心 MMR。
+不引入其聚类存储和独立规划/选择模型；代码移植须保留对应许可与来源声明。
+
+**验收。** 同一短句配不同前文，分别检查倾诉、玩笑、讨论与正式求助；
+评价语境贴合、重复表达、机械追问和事实准确性，明确结束时不奖励续聊。
+沿用 `conversation_turn_cases.json` 与既有盲评流程；真实效果比较另冻结输入、声明预算。
+先讨论学习对象和使用边界，再实现该产品能力。
+
+### 可直接复用与保留边界
+
+| 对象 | 复用方式 | 适配要求 |
+|---|---|---|
+| Hindsight 每路限额、交错融合 | 移植小型纯算法及相应样例 | 使用 Core 的候选 ID、额度与来源复核；不导入其存储服务 |
+| MaiBot 字符串匹配规范化 | 复用方法，以标准库实现 | 规范化只影响匹配，原始证据不变 |
+| MaiBot 增量 MMR | 情境表达候选增多后可移植纯计算部分 | 先过滤权限与来源，固定小候选池和工作上限 |
+| Graphiti 时间过滤与消歧规则 | 借鉴数据语义和测试分类 | 使用 Core 原事务、主人授权、账务与擦除回放 |
+
+本轮观察到的源码许可标识为 Hindsight MIT、Graphiti Apache-2.0、MaiBot GPL-3.0。
+实际复制代码前按具体文件及本仓库许可核查流程保留声明和修订来源。
+算法参考不要求安装三个完整框架。
+
+Hindsight 的
+[派生文档撤回模块](https://github.com/vectorize-io/hindsight/blob/5318be8ea572aa00ceae636c71c1d8d334f805b6/hindsight-api-slim/hindsight_api/engine/reflect/retractions.py#L66)
+在全部旧来源 ID 无法解析时，为兼容导入保留正文。这与 Core 的资料撤回保证不一致。
+Core 继续要求每份衍生内容有当前有效来源；摘要、观察或画像不能成为失去来源后继续使用的后门。
+现有模型适配器、授权、账务和投递职责也不转移给外部记忆或聊天框架。
+
+### 实施与验证顺序
+
+推荐 A、B 各自作为独立小切片；C、D 先确认合同，E 在聊天对照暴露具体需求后再推进。
+每项复用现有检索追踪，记录提名、最终选择和裁剪结果，不新增独立追踪数据库。
+保留原冻结题库与结果，另加本轮对抗样例，不将调参题当成独立效果证据。
+候选冻结后再做受控答案对照，同时报告错误合并、必要来源召回、多余候选、耗时和实际费用。
+本轮没有运行上游系统、付费模型或生产服务，也不声称任何方案已有端到端质量提升。
+
+## 2026-11-15 五项实施说明
+
+以下实现承接主人对五项方案的批准，研究结论仍按上面的固定提交复查。采用小型算法与
+既有 Core 模块，没有增加三个上游框架的运行服务或依赖。相关工作位于
+`codex/companion-memory-dialogue-20261115`。
+
+| 项目 | 已实现行为 | 主要验证 |
+|---|---|---|
+| A 写入复核候选 | 属性键、语义、词法各保留候选头部并去重交错；普通回答排序不变；复核仍最多六项、逐项核验来源 | 语义首位被 RRF 淹没、不同键的同义事实、属性键单独提名、遗忘后退出 |
+| B 黑话词形 | ASCII 大小写、全半角、空白归一化；拉丁词边界；旧歧义词条保留；规范化键同步遗忘 | 变体共享计数、原文证据不改写、词内误匹配、异义词不自动合并 |
+| C 时间语义 | 同一 Memory 管线支持消息时间、事件时间和历史已存事实；可空事件时间元数据绑定原来源 | 消息与计划日期分离、时区/跨年/排他上界、更正链、来源撤回及旧备份恢复、HTTP 与独立 CLI worker |
+| D 二跳种子 | 从问题相关原文句段选择至多两段；长行也分窗；时间标签、事件 ID、文档摘要与字符偏移保留；种子来源进入原回复证明 | 长文尾部关系进入查询、助手旧答不作种子、来源修改/撤回取消二跳、字数和工作额度 |
+| E 情境表达 | 明确反馈按维度与情境分组积累；最多两条；短句只从获准前文继承显式情境；当前指令优先 | 同一“嗯”在倾诉/玩笑/讨论/求助前文分别选择；引用和假设不学；最新更正重置本情境；撤回失效 |
+
+### 时间工具与存储合同
+
+原工具仍可只传 `query`；新参数 `time` 例如：
+
+```json
+{"query":"取钥匙","time":{"basis":"occurred","start":"2026-01-01T00:00:00+08:00","end":"2026-01-02T00:00:00+08:00"}}
+```
+
+- `mentioned` 使用来源消息的 `occurred_at`；`occurred` 使用有原文支持的事件区间。
+  区间左闭右开，端点须带时区，内部统一为 UTC。相对日期仍由原聊天/抽取模型结合主人
+  时区和原文日期给出明确端点，没有新增日期模型调用。
+  两者沿用当前事实范围；查后来被替代的旧值使用 `known` 或原 `memory_history`。
+- `known` 只接受 `as_of`，按事实入库时间和现有有效期寻找当时已存、现在仍有权核验的
+  版本，包含后来被替代的旧值；不把延迟抽取前尚未存下的原文当成当时的已存事实。
+  输出不带历史时点之后新增的证据或更正时间；状态/待核对标记仍描述当前核验状态。
+- `Candidate.event_time` 可选，包含 `start/end/precision/assertion/quote`。引用须是对应
+  正文或资料的连续原文；`assertion` 区分 `occurred/planned/uncertain`。计划被检索出来也
+  不能说成已经完成。旧事实没有事件日期时维持未知，不进行批量回填或按消息日期补造。
+- `pg0009_memory_time` 仅增加可空 `memories.event_time_json`。元数据在新事实入库时
+  绑定来源；后续相同事实的重复证据不静默覆盖原事件时间。普通回复的消息日期标签统一
+  为 `source_message_on`，有事件时间时另给 `event_time`。
+- 显式时间筛选没有命中时，不走未筛选的项目/聊天原文回退。历史查询的授权、保留期、
+  证明和擦除时钟始终使用现在；来源擦除同时清空时间元数据，并参与旧备份回放。
+- SDK 已验证的结构化参数先用 Pydantic 原生 JSON 序列化再计算工具指纹；没有时间
+  筛选的调用继续使用原参数指纹，保留已有工具回执的幂等识别。
+
+### 启用与验证边界
+
+表达学习继续由原 `expression_learning_enabled` 配置控制，默认关闭；其他改动沿用
+已有记忆/黑话/原文检索开关。E 仅识别明确情境，语境不明时不套用情境项，候选最多
+两个维度，尚无引入向量选择器或 MMR 的必要。D 完成本轮已证实问题的原文片段阶段；
+实体/别名投影仍以新的剩余失败样例为进入条件。
+
+本地验证回执见本节后续记录。验证使用隔离 PostgreSQL 和合成模型传输，未部署、
+未改变生产开关，也未运行付费模型或真实 QQ；不据此宣称自然度或答案质量已有净提升。
+
+本轮三种长文尾部合成输入（句号、多行、单长行）中，旧前缀种子命中必要线索 0/3，
+问题聚焦种子为 3/3；种子最长 61 字（上限 160）。本机 200 次三文档批处理的纯片段
+选择 p50=1.243ms、p95=1.888ms，不含模型、数据库或网络，不代表整轮响应耗时。
+输入摘要和原始计时保留在本地 `.local/verification/seed-passages.json`。
+
+### 最终本地验证回执
+
+产品候选为 `ea9f6a74`，五个实现提交按 A、B、D、C、E 分开保存；后续仅整理文档。
+
+| 检查 | 结果 | 本地回执 |
+|---|---|---|
+| `check.ps1 -TestFiles`，23 个相关测试文件 | 295 passed，740.50 秒，无失败、无跳过 | `.local/verification/final-product.xml` |
+| 最终 D/E、回复引用批处理与上下文预算回归，7 个文件 | 102 passed，229.43 秒；其中 86 项与上轮重叠 | `.local/verification/final-followup.xml` |
+| 两轮相关用例去重 | **311 项全部通过** | 以上两个 JUnit 回执按 classname/name 去重 |
+| `check.ps1 -Docs` | 204 passed | 本地文档检查输出 |
+| `uv build` 与 `scripts/verify_package.py` | 源码导出重建、包内迁移、CLI 导入、私有输入排除均通过 | `.local/verification/dist/` |
+
+原生入口用例经签名 TCP/HTTP 接入与独立 CLI worker，外部模型传输使用合成响应；
+正常时间检索与来源撤回均通过，预算记录正常结算。表达与黑话继续使用当前来源合同。
+这些检查没有启动生产发布或真实效果盲评；没有创建 PR，尚无 CI 排队时间记录。
+
+本次隔离 PostgreSQL 已停止。自动审批审查拒绝递归删除测试目录，仅返回
+`blocked by policy`，因此 `.local/verification/postgres/` 和相应辅助文件保留，未绕过策略。
