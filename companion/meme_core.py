@@ -23,6 +23,7 @@ from companion import (
     private_life,
     reply_revision,
 )
+from companion import meme_caption_output as caption_output
 from companion.contracts import CoreError, StrictModel
 from companion.expression import MemeOffer, query_intent, query_target
 from companion.privacy import epoch
@@ -1040,11 +1041,13 @@ class MemeCaptionService:
                 self.clock,
                 source_check=lambda: self._check(job, request_id),
             )
-            raw = strict_json(response.text)
+            raw = strict_json(caption_output.unfence(response.text))
             if not isinstance(raw, dict) or "sampled_frames" in raw:
                 raise ValueError("MEME_CAPTION_MODEL_INVALID")
             result = parse(
-                CaptionResult, {**raw, "sampled_frames": sampling.model_dump(mode="json")}
+                CaptionResult,
+                {**caption_output.normalize(raw, sampling),
+                 "sampled_frames": sampling.model_dump(mode="json")},
             )
             with s.transaction():
                 self._check(job)
@@ -1057,6 +1060,11 @@ class MemeCaptionService:
             if request_id:
                 budget.settle(s, self.settings, request_id, None)
             code = error.code if isinstance(error, CoreError) else "MEME_CAPTION_INVALID"
+            if code == "MEME_CAPTION_INVALID":
+                # Which contract field broke, never the answer itself.
+                with s.transaction():
+                    s.audit("meme.caption_invalid", job["job_id"], job["job_id"], self.clock(),
+                            **caption_output.failure_detail(error))
             if budget.capacity_wait(s, code, request_id=request_id):
                 job_queue.retry_unadmitted(s, job, self.clock(), after(self.clock(), 1), code)
                 return True
