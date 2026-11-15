@@ -456,10 +456,11 @@ def register_console_routes(app, settings):
         return console_read.activity(app.state.core, before, limit)
 
     @app.get(prefix + "/memories", dependencies=auth)
-    async def memories(q: str = "", review: bool = False, limit: int = 30):
+    async def memories(q: str = "", view: Literal["conflicts", "new", "all"] = "all",
+                       limit: int = 30):
         if not 1 <= limit <= 60 or len(q) > 100:
             raise CoreError("INVALID_MEMORY_QUERY", 400)
-        return console_read.memories(app.state.core, q, review, limit)
+        return console_read.memories(app.state.core, q, view, limit)
 
     @app.get(prefix + "/memories/recall", dependencies=auth)
     async def memory_recall(q: str, limit: int = 10):
