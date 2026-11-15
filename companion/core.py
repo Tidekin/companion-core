@@ -733,7 +733,7 @@ class Core(Runtime):
         return sources, scoped_share, content_reference, partial(context_selection.relevance, focus)
 
     def _reply_references(self, turn, selection, related, available, bounded_text, affect,
-                         memories, memory_paused, mark):
+                         memories, memory_paused, mark, context_sources=()):
         s, cfg, job, text = self.store, turn.settings, turn.job, turn.text
         authority = turn.authority
         if turn.permits("expression") and not bounded_text:
@@ -763,7 +763,8 @@ class Core(Runtime):
                  "当前交互参考（仅影响表达，不改变人格、事实、权限或承诺）：\n" + encode(affect)},
                 {row["event_id"] for row in affect["evidence"]},
                 proof={"kind": "affect", "proof": affect})
-        learned = self.expression_learning.reply_reference(self.settings, job, affect) if (
+        learned = self.expression_learning.reply_reference(self.settings, job, affect,
+            context_sources=context_sources) if (
             turn.permits("expression")) else None
         mark("context_references")
         # A newer owner message cancels this job at ingestion; stop building for it.
@@ -1015,7 +1016,7 @@ class Core(Runtime):
             turn, bounded_text, has_images, content_reference)
         available = self.memory_context.reply_source_check(cfg, self.clock, authority)
         memory_refs, used_ids = self._reply_references(turn, selection, related, available,
-            bounded_text, affect, memories, memory_paused, mark)
+            bounded_text, affect, memories, memory_paused, mark, context_sources=sources)
         history = self._reply_history(turn, selection, sources, scoped_share=scoped_share,
             bounded_text=bounded_text, available=available, turn_ranking=turn_ranking,
             used_memory_ids=used_ids, mark=mark)
