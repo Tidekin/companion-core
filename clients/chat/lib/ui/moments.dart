@@ -21,7 +21,7 @@ String momentTime(DateTime value, DateTime now) {
   return '${local.month}月${local.day}日 ${two(local.hour)}:${two(local.minute)}';
 }
 
-const _triggers = {'LIFE': '她自己想说的', 'KEEPSAKE': '牢记了一件事'};
+const _triggers = {'LIFE': '她自己想说的', 'MEMORY': '记住了一件重要的事'};
 
 String _failure(Object error) => error is BackendError
     ? switch (error.code) {

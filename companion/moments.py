@@ -18,6 +18,8 @@ from companion.privacy import advance_epoch, redact, sensitive
 from companion.store import encode, uid
 
 STATES = ("PUBLISHED", "HIDDEN", "ERASED")
+# A moment about something she just learned that she rated this important at extraction.
+IMPORTANT = 0.9
 
 
 def _day_bounds(settings, now):
@@ -53,13 +55,18 @@ def save(store, settings, clock, data, body):
         raise CoreError("MOMENT_DAILY_LIMIT", 429)
     moment_id = uid("moment")
     sources = sorted({*data["decision"].source_event_ids, job["event_id"]})
+    trigger = "MEMORY" if store.one(
+        "SELECT 1 FROM memory_evidence v JOIN memories m USING (memory_id) "
+        "WHERE v.event_id = ANY(%s::text[]) AND v.polarity = 1 AND m.importance >= %s "
+        "AND m.status IN ('CONFIRMED','HYPOTHESIS') AND m.confidence > 0 LIMIT 1",
+        (sources, IMPORTANT)) else "LIFE"
     store.insert(
         "moments", moment_id=moment_id, source_job_id=job["job_id"], text=text,
-        content_sha256=sha({"text": text}), trigger="LIFE",
+        content_sha256=sha({"text": text}), trigger=trigger,
         source_event_ids_json=encode(sources), state="PUBLISHED", created_at=now,
         updated_at=now,
     )
-    store.audit("moment.published", moment_id, job["job_id"], now, trigger="LIFE")
+    store.audit("moment.published", moment_id, job["job_id"], now, trigger=trigger)
     return {"moment_id": moment_id, "state": "PUBLISHED", "reused": False}
 
 

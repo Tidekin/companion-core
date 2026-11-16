@@ -180,7 +180,7 @@ def verify_postgres(destination, environment):
         native.migrate(info)
         with native.Database(info) as database, database.session() as session:
             assert session.one('SELECT version_num FROM alembic_version')=={
-                'version_num':'pg0016_moment_likes'}
+                'version_num':'pg0017_moment_trigger'}
             assert session.one("SELECT count(*) AS n FROM information_schema.tables "
                 "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':114}
         print('PASS: extracted wheel initializes native PostgreSQL migrations')
@@ -281,6 +281,7 @@ def main():
             "companion/migrations/postgresql/versions/pg0014_keepsakes.py",
             "companion/migrations/postgresql/versions/pg0015_moments.py",
             "companion/migrations/postgresql/versions/pg0016_moment_likes.py",
+            "companion/migrations/postgresql/versions/pg0017_moment_trigger.py",
             "companion/care.py",
             "companion/care_protocol.py",
             "companion/care_tools.py",
