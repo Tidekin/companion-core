@@ -167,6 +167,7 @@ LABELS = {
     "proactive_interval_seconds": "主动分享最小间隔（秒）",
     "proactive_idle_seconds": "主动分享空闲等待（秒）",
     "proactive_daily_limit": "每日主动分享上限",
+    "moments_daily_limit": "每日动态上限",
     "quiet_start": "安静时段开始（小时）", "quiet_end": "安静时段结束（小时）",
     "lease_seconds": "任务领取有效期（秒）", "max_attempts": "任务最大尝试次数",
     "raw_event_retention_days": "原始事件保留期（天）",
