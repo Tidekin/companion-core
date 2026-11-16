@@ -8,7 +8,14 @@ from time import monotonic
 import psycopg
 from pydantic_ai import DeferredToolRequests
 
-from companion import job_queue, qq_video, reply_revision, retrieval_work, transport
+from companion import (
+    job_queue,
+    memory_salience,
+    qq_video,
+    reply_revision,
+    retrieval_work,
+    transport,
+)
 from companion.agent_persistence import ConversationStore
 from companion.agent_reading import deferred_results, reader_tools
 from companion.agent_runtime import check_conversation, run_conversation
@@ -100,6 +107,7 @@ async def reply(core, job, snapshots):
                         "searches": 1}):
                     result = await core.memory_context.recall_async(query, core.clock(),
                         project_query=query, clock=core.clock, trace=trace,
+                        salience=memory_salience.salience_for(core, job, query),
                         source_check=lambda: check_conversation(
                             core, job, snapshots, purpose="memory"))
             except CoreError as error:
@@ -110,6 +118,7 @@ async def reply(core, job, snapshots):
             proof = core.memory_context.pin(core.clock(), rows=memories,
                                              event_ids=[job["event_id"]])
             reply_revision.remember_sources(core.store, job, proof["source_event_ids"])
+            memory_salience.remember(core.store, job, memories)
             snapshots.append({"kind": "memory", "proof": proof, "retrieval": {
                 "stage": "prefetch", "query_sha256": sha(query), "selection": trace}})
         ranking = None

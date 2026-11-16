@@ -14,7 +14,7 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0011_mood_refusal"
+TARGET_REVISION = "pg0012_memory_mentions"
 # Native-only tables created after the SQLite era; an offline import leaves them empty.
 NATIVE_ONLY_TABLES = frozenset({"companion_profile", "companion_profile_settings",
                                 "companion_profile_changes", "companion_avatar_assets",

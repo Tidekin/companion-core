@@ -768,20 +768,21 @@ class MemoryContext:
 
     async def recall_async(self, query, now, *, actor="owner", memory_ids=None,
                            project_query=None, source_check=None, clock=None, trace=None,
-                           temporal=None):
+                           temporal=None, salience=None):
         with retrieval_work.scope():
             return await self._recall_async(query, now, actor=actor, memory_ids=memory_ids,
                 project_query=project_query, source_check=source_check, clock=clock, trace=trace,
-                temporal=temporal)
+                temporal=temporal, salience=salience)
 
     async def _recall_async(self, query, now, *, actor, memory_ids, project_query,
-                             source_check, clock, trace, temporal=None):
+                             source_check, clock, trace, temporal=None, salience=None):
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         return await self.memory.search_async(
             query, actor=actor, memory_ids=memory_ids, limit=self._limit() + 2, now=now,
             source_check=source_check, clock=clock, trace=trace, temporal=temporal,
+            salience=salience,
             _consume=lambda rows, sources: self._recall_result(
                 rows, version, query, sources.now, memory_ids, project_query, trace,
                 source_view=sources, temporal=temporal),
