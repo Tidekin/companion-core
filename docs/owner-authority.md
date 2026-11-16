@@ -34,6 +34,21 @@ Core Journal 的字节解码沿用 Bridge 的有界前缀机制，源字节和�
 历史读取还需要明确的 `not_before`、轮数、UTF-8 字节上限和来源保留期，
 并验证原始签名、当前擦除状态与原始任务引用。
 
+## 牢记授权
+
+`OwnerGrantPolicy.keepsake` 可选，缺省时不出现在策略 JSON 中，已有授权摘要不变。设置后
+允许她自己判断哪些记忆值得牢记：原消息超过 `source_retention_days` 时，只保留支撑该记忆的
+一两句原话节选，其余照常清除。
+
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `retention_days` | `null` | 节选保留天数；`null` 表示一直保留，直到撤回本授权或主人遗忘。设值时必须大于 `source_retention_days` |
+| `max_items` | 10000 | 容量上限，只防失控；达到后停止新增，不淘汰已有牢记 |
+| `max_excerpt_chars` | 120 | 每条节选的字数上限 |
+
+需要 `memory` 用途且 `memory_scope=owner_private`。当前版本只校验和保存这项授权，尚未改变
+到期处理；行为设计见[牢记设计稿](plans/2026-11-16-memory-keepsakes.md)。
+
 ## HTTP v1 文字私聊边界
 
 所有路径均位于 `/internal/v1`。授权 preview、activate/revisions、stop、status

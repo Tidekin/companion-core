@@ -48,6 +48,18 @@ class HistoryPolicy(StrictModel):
         return self
 
 
+class KeepsakePolicy(StrictModel):
+    """Owner permission for her to keep a short excerpt past the source retention window.
+
+    `retention_days=None` keeps an excerpt until the owner revokes this policy or forgets it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    retention_days: int | None = Field(default=None, ge=1, le=36500, strict=True)
+    max_items: int = Field(default=10000, ge=1, le=100000, strict=True)
+    max_excerpt_chars: int = Field(default=120, ge=16, le=300, strict=True)
+
+
 class OwnerGrantPolicy(StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     owner_qq_id: str = Field(pattern=r"^[1-9][0-9]{4,19}$")
@@ -65,6 +77,8 @@ class OwnerGrantPolicy(StrictModel):
     history: HistoryPolicy = Field(default_factory=HistoryPolicy)
     memory_scope: Literal["none", "owner_private"] = "none"
     source_retention_days: int = Field(default=365, ge=1, le=3650, strict=True)
+    # Absent unless granted, so existing policy digests are unchanged.
+    keepsake: KeepsakePolicy | None = Field(default=None, exclude_if=lambda value: value is None)
     capability_policies: dict[CapabilityPolicy, str] = Field(default_factory=dict, max_length=9)
     life_shadow: LifeShadowApproval | None = None
     max_input_chars: int = Field(default=32000, ge=1, le=32000, strict=True)
@@ -86,6 +100,13 @@ class OwnerGrantPolicy(StrictModel):
             raise ValueError("history purpose and source scope must agree")
         if ("memory" in self.purposes) != (self.memory_scope != "none"):
             raise ValueError("memory purpose and source scope must agree")
+        if self.keepsake is not None and (
+            "memory" not in self.purposes or self.memory_scope != "owner_private"
+        ):
+            raise ValueError("keepsakes require the owner-private memory purpose")
+        if (self.keepsake is not None and self.keepsake.retention_days is not None
+                and self.keepsake.retention_days <= self.source_retention_days):
+            raise ValueError("keepsake retention must outlast source retention")
         if ("life" in self.purposes) != (self.life_shadow is not None):
             raise ValueError("Life requires its bounded purpose/source approval")
         if (self.life_shadow and self.life_shadow.source_scope == "owner_private_history"
