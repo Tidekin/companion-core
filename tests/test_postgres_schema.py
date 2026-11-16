@@ -69,7 +69,11 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
         assert session.one(
             "SELECT count(*) AS n FROM information_schema.table_constraints "
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
-        )["n"] == foreign_keys + 4
+        )["n"] == foreign_keys + 6
+        assert session.one(
+            "SELECT count(*) AS n FROM pg_constraint WHERE conrelid='memory_mentions'::regclass "
+            "AND contype='f'"
+        )["n"] == 2
         assert session.one(
             "SELECT count(*) AS n FROM pg_constraint WHERE conrelid='care_plans'::regclass "
             "AND contype='f' AND confrelid IN "

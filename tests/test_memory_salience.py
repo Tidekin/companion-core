@@ -6,8 +6,9 @@ from tests.support.confirmed_memory import remember
 
 
 def owner_job(core, number, text):
-    event = ingest(core, number, text)
-    return {"kind": "chat", "event_id": event["event_id"], "created_at": core.clock(),
+    key = ingest(core, number, text)["event_id"]
+    event = core.store.one("SELECT event_id, body_json FROM events WHERE event_id=%s", (key,))
+    return {"kind": "chat", "event_id": key, "created_at": core.clock(),
             "body_json": event["body_json"]}
 
 
