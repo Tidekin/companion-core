@@ -1178,6 +1178,10 @@ class ErasureLedger:
             )
             store.execute("DELETE FROM memory_revisions WHERE memory_id = %s", (memory_id,))
             store.execute("DELETE FROM memory_evidence WHERE memory_id = %s", (memory_id,))
+        if memory_ids:
+            from companion.memory_salience import erase_memories as erase_mentions
+
+            erase_mentions(store, memory_ids)
 
     @staticmethod
     def erase_events(store, record, event_ids):

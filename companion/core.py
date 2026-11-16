@@ -1107,10 +1107,12 @@ class Core(Runtime):
         retrieval_proof = self.memory_context.pin(
             self.clock(), event_ids={source["event_id"] for source in history},
         )
+        from companion import memory_salience
+
         try:
             hits = (await self.memory_context.recall_async(
                 retrieval_query, self.clock(), memory_ids=allowed, project_query=query,
-                clock=self.clock,
+                clock=self.clock, salience=memory_salience.salience_for(self, job, query),
                 source_check=lambda: self._check_context_snapshots(
                     job, [{"kind": "memory", "proof": retrieval_proof}],
                 ),
@@ -1163,6 +1165,7 @@ class Core(Runtime):
         proof = self.memory_context.pin(self.clock(), rows=hits,
                                         event_ids={source["event_id"] for source in history})
         reply_revision.remember_sources(self.store, job, proof["source_event_ids"])
+        memory_salience.remember(self.store, job, hits)
         captured_epoch = epoch(self.store)
 
         def check_sources(current_request=None):

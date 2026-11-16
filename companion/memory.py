@@ -183,15 +183,16 @@ class Memory:
 
     async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
                            memory_ids=None, now=None, source_check=None, clock=None,
-                           explain=None, trace=None, _consume=None, review=None, temporal=None):
+                           explain=None, trace=None, _consume=None, review=None, temporal=None,
+                           salience=None):
         with retrieval_work.scope():
             return await self._search_async(query, actor, subjects, limit, memory_ids=memory_ids,
                 now=now, source_check=source_check, clock=clock, explain=explain, trace=trace,
-                consume=_consume, review=review, temporal=temporal)
+                consume=_consume, review=review, temporal=temporal, salience=salience)
 
     async def _search_async(self, query, actor, subjects, limit, *, memory_ids, now,
                             source_check, clock, explain, trace, consume=None, review=None,
-                            temporal=None):
+                            temporal=None, salience=None):
         self.require_owner(actor)
         if source_check:
             source_check()
@@ -236,8 +237,16 @@ class Memory:
             except retrieval_work.WorkLimit as error:
                 retrieval_work.current().mark(error.reason)
         rerank_scores = None
+        boosts = None
+        if salience is not None and query != "*" and review is None and rows:
+            from companion import memory_salience
+
+            # Ordering only: eligibility, floors and the exact-match lead are fixed above.
+            boosts = self.store.read_or_write(lambda: memory_salience.boosts(
+                self.store, [row["memory_id"] for row in rows], now, salience.get("mood")))
         fused = self._fused_order(query, rows, lexical, similarities, importance,
-                                  **({"review": review} if review is not None else {}))
+                                  **({"review": review} if review is not None else {}),
+                                  **({"boosts": boosts} if boosts else {}))
         model, pool = ((None, []) if review is not None
                        else self._rerank_pool(query, fused[0], limit))
         if pool:
@@ -401,7 +410,8 @@ class Memory:
                                      explain=explain, trace=trace, importance=importance,
                                      consume=consume)
 
-    def _fused_order(self, query, rows, lexical, similarities, importance=None, *, review=None):
+    def _fused_order(self, query, rows, lexical, similarities, importance=None, *, review=None,
+                     boosts=None):
         from companion.memory_candidates import exact_terms
 
         ranks = {}
@@ -444,11 +454,16 @@ class Memory:
                            "semantic_rank": semantic_ranks.get(key),
                            "similarity": round(similarities.get(key, 0.), 4),
                            "fused_score": round(scores[key], 5)} for key in scores}
+            boosts = boosts or {}
+            for key in scores:
+                if key in boosts:
+                    ranks[key]["salience"] = {**boosts[key],
+                                              "bonus": round(boosts[key]["bonus"], 6)}
             rows = sorted(
                 (row for row in rows if row["memory_id"] in scores),
                 key=lambda row: (
                     row["memory_id"] in exact,
-                    scores[row["memory_id"]],
+                    scores[row["memory_id"]] + boosts.get(row["memory_id"], {}).get("bonus", 0.),
                     similarities.get(row["memory_id"], 0.),
                     (importance or {}).get(row["memory_id"], .5),
                 ),
