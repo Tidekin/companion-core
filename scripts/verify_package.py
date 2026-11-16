@@ -182,7 +182,7 @@ def verify_postgres(destination, environment):
             assert session.one('SELECT version_num FROM alembic_version')=={
                 'version_num':'pg0013_memory_mentions'}
             assert session.one("SELECT count(*) AS n FROM information_schema.tables "
-                "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':111}
+                "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':112}
         print('PASS: extracted wheel initializes native PostgreSQL migrations')
     """)
     with psycopg.connect(**connection, autocommit=True) as admin:
