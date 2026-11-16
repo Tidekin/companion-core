@@ -207,9 +207,10 @@ def test_retention_clears_only_derivatives_of_expired_messages(core):
     old, old_reply = day(1, "很久以前聊的事情")
     core.clock.advance(2 * 86400)
     new, new_reply = day(2, "最近聊的事情")
-    pending = enqueue(core.store, new, core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=%s", (new,))["conversation_id"],
-        "还没发出的回复", core.clock())
+    later = ingest(core, 3, "刚刚发来的消息")
+    pending = enqueue(core.store, later["event_id"], core.store.one(
+        "SELECT conversation_id FROM events WHERE event_id=%s",
+        (later["event_id"],))["conversation_id"], "还没发出的回复", core.clock())
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     core.clock.advance(2 * 86400)
     assert core.expire_raw_events() == 1
