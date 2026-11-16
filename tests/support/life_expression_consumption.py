@@ -29,7 +29,7 @@ def close_provider_clients(core):
 
 
 def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purposes=None,
-             execute=True, automatic_actions=(), social_options=None):
+             execute=True, automatic_actions=(), social_options=None, life_purposes=None):
     configure(core)
     payload = envelope("bilibili")
     url = payload["observations"][0]["url"]
@@ -73,7 +73,7 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
     scope = LifeShadowApproval(
         scope="owner_private_life_shadow_v1", authorization_sha256="c" * 64,
         conversation_id=conversation, source_event_ids=[source_id],
-        purposes=["PRIVATE_MESSAGE_DRAFT", "PRIVATE_DIARY"], max_items=5,
+        purposes=life_purposes or ["PRIVATE_MESSAGE_DRAFT", "PRIVATE_DIARY"], max_items=5,
         expires_at=after(core.clock(), 3 * 86400), qzone_draft_sources=[grant],
         automatic_actions=list(automatic_actions),
     )

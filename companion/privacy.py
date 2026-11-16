@@ -235,8 +235,14 @@ class ErasureLedger:
                     "input_recall",
                     "affect_reset",
                     "mood_reset",
+                    "moment",
                 }:
                     raise ValueError("unknown erasure target")
+                if record.get("target_type") == "moment" and (
+                    not str(record["memory_id"]).startswith("moment_")
+                    or record["memory_ids"] or record["event_ids"]
+                ):
+                    raise ValueError("moment erasure names one moment and no events")
                 if record.get("target_type") == "memory_only" and (
                     not record["memory_id"] or record["memory_ids"] != [record["memory_id"]]
                     or record["event_ids"]
@@ -342,6 +348,21 @@ class ErasureLedger:
             record = {"seq": len(lines), "erasure_id": uid("erase"), "memory_id": memory_id,
                       "memory_ids": [memory_id], "event_ids": [], "at": now,
                       "target_type": "memory_only"}
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(encode(record) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        self.apply(store, record)
+
+    def forget_moment(self, store, moment_id, now):
+        """Forget one owner-only moment through the durable replay coordinator."""
+        self._write_lock(store)
+        lines = self.read()
+        record = next((r for r in lines[1:] if r.get("target_type") == "moment"
+                       and r["memory_id"] == moment_id), None)
+        if record is None:
+            record = {"seq": len(lines), "erasure_id": uid("erase"), "memory_id": moment_id,
+                      "memory_ids": [], "event_ids": [], "at": now, "target_type": "moment"}
             with self.path.open("a", encoding="utf-8") as stream:
                 stream.write(encode(record) + "\n")
                 stream.flush()
@@ -634,7 +655,9 @@ class ErasureLedger:
             previous = store.one("SELECT value FROM runtime_meta WHERE key = %s", (CONTRACT_KEY,))
             repair_contracts = not previous or previous["value"] != signature
             for record in lines[1:]:
-                if record.get("target_type") in {"affect_reset", "mood_reset", "memory_only"}:
+                if record.get("target_type") in {
+                    "affect_reset", "mood_reset", "memory_only", "moment",
+                }:
                     # Rebuild the durable reset barrier even from an older backup.
                     self.apply(store, record)
                     continue
@@ -732,7 +755,7 @@ class ErasureLedger:
             self.apply_input_recall(store, record, repair=True)
             return
 
-        if record.get("target_type") in {"affect_reset", "mood_reset", "memory_only"}:
+        if record.get("target_type") in {"affect_reset", "mood_reset", "memory_only", "moment"}:
             self.apply(store, record)
             return
 
@@ -780,6 +803,13 @@ class ErasureLedger:
 
         if record.get("target_type") == "memory_only":
             self._apply_memory_only(store, record)
+            return
+
+        if record.get("target_type") == "moment":
+            from companion.moments import erase_ids
+
+            erase_ids(store, [record["memory_id"]])
+            self.record_complete(store, record)
             return
 
         if record.get("target_type") == "input_recall":

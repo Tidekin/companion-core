@@ -153,7 +153,7 @@ const CAP_FIELDS = {
   consolidation: ["consolidation_enabled", "consolidation_local_hour", "consolidation_catchup_days"],
   reflection: ["reflection_enabled", "reflection_daily_max_suggestions", "reflection_min_sources", "reflection_max_daily_calls", "reflection_max_output_tokens", ],
   goals: ["goals_enabled", "goals_max_active", "goal_max_attempts"], affect: ["affect_enabled", "affect_decay_minutes", "affect_max_evidence"],
-  proactive: ["proactive_enabled", "proactive_interval_seconds", "proactive_idle_seconds", "proactive_daily_limit", "quiet_start", "quiet_end"],
+  proactive: ["proactive_enabled", "proactive_interval_seconds", "proactive_idle_seconds", "proactive_daily_limit", "moments_daily_limit", "quiet_start", "quiet_end"],
   wake: ["wake_enabled", "wake_min_interval_minutes", "wake_max_daily_runs", ],
   exploration: ["exploration_enabled", "exploration_daily_candidate_limit", "exploration_daily_deep_reads", "exploration_daily_requests", "exploration_monthly_requests", "exploration_max_response_bytes", "exploration_daily_bytes"],
   social: ["social_enabled", "social_semantic_threshold"], "qq.poke": ["poke_policy"], "qq.poke.native": ["poke_policy"],
@@ -441,7 +441,7 @@ const LOADERS = {
     }
     return { ...page, items };
   },
-  memories: signal => state.memTab === "jargon" ? api.get("/jargon", signal) : state.memTab === "recall"
+  memories: signal => state.memTab === "moments" ? api.get("/moments?limit=60", signal) : state.memTab === "jargon" ? api.get("/jargon", signal) : state.memTab === "recall"
     ? (state.memQ.trim() ? api.get("/memories/recall?q=" + encodeURIComponent(state.memQ.trim()), signal) : Promise.resolve({ items: [], query: "" }))
     : api.get("/memories?limit=60&view=" + state.memTab + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: async signal => {
@@ -857,14 +857,14 @@ PAGES.memories = data => {
   const tabCount = k => k === "conflicts" ? state.nav?.review : 0;
   return el("div", {}, head("记忆", "新记住的内容会自动保存并在对话中使用，不确认也可以。记错时可以只删除这条记忆，保留原始消息和日记；忘记会同时清除来源和由此衍生的内容。"),
     el("div", { class: "toolbar" }, el("div", { class: "seg", role: "group" },
-      [["conflicts", "有冲突"], ["new", "新记住的"], ["all", "全部"], ["recall", "召回测试"], ["jargon", "黑话"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
+      [["conflicts", "有冲突"], ["new", "新记住的"], ["all", "全部"], ["recall", "召回测试"], ["jargon", "黑话"], ["moments", "她的动态"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
         n, tabCount(k) ? el("span", { class: "count" }, String(tabCount(k))) : null))),
       el("label", { class: "search" }, icon("search"), searchInput), el("span", { class: "spacer" }),
       el("div", { class: "seg", role: "group", "aria-label": "视图" }, [["list", "列表", "timeline"], ["graph", "关系图", "spark"]].map(([k, n, ic]) =>
         el("button", { type: "button", "aria-pressed": String(state.memView === k), onclick: () => { state.memView = k; rerender(); } }, icon(ic), n)))),
     batch.length ? el("div", { class: "row-gap mt" }, el("span", { class: "note" }, "这些记忆已经在对话中使用。确认只是标记你认可，可以跳过。"), el("span", { class: "spacer" }),
       btn("确认这 " + batch.length + " 条", () => confirmMany(batch), { cls: "sm", symbol: "check" })) : null,
-    state.memTab === "jargon" ? jargonView(data) : state.memTab === "recall" ? recallView(data) : state.memView === "graph" ? memoryGraph(items) : items.length ? el("div", { class: "mem-list" }, items.map(m => {
+    state.memTab === "moments" ? momentsView(data) : state.memTab === "jargon" ? jargonView(data) : state.memTab === "recall" ? recallView(data) : state.memView === "graph" ? memoryGraph(items) : items.length ? el("div", { class: "mem-list" }, items.map(m => {
       const d = m.detail || {}, review = m.status !== "CONFIRMED" || d.needs_review;
       return el("article", { class: "mem" + (review ? " review" : "") },
         el("div", {}, el("h3", {}, m.title), el("div", { class: "meta" }, tag(m.status), d.memory_kind ? el("span", { class: "chip" }, MEM_KIND[d.memory_kind] || "其他") : null,
@@ -882,6 +882,38 @@ PAGES.memories = data => {
       state.memQ ? "换个关键词试试。" : state.memTab === "conflicts" ? "新记住的内容在“新记住的”里，可以随时浏览。" : "新提取的记忆会显示在“新记住的”中，也可以在“全部”查看。"),
     state.memTab !== "jargon" && state.memTab !== "recall" && data.meta?.more ? el("p", { class: "note mt" }, "只显示最近 60 条，可以用搜索找更早的记忆。") : null);
 };
+const MOMENT_TRIGGER = { LIFE: "她自己想发的", KEEPSAKE: "牢记了一件事" };
+function momentsView(data) {
+  const items = data.items || [];
+  if (!items.length) return empty("她还没有发过动态", "授权里开启“动态”后，她每天最多发两条，只有你能看到。");
+  return el("div", { class: "mem-list" }, items.map(m => el("article", { class: "mem" },
+    el("div", {}, el("h3", {}, m.text), el("div", { class: "meta" },
+      el("span", { class: "chip" }, MOMENT_TRIGGER[m.trigger] || "动态"),
+      m.state === "HIDDEN" ? el("span", { class: "chip" }, "已隐藏") : null,
+      el("span", {}, fmtDate(m.created_at)))),
+    el("div", { class: "acts" },
+      btn(m.state === "HIDDEN" ? "取消隐藏" : "隐藏", () => momentVisibility(m, m.state !== "HIDDEN"), { cls: "sm", symbol: "close" }),
+      btn("忘记", () => momentForget(m), { cls: "sm danger", symbol: "trash" })))));
+}
+function momentVisibility(item, hidden) {
+  api.write("/moments/" + encodeURIComponent(item.id) + "/visibility", { hidden }, "POST",
+    r => r.moment_id === item.id && typeof r.state === "string")
+    .then(async () => { toast(hidden ? "已隐藏" : "已取消隐藏"); await loadRoute({ reset: true }); })
+    .catch(error => notice(errorText(error)));
+}
+function momentForget(item) {
+  const form = el("form", { class: "dlg-form" }, el("p", {}, "“" + item.text + "”"),
+    el("p", { class: "muted" }, "这条动态会被彻底清除，从旧备份恢复时也会重新执行。"));
+  const submit = el("button", { type: "submit", class: "btn danger solid" }, "忘记这条动态");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/moments/" + encodeURIComponent(item.id) + "/forget", {}, "POST",
+      r => r.moment_id === item.id && r.state === "ERASED"),
+      async () => { closeDialog(); toast("已忘记"); await loadRoute({ reset: true }); });
+  });
+  openDialog("忘记这条动态？", form);
+}
 function keepsakeRelease(item) {
   const form = el("form", { class: "dlg-form" }, el("p", {}, "“" + item.title + "”"),
     el("p", { class: "muted" }, "她保留的原话节选会按普通保留期立即清除。没有其他来源时，这条记忆随之失效；想彻底清除请用“忘记”。"));

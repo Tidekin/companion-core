@@ -891,6 +891,22 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
     return wire.receipt(result)
 
 
+def _moments_revision(before, after):
+    """`after` adds exactly the owner-only moments permission to `before`: the purpose, the
+    Life destination and its automatic save. Nothing paid, shared or public changes."""
+    life_before, life_after = before.get("life_shadow"), after.get("life_shadow")
+    if (not life_before or not life_after or "moments" in before["purposes"]
+            or after["purposes"] != [*before["purposes"], "moments"]
+            or "PRIVATE_MOMENT" in life_before["purposes"]
+            or "moment.save" in life_before.get("automatic_actions", [])):
+        return False
+    expected = {**life_before,
+                "purposes": [*life_before["purposes"], "PRIVATE_MOMENT"],
+                "automatic_actions": [*life_before.get("automatic_actions", []), "moment.save"]}
+    return (life_after == expected
+            and {**before, "purposes": after["purposes"], "life_shadow": life_after} == after)
+
+
 def purpose_revision(old, new):
     """A scoped device, private-purpose, keepsake or existing capability permission revision."""
     if old == new:
@@ -915,6 +931,8 @@ def purpose_revision(old, new):
     if ((old.keepsake is None) != (new.keepsake is None)
             and {k: v for k, v in before.items() if k != "keepsake"}
             == {k: v for k, v in after.items() if k != "keepsake"}):
+        return
+    if _moments_revision(before, after) or _moments_revision(after, before):
         return
     for capability in ("voice", "meme"):
         fingerprint = new.capability_policies.get(capability)

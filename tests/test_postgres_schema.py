@@ -69,7 +69,11 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
         assert session.one(
             "SELECT count(*) AS n FROM information_schema.table_constraints "
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
-        )["n"] == foreign_keys + 9
+        )["n"] == foreign_keys + 10
+        assert session.one(
+            "SELECT count(*) AS n FROM pg_constraint WHERE conrelid='moments'::regclass "
+            "AND contype='f'"
+        )["n"] == 1
         assert session.one(
             "SELECT count(*) AS n FROM pg_constraint WHERE conrelid='keepsakes'::regclass "
             "AND contype='f'"
@@ -84,7 +88,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "('events'::regclass,'jobs'::regclass,'outbox'::regclass)"
         )["n"] == 4
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0014_keepsakes"}
+            "version_num": "pg0015_moments"}
 
 
 def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
@@ -110,7 +114,7 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
         with psycopg.connect(info.get_secret_value()) as db:
             assert directions(db) == expected
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0014_keepsakes",)
+                "pg0015_moments",)
 
 
 def test_job_event_index_upgrades_existing_fact_key_database_without_changing_jobs():
@@ -144,7 +148,7 @@ def test_fact_key_index_upgrades_from_relationship_revision():
             assert "translate(" in expression
             assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" in expression
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0014_keepsakes",)
+                "pg0015_moments",)
 
 
 def audit(session, document):
