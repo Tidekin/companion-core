@@ -5,7 +5,7 @@ import json
 from pydantic import Field
 
 from companion import inbox, native_devices, native_images, owner_authority, owner_input, qq_rich
-from companion.contracts import CoreError, InboundEvent, StrictModel
+from companion.contracts import CoreError, InboundEvent, MomentRef, StrictModel
 from companion.owner_authority_protocol import (
     OwnerCapture,
 )
@@ -31,6 +31,7 @@ class DeviceApproval(Device):
 class Submit(StrictModel):
     capture: OwnerCapture
     text: str = Field(max_length=20000)
+    moment: MomentRef | None = None
     images: list[native_images.NativeImage] = Field(default_factory=list,
                                                     max_length=native_images.MAX_IMAGES)
 
@@ -65,7 +66,9 @@ def recover_authorization(context, body):
 
 
 def submit(context, body, *, content_options):
-    device_id, _ = device_view(context)
+    device_id, view = device_view(context)
+    if body.moment and "moments" not in view.policy.purposes:
+        raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
     try:
         original_device = source_identity(body.capture.source_event_id)[0]
     except ValueError as error:
@@ -74,9 +77,15 @@ def submit(context, body, *, content_options):
         raise CoreError("NATIVE_DEVICE_SESSION_MISMATCH", 403)
     images = native_images.decode(context.settings, body.images) if body.images else []
     rich = native_images.image_rich(body.text, [sha for _, _, sha in images])
+    moment = body.moment.model_dump() if body.moment else None
     if ((not body.text.strip() and not rich) or body.capture.input_sha256
-            != qq_rich.input_digest({"text": body.text, **({"rich": rich} if rich else {})})):
+            != qq_rich.input_digest({"text": body.text, **({"rich": rich} if rich else {}),
+                                     **({"moment": moment} if moment else {})})):
         raise CoreError("NATIVE_INPUT_CHANGED", 403)
+    if body.moment and body.moment.kind == "comment":
+        from companion import moments
+
+        moments.require_target(context.store, body.moment.moment_id)
     owner_input.approve(context.store, context.settings, context.clock, body.capture)
     event = InboundEvent(schema_version=1, event_id=body.capture.event_id, source=SOURCE,
         source_event_id=body.capture.source_event_id, event_type="message.received",
@@ -85,7 +94,8 @@ def submit(context, body, *, content_options):
         actor={"platform_user_id": "owner", "role": "owner"},
         payload={"text": body.text, "media": [],
                  "shared_content": [{"kind": "image", "slot": slot} for slot in range(len(images))],
-                 **({"rich": rich} if rich else {})}, trace_id=uid("trace"))
+                 **({"rich": rich} if rich else {}),
+                 **({"moment": moment} if moment else {})}, trace_id=uid("trace"))
     result = inbox.receive(context.store, context.settings, context.clock, context.ledger,
                            event, "native:" + event.event_id, content_options=content_options)
     if images:
@@ -113,7 +123,11 @@ def _stage_images(context, event_id, images):
 def image(context, event_id, slot):
     """One attached image's history preview, only while its native message stands."""
     device_view(context)
-    row = context.store.one(_HISTORY + "AND e.event_id=%s", (event_id,))
+    row = context.store.one(_HISTORY + "AND e.event_id=%s", (event_id,)) or context.store.one(
+        # Moment posts and comments are kept out of the chat history but keep their images.
+        "SELECT e.* FROM events e JOIN jobs j USING(event_id) WHERE e.event_id=%s "
+        "AND e.source='native.chat' AND e.actor_id='owner' AND j.kind='chat' "
+        "AND e.privacy_scope='private' AND e.body_json::jsonb ? 'moment'", (event_id,))
     if (row is None or row["redacted"] or row["actor_id"] != "owner"
             or not any(item.get("kind") == "image" and item.get("slot") == slot
                        for item in json.loads(row["body_json"]).get("shared_content", []))):
@@ -203,7 +217,9 @@ _HISTORY = (
     "FROM events e JOIN jobs j USING(event_id) "
     "LEFT JOIN agent_conversations ac USING(job_id) "
     "JOIN conversations c USING(conversation_id) WHERE ((e.source='native.chat' "
-    "AND e.actor_id='owner' AND j.kind='chat') "
+    "AND e.actor_id='owner' AND j.kind='chat' "
+    # Moment posts and comments live under their moment, not in the conversation.
+    "AND NOT (e.body_json::jsonb ? 'moment')) "
     # A proactive message is its own item once delivered; its activity has no owner text.
     "OR (e.source='system.timer' AND e.actor_id='system' AND j.kind='activity' AND EXISTS("
     "SELECT 1 FROM outbox p WHERE p.origin_event_id=e.event_id AND p.action_type="

@@ -368,6 +368,9 @@ class Moment {
     required this.trigger,
     required this.createdAt,
     required this.liked,
+    this.author = 'companion',
+    this.imageSlots = const [],
+    this.commentCount = 0,
     this.yearsAgo,
   });
   final String id;
@@ -375,7 +378,14 @@ class Moment {
   final String trigger;
   final DateTime createdAt;
   final bool liked;
+
+  /// `companion` for her posts, `owner` for the owner's own posts.
+  final String author;
+  final List<int> imageSlots;
+  final int commentCount;
   final int? yearsAgo;
+
+  bool get mine => author == 'owner';
 
   Moment withLiked(bool value) => Moment(
     id: id,
@@ -383,6 +393,9 @@ class Moment {
     trigger: trigger,
     createdAt: createdAt,
     liked: value,
+    author: author,
+    imageSlots: imageSlots,
+    commentCount: commentCount,
     yearsAgo: yearsAgo,
   );
 
@@ -392,6 +405,25 @@ class Moment {
     trigger: value['trigger'] as String? ?? 'LIFE',
     createdAt: DateTime.parse(value['created_at'] as String),
     liked: value['liked'] as bool? ?? false,
+    author: value['author'] as String? ?? 'companion',
+    imageSlots: [
+      for (final slot in value['images'] as List? ?? []) slot as int,
+    ],
+    commentCount: value['comment_count'] as int? ?? 0,
     yearsAgo: value['years_ago'] as int?,
+  );
+}
+
+/// One entry under a moment: the owner's comment or her reply.
+class MomentComment {
+  const MomentComment({required this.author, required this.text, this.id});
+  final String author;
+  final String text;
+  final String? id;
+
+  factory MomentComment.fromJson(Map<String, dynamic> value) => MomentComment(
+    author: value['author'] as String,
+    text: value['text'] as String,
+    id: value['id'] as String?,
   );
 }
