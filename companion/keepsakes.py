@@ -18,6 +18,7 @@ from companion.store import after, encode
 SUBJECTS = ("user", "relationship", "project")
 # Recently kept or recently mentioned keepsakes are recalled as usual; older ones only when
 # the owner's words literally touch them or she looks them up herself.
+RECOLLECTION = "只记得大概：很久以前的事，原话只剩一小段；用“我记得你好像说过”的语气，不编细节"
 FRESH_DAYS = 365
 MENTION_FRESH_DAYS = 90
 SALIENCE_MIN = 0.9

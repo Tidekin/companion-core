@@ -4,6 +4,7 @@ from companion import keepsakes, memory_salience
 from companion.store import after
 from tests.conftest import ingest, run
 from tests.support.confirmed_memory import remember
+from tests.support.owner_console import client as client
 from tests.support.owner_console import login
 
 

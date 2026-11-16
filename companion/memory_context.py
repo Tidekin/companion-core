@@ -588,7 +588,8 @@ class MemoryContext:
                 **({"origin": h["origin"]} if h.get("origin") else {}),
                 **relations.get(h["memory_id"], {}),
                 **({"event_time": event_time} if event_time else {}),
-                **({"recollection": "approximate"} if h["memory_id"] in kept else {}),
+                # Only kept memories carry the note, so ordinary prompts do not grow.
+                **({"recollection": keepsakes.RECOLLECTION} if h["memory_id"] in kept else {}),
                 **({"source_message_on": source_day}
                    if chat and settings.chat_time_labels
                    and (source_day := self._memory_source_days(h, settings.timezone)) else {})}
