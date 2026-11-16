@@ -87,8 +87,8 @@ def test_delayed_extraction_decays_from_when_the_owner_spoke(core):
     view = core.mood.snapshot()
     assert view["signals"][0]["at"] == datetime.fromisoformat(said).astimezone(
         ZoneInfo("UTC")).isoformat(timespec="microseconds")
-    # Two 3-hour half-lives since the words, not a fresh +0.05 at processing time.
-    assert view["immediate"]["pleasure"] == pytest.approx(0.05 / 4, abs=1e-6)
+    # One 6-hour affection half-life since the words, not a fresh +0.05 at processing time.
+    assert view["immediate"]["pleasure"] == pytest.approx(0.05 / 2, abs=1e-6)
     # Before it was judged, history does not know about it.
     assert core.mood.snapshot(at=said)["signals"] == []
 
