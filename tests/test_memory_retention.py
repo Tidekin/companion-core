@@ -185,3 +185,42 @@ def test_negative_or_derived_evidence_cannot_keep_expired_fact_active(core, depe
         "confidence": 0.0,
     }
     assert core.memory.search("绿茶") == []
+
+
+def test_retention_clears_only_derivatives_of_expired_messages(core):
+    from companion.transport import enqueue
+
+    core.settings.raw_event_retention_days = 3
+
+    def day(number, text):
+        event = ingest(core, number, text)
+        row = core.store.one("SELECT * FROM events WHERE event_id=%s", (event["event_id"],))
+        with core.store.transaction(control_write=True):
+            core.memory.episodes([row], core.clock())
+            core.memory.observe_trait(f"话题{number}", row, core.clock())
+        sent = enqueue(core.store, row["event_id"], row["conversation_id"], f"回复{number}",
+                       core.clock())
+        core.store.execute("UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
+                           (core.clock(), sent))
+        return row["event_id"], sent
+
+    old, old_reply = day(1, "很久以前聊的事情")
+    core.clock.advance(2 * 86400)
+    new, new_reply = day(2, "最近聊的事情")
+    later = ingest(core, 3, "刚刚发来的消息")
+    pending = enqueue(core.store, later["event_id"], core.store.one(
+        "SELECT conversation_id FROM events WHERE event_id=%s",
+        (later["event_id"],))["conversation_id"], "还没发出的回复", core.clock())
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.clock.advance(2 * 86400)
+    assert core.expire_raw_events() == 1
+    summaries = core.store.rows("SELECT first_event_id FROM conversation_summaries")
+    assert summaries == [{"first_event_id": new}]
+    episodes = {row["event_id"]: row["status"] for row in core.store.rows(
+        "SELECT v.event_id, e.status FROM episode_events v JOIN episodes e USING (episode_id)")}
+    assert episodes == {old: "REDACTED", new: "ACTIVE"}
+    assert [row["topic"] for row in core.store.rows("SELECT topic FROM traits")] == ["话题2"]
+    replies = {row["message_id"]: (row["state"], row["content_sha256"] != "")
+               for row in core.store.rows("SELECT message_id, state, content_sha256 FROM outbox")}
+    assert replies == {old_reply: ("SENT", False), new_reply: ("SENT", True),
+                       pending: ("PENDING", True)}

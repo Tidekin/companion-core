@@ -858,6 +858,10 @@ class ErasureLedger:
         if record.get("target_type") == "diary":
             # Diary commands never enter chat context, memory extraction, or diary sources.
             self.clear_event_replies(store, event_ids)
+        elif record.get("target_type") == "raw_retention":
+            # Time-based expiry is not a request to forget a fact. Every batch would
+            # otherwise wipe all summaries, traits and reply text, including today's.
+            self.clear_expired_derivatives(store, event_ids, record.get("retention_cutoff"))
         else:
             # No complete source lineage exists for these paraphrases. Keep the
             # existing conservative cleanup on every new raw-fact erasure.
@@ -1006,6 +1010,39 @@ class ErasureLedger:
             store.execute("DELETE FROM traits")
         advance_epoch(store)
         self.record_complete(store, record)
+
+    @staticmethod
+    def clear_expired_derivatives(store, event_ids, cutoff):
+        """Remove what was built from expired raw events, and nothing newer.
+
+        Extractive summaries and episodes list their events; trait evidence names
+        its event; replies name their origin. Memory text deliberately outlives its
+        raw source, so a newer reply that paraphrases a memory is not cleared here.
+        """
+        events = encode(sorted(event_ids))
+        expired = ('(SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) '
+                   "AS parsed(value))")
+        store.execute(
+            f"DELETE FROM conversation_summaries WHERE first_event_id IN {expired} OR "
+            f"last_event_id IN {expired} OR first_event_id IN (SELECT event_id FROM events "
+            "WHERE redacted = 1)",
+            (events, events),
+        )
+        store.execute(
+            "UPDATE episodes SET title = '', summary = '', status = 'REDACTED' WHERE episode_id "
+            f"IN (SELECT episode_id FROM episode_events WHERE event_id IN {expired})",
+            (events,),
+        )
+        store.execute(f"DELETE FROM trait_evidence WHERE event_id IN {expired}", (events,))
+        store.execute("DELETE FROM traits AS t WHERE NOT EXISTS(SELECT 1 FROM trait_evidence "
+                      "AS v WHERE v.trait_id = t.trait_id)")
+        transport.revoke_deliveries(
+            store,
+            f"origin_event_id IN {expired} OR (origin_event_id IS NULL AND %s::text IS NOT NULL "
+            "AND created_at < %s)",
+            (events, cutoff, cutoff),
+            erase_content=True,
+        )
 
     def clear_recalled_replies(self, store, event_ids, at, *, repair=False):
         """Invalidate replies from consumed sources without erasing their owner inputs."""
