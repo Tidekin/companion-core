@@ -7,8 +7,6 @@ and the mood projection re-checks lineage, quote and model settlement on every r
 """
 
 import json
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from companion import owner_channel
 from companion.paid_budget import sha
@@ -22,8 +20,11 @@ REASONS = {
     "OWNER_DISTRESS": (0.0, 0.03, 0.0),
     "OWNER_EXPECTATION": (0.0, 0.025, 0.0),
     "OWNER_PLAYFUL": (0.03, 0.02, 0.0),
+    # Being pressed after saying no leaves her a little wronged: quieter, not angry, no counter.
+    "OWNER_PRESSED_AFTER_REFUSAL": (-0.04, 0.02, -0.03),
 }
-DAILY_CAP = 2
+# Both reasons are about one specific delivered message of hers, bound the same way.
+REPLY_TARGETED = {"OWNER_HURT_BY_REPLY", "OWNER_PRESSED_AFTER_REFUSAL"}
 HURT_REPLY_WINDOW = 3600
 
 
@@ -65,7 +66,8 @@ def target_digest(reply):
 
 def reply_target(store, event_id):
     """The one delivered message, sent within the hour before this owner message, that the
-    hurt is about. A possibly delivered newer message makes the target ambiguous: no guess."""
+    hurt or the refusal is about. A possibly delivered newer message makes the target
+    ambiguous: no guess."""
     event = store.one(
         'SELECT conversation_id, occurred_at FROM events WHERE event_id = %s', (event_id,)
     )
@@ -130,7 +132,7 @@ def validate(store, signals, event_ids, rejected=None):
             drop("NOT_OWNER_TEXT" if text is None else "QUOTE_NOT_FOUND")
             continue
         target = None
-        if signal.reason == "OWNER_HURT_BY_REPLY":
+        if signal.reason in REPLY_TARGETED:
             target = reply_target(store, signal.event_id)
             if not target:
                 drop("NO_REPLY_TARGET")
@@ -205,7 +207,7 @@ def still_valid(store, row):
         or row["reason"] not in REASONS
     ):
         return False
-    if row["reason"] == "OWNER_HURT_BY_REPLY":
+    if row["reason"] in REPLY_TARGETED:
         # The same reply must still be the unambiguous target and unchanged since judging.
         target = reply_target(store, row["event_id"])
         if (
@@ -216,16 +218,3 @@ def still_valid(store, row):
             return False
     quote = text[row["quote_start"] : row["quote_start"] + row["quote_length"]]
     return len(quote) == row["quote_length"] and quote_digest(quote) == row["quote_sha256"]
-
-
-def capped(signals, timezone):
-    """At most DAILY_CAP valid signals per reason per local day of the owner's message,
-    oldest first, deterministically. Callers drop invalid ones first so they use no quota."""
-    zone, counts, kept = ZoneInfo(timezone), {}, []
-    for item in sorted(signals, key=lambda value: (value["at"], value["event_id"])):
-        day = datetime.fromisoformat(item["at"]).astimezone(zone).date().isoformat()
-        key = (day, item["reason"])
-        if counts.get(key, 0) < DAILY_CAP:
-            counts[key] = counts.get(key, 0) + 1
-            kept.append(item)
-    return kept

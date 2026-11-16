@@ -30,7 +30,7 @@ def test_explicit_daily_appraisals_have_small_source_bound_impulses(core, text, 
     before = logical_state(core.store)
     with core.store.read_snapshot():
         view = core.mood.snapshot()
-        assert view["version"] == "mood-2" and view["confidence"] == "limited"
+        assert view["version"] == "mood-3" and view["confidence"] == "limited"
         assert len(view["signals"]) == 1
         signal = view["signals"][0]
         assert signal["kind"] == "interaction" and signal["reason"] == reason

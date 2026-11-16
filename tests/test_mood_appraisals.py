@@ -1,5 +1,7 @@
 """Model-judged interaction signals from owner's natural language."""
 
+import pytest
+
 from companion import mood_appraisals
 from companion.contracts import InteractionSignal
 from tests.conftest import ingest
@@ -7,8 +9,8 @@ from tests.support.mood import erase, feedback
 
 
 def test_reasons_have_small_pad_deltas():
-    """Five closed reason types with bounded PAD increments."""
-    assert len(mood_appraisals.REASONS) == 5
+    """Six closed reason types with bounded PAD increments."""
+    assert len(mood_appraisals.REASONS) == 6
     for reason, (p, a, d) in mood_appraisals.REASONS.items():
         assert reason in {
             "OWNER_AFFECTION",
@@ -16,6 +18,7 @@ def test_reasons_have_small_pad_deltas():
             "OWNER_DISTRESS",
             "OWNER_EXPECTATION",
             "OWNER_PLAYFUL",
+            "OWNER_PRESSED_AFTER_REFUSAL",
         }
         assert abs(p) <= 0.05 and abs(a) <= 0.03 and abs(d) <= 0.03
 
@@ -240,8 +243,8 @@ def test_still_valid_checks_quote_and_source_retention(core):
     assert not mood_appraisals.still_valid(core.store, row)
 
 
-def test_capped_enforces_daily_limit_per_reason(core):
-    """At most DAILY_CAP per reason per day."""
+def test_repeated_reason_is_dulled_instead_of_dropped(core):
+    """Every valid signal stays; each repeat within the half-life counts half as much."""
     core.settings.mood_enabled = True
     core.clock.now = core.clock.now.replace(hour=12, minute=0, second=0, microsecond=0)
 
@@ -274,6 +277,45 @@ def test_capped_enforces_daily_limit_per_reason(core):
     rows = list(core.store.rows("SELECT * FROM mood_appraisals ORDER BY created_at"))
     assert len(rows) == 5
 
-    # Raw rows stay; the projection keeps the earliest DAILY_CAP valid signals.
-    kept = [s["event_id"] for s in core.mood.snapshot()["signals"]]
-    assert kept == ["evt_test_1", "evt_test_2"]
+    view = core.mood.snapshot()
+    assert [s["event_id"] for s in view["signals"]] == [f"evt_test_{i}" for i in range(1, 6)]
+    assert [s["weight"] for s in view["signals"]] == [1, .5, .25, .125, .0625]
+    # Five repeats add less than two fresh impulses would.
+    assert .05 < view["immediate"]["pleasure"] < .1
+
+
+def test_pressed_after_refusal_binds_her_delivered_reply_like_hurt(core):
+    feedback(core, 50, text="base")
+    core.clock.advance(3601)
+    ingest(core, 150, "我不管你就得帮我")
+    lonely = [InteractionSignal(event_id="evt_test_150", reason="OWNER_PRESSED_AFTER_REFUSAL",
+                                quote="我不管你就得帮我")]
+    rejected = {}
+    assert mood_appraisals.validate(core.store, lonely, ["evt_test_150"], rejected) == []
+    assert rejected == {"NO_REPLY_TARGET": 1}
+    event_id = feedback(core, 200, text="不行你还是得帮我做")
+    kept = mood_appraisals.validate(core.store, [InteractionSignal(
+        event_id=event_id, reason="OWNER_PRESSED_AFTER_REFUSAL", quote="还是得帮我做")],
+        [event_id])
+    assert len(kept) == 1 and kept[0]["target_message_id"] and kept[0]["target_sha256"]
+
+
+def test_pressed_after_refusal_leaves_her_a_little_wronged_for_hours(core):
+    event_id = feedback(core, 1, text="不行你还是得帮我做")
+    request_id = "appraisal_pressed"
+    core.store.insert(
+        "model_usage", usage_id="usage_pressed", request_id=request_id,
+        scenario="memory_extract", provider="synthetic", model="synthetic", state="SETTLED",
+        input_tokens=100, output_tokens=20, occurred_at=core.clock(),
+    )
+    kept = mood_appraisals.validate(core.store, [InteractionSignal(
+        event_id=event_id, reason="OWNER_PRESSED_AFTER_REFUSAL", quote="还是得帮我做")],
+        {event_id})
+    with core.store.transaction():
+        mood_appraisals.record(core.store, core.settings, kept, request_id, core.clock())
+    view = core.mood.snapshot()
+    assert [s["reason"] for s in view["signals"]] == ["OWNER_PRESSED_AFTER_REFUSAL"]
+    assert view["immediate"]["pleasure"] < 0 and view["immediate"]["dominance"] < 0
+    start = view["immediate"]["pleasure"]
+    core.clock.advance(8 * 3600)
+    assert core.mood.snapshot()["immediate"]["pleasure"] == pytest.approx(start / 2, rel=1e-3)

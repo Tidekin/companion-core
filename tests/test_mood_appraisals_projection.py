@@ -43,11 +43,18 @@ def test_appraisals_respect_shared_candidate_limit(core, monkeypatch):
     assert not any(view["undertone"].values())
 
 
-def test_appraisals_decay_with_half_life(core):
+def test_appraisals_decay_with_their_reason_half_life(core):
     appraise(core, 1, "开玩笑", "OWNER_PLAYFUL")
     assert core.mood.snapshot()["immediate"]["pleasure"] == pytest.approx(.03)
-    core.clock.advance(3 * 3600)
+    core.clock.advance(90 * 60)
     assert core.mood.snapshot()["immediate"]["pleasure"] == pytest.approx(.015)
+    appraise(core, 2, "想你了")
+    core.clock.advance(6 * 3600)
+    view = core.mood.snapshot()
+    # Affection halves over six hours; the earlier joke is nearly gone by then.
+    assert view["immediate"]["pleasure"] == pytest.approx(
+        .05 * (1 - .015 / .35) / 2 + .015 / 16, rel=1e-3)
+    assert view["reason_half_life_seconds"]["OWNER_AFFECTION"] == 6 * 3600
 
 
 @pytest.mark.parametrize("damage", ["erase", "quote", "usage", "scenario"])
@@ -66,16 +73,19 @@ def test_still_valid_filters_invalid_appraisals_from_projection(core, damage):
     assert core.mood.snapshot()["signals"] == (original if damage == "usage" else [])
 
 
-def test_capped_enforcement_during_projection(core):
+def test_repeats_are_dulled_per_reason_during_projection(core):
     core.clock.now = datetime.fromisoformat("2026-11-01T02:00:00+00:00")
     keys = []
     for number in range(1, 4):
         keys.append(appraise(core, number, f"想你{number}"))
         core.clock.advance(1)
     assert len(core.store.rows("SELECT * FROM mood_appraisals")) == 3
-    assert [s["event_id"] for s in core.mood.snapshot()["signals"]] == keys[:2]
+    signals = core.mood.snapshot()["signals"]
+    assert [(s["event_id"], s["weight"]) for s in signals] == list(
+        zip(keys, [1, .5, .25], strict=True))
     other = appraise(core, 4, "逗你玩", "OWNER_PLAYFUL")
-    assert [s["event_id"] for s in core.mood.snapshot()["signals"]] == [*keys[:2], other]
+    signals = core.mood.snapshot()["signals"]
+    assert [(s["event_id"], s["weight"]) for s in signals][-1] == (other, 1)
 
 
 def test_appraisals_have_correct_signal_structure(core):

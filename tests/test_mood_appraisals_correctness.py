@@ -87,13 +87,13 @@ def test_delayed_extraction_decays_from_when_the_owner_spoke(core):
     view = core.mood.snapshot()
     assert view["signals"][0]["at"] == datetime.fromisoformat(said).astimezone(
         ZoneInfo("UTC")).isoformat(timespec="microseconds")
-    # Two 3-hour half-lives since the words, not a fresh +0.05 at processing time.
-    assert view["immediate"]["pleasure"] == pytest.approx(0.05 / 4, abs=1e-6)
+    # One 6-hour affection half-life since the words, not a fresh +0.05 at processing time.
+    assert view["immediate"]["pleasure"] == pytest.approx(0.05 / 2, abs=1e-6)
     # Before it was judged, history does not know about it.
     assert core.mood.snapshot(at=said)["signals"] == []
 
 
-def test_daily_cap_counts_the_day_the_owner_spoke(core):
+def test_repetition_does_not_reset_at_local_midnight(core):
     zone = ZoneInfo(core.settings.timezone)
     late = datetime(2026, 11, 1, 23, 30, tzinfo=zone)
     core.clock.now = late.astimezone(ZoneInfo("UTC")) - timedelta(hours=2)
@@ -103,15 +103,16 @@ def test_daily_cap_counts_the_day_the_owner_spoke(core):
     key = ingest(core, 3, "想你三")["event_id"]
     core.clock.advance(3600)  # judged after local midnight
     judge(core, key, "想你三")
-    assert [s["event_id"] for s in core.mood.snapshot()["signals"]] == [
-        "evt_test_1", "evt_test_2"]
+    signals = core.mood.snapshot()["signals"]
+    assert [s["event_id"] for s in signals] == ["evt_test_1", "evt_test_2", key]
+    assert [s["weight"] for s in signals] == [1, .5, .25]
 
 
-def test_signals_outside_the_consumer_scope_use_no_daily_quota(core):
+def test_signals_outside_the_consumer_scope_do_not_dull_repeats(core):
     keys = [appraise(core, number, f"想你{number}") for number in range(1, 4)]
-    assert [s["event_id"] for s in core.mood.snapshot()["signals"]] == keys[:2]
+    assert [s["weight"] for s in core.mood.snapshot()["signals"]] == [1, .5, .25]
     scoped = core.mood.snapshot(allowed=[keys[2]])["signals"]
-    assert [s["event_id"] for s in scoped] == [keys[2]]
+    assert [(s["event_id"], s["weight"]) for s in scoped] == [(keys[2], 1)]
 
 
 def hurt(core):

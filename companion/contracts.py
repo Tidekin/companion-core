@@ -234,6 +234,7 @@ class InteractionSignal(StrictModel):
         "OWNER_DISTRESS",
         "OWNER_EXPECTATION",
         "OWNER_PLAYFUL",
+        "OWNER_PRESSED_AFTER_REFUSAL",
     ]
     quote: str = Field(min_length=2, max_length=200)
 
