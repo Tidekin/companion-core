@@ -49,13 +49,13 @@ void main() {
     final moment = Moment.fromJson({
       'id': 'moment_1',
       'text': '今天主人告诉了我他的生日，我要牢牢记下来。',
-      'trigger': 'KEEPSAKE',
+      'trigger': 'MEMORY',
       'created_at': '2026-11-16T12:00:00Z',
       'liked': true,
     });
     expect(
       (moment.id, moment.trigger, moment.liked),
-      ('moment_1', 'KEEPSAKE', true),
+      ('moment_1', 'MEMORY', true),
     );
     expect(moment.withLiked(false).text, moment.text);
   });
