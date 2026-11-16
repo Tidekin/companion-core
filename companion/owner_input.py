@@ -265,6 +265,8 @@ def _checked_source(store, settings, view, event_id, now, *, allow_commands=Fals
         history=history,
         verify_capture=lambda value: _verify(store, settings, value, evidence),
         _loaded=_loaded,
+        # Only the memory purpose may read a kept excerpt past source retention.
+        keepsake=purpose == "memory" and view.policy.keepsake is not None,
     )
 
 
@@ -316,7 +318,7 @@ _SOURCE_SQL = _source_query()
 
 def _source(
     store, settings, view, event_id, now, *, allow_commands=False, history=False, verify_capture,
-    _loaded=None,
+    _loaded=None, keepsake=False,
 ):
     loaded = dict(_loaded) if _loaded is not None else store.one(
         _SOURCE_SQL,
@@ -341,6 +343,10 @@ def _source(
     try:
         value = json.loads(receipt["value"]) if receipt else {}
         body = json.loads(event["body_json"]) if event else {}
+        from companion import keepsakes
+
+        kept_digest = keepsakes.kept_input(body) if keepsake and event else None
+        kept = kept_digest is not None and bool(keepsakes.active(store, {event_id}, now))
         if (
             not event
             or event["redacted"]
@@ -359,7 +365,7 @@ def _source(
                 or body["text"].strip().startswith("/")
             )
             or value.get("event_id") != event_id
-            or value.get("input_sha256") != input_digest(body)
+            or value.get("input_sha256") != (kept_digest if kept else input_digest(body))
             or type(value.get("privacy_epoch")) is not int
             or not 0 <= value["privacy_epoch"] <= (
                 int(source_epoch) if source_epoch is not None else 0
@@ -396,6 +402,9 @@ def _source(
             view.policy.source_retention_days,
             settings.raw_event_retention_days,
         )
+        if kept:
+            days = view.policy.keepsake.retention_days
+            lifetime = float("inf") if days is None else 86400 * days
         age = (datetime.fromisoformat(now) - capture.received_at).total_seconds()
         if age < (0 if history else -2) or age >= lifetime:
             raise ValueError("source expired")

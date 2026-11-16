@@ -58,6 +58,7 @@ def cleanup_contracts():
     from companion.history_import import erase as erase_history_import
     from companion.image_generation import erase as erase_generated_images
     from companion.jargon import erase as erase_jargon
+    from companion.keepsakes import erase as erase_keepsakes
     from companion.life_topics import erase_topics
     from companion.media import erase_media_links
     from companion.meme_assets import erase as erase_meme_assets
@@ -101,6 +102,7 @@ def cleanup_contracts():
         event_cleanup("memory-time", erase_memory_time),
         event_cleanup("memory-references", erase_memory_references),
         event_cleanup("memory-mentions", erase_memory_mentions),
+        event_cleanup("keepsakes", erase_keepsakes),
         event_cleanup("mood-appraisals", erase_mood_appraisals),
         event_cleanup("goals", erase_goals),
         event_cleanup("care-plans", erase_care),

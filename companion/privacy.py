@@ -413,7 +413,7 @@ class ErasureLedger:
         self.record_complete(store, record)
         return result
 
-    def expire_events(self, store, event_ids, now, *, retention_cutoff=None):
+    def expire_events(self, store, event_ids, now, *, retention_cutoff=None, keepsakes=()):
         self._write_lock(store)
         record = {
             "seq": len(self.read()),
@@ -426,6 +426,9 @@ class ErasureLedger:
         }
         if retention_cutoff is not None:
             record["retention_cutoff"] = retention_cutoff
+        if keepsakes:
+            # Hashes and bounds only; replay recomputes the excerpt from the original.
+            record["keepsakes"] = list(keepsakes)
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(encode(record) + "\n")
             stream.flush()
@@ -830,6 +833,12 @@ class ErasureLedger:
 
         from companion.history_import import erasure_roots
 
+        kept = set()
+        if record.get("target_type") == "raw_retention" and record.get("keepsakes"):
+            from companion import keepsakes
+
+            kept, failed = keepsakes.apply(store, record["keepsakes"], record["at"])
+            record = {**record, "event_ids": sorted(set(record["event_ids"]) | failed)}
         roots = erasure_roots(store, record["event_ids"])
         event_ids = (
             self.retention_events(store, roots)
@@ -846,6 +855,8 @@ class ErasureLedger:
             )
         record = {**record, "event_ids": sorted(event_ids), "memory_ids": sorted(memory_ids)}
         copies = self.erase_diary_projections(store, record)
+        if kept:
+            copies |= self.clear_kept_derivatives(store, kept, record)
         if record.get("target_type") == "raw_retention":
             self.expire_memory_evidence(store, record)
         else:
@@ -1010,6 +1021,20 @@ class ErasureLedger:
             store.execute("DELETE FROM traits")
         advance_epoch(store)
         self.record_complete(store, record)
+
+    def clear_kept_derivatives(self, store, kept, record):
+        """A kept message is expired for everything except the memory it supports."""
+        from companion.erasure import ErasureScope, cleanup_contracts
+        from companion.keepsakes import PRESERVED
+
+        copies = self.erase_diary_projections(
+            store, {**record, "event_ids": sorted(kept), "memory_ids": []})
+        scope = ErasureScope(frozenset(kept), True)
+        for contract in cleanup_contracts():
+            if contract.name not in PRESERVED:
+                contract.erase(store, scope)
+        self.clear_expired_derivatives(store, kept, record.get("retention_cutoff"))
+        return copies
 
     @staticmethod
     def clear_expired_derivatives(store, event_ids, cutoff):
@@ -1179,9 +1204,11 @@ class ErasureLedger:
             store.execute("DELETE FROM memory_revisions WHERE memory_id = %s", (memory_id,))
             store.execute("DELETE FROM memory_evidence WHERE memory_id = %s", (memory_id,))
         if memory_ids:
+            from companion.keepsakes import erase_memories as erase_keepsakes
             from companion.memory_salience import erase_memories as erase_mentions
 
             erase_mentions(store, memory_ids)
+            erase_keepsakes(store, memory_ids)
 
     @staticmethod
     def erase_events(store, record, event_ids):

@@ -382,9 +382,24 @@ class MemorySources:
             return list(found.values())
         return self._checked_lineage(self._lineages(event_ids))
 
+    def _kept(self, rows):
+        """Owner-granted keepsakes among rows that are otherwise past source retention."""
+        if not self.now:
+            return set()
+        old = sorted({row["source_id"] for row in rows if row["event_id"] is not None
+                      and datetime.fromisoformat(row["ingested_at"]) < self.cutoff})
+        if not old:
+            return set()
+        return {row["event_id"] for row in self._rows(
+            "SELECT k.event_id FROM keepsakes k JOIN memories m USING (memory_id) "
+            "WHERE k.event_id = ANY(%s::text[]) AND (k.until IS NULL OR k.until > %s) "
+            "AND m.status IN ('CONFIRMED','HYPOTHESIS') AND m.confidence > 0",
+            (old, self.now), limit=len(old))}
+
     def _checked_lineage(self, values):
         """Live private provenance for owner facts and non-owner reference sources."""
         rows = list(values)
+        kept = self._kept(rows)
         for row in rows:
             if (row["source_id"] in self.excluded or row["event_id"] is None
                 or row["redacted"] or row["erased"] or row["privacy_scope"] != "private"
@@ -392,6 +407,7 @@ class MemorySources:
                 return []
             if self.now and (
                 datetime.fromisoformat(row["ingested_at"]) < self.cutoff
+                and row["source_id"] not in kept
                 or datetime.fromisoformat(row["occurred_at"]) > datetime.fromisoformat(self.now)
                 or datetime.fromisoformat(row["ingested_at"]) > datetime.fromisoformat(self.now)
             ):

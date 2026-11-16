@@ -6,7 +6,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0013_memory_mentions`。迁移链先应用既有的
+当前新建与离线导入目标为 `pg0014_keepsakes`。迁移链先应用既有的
 `pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
 再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
@@ -30,6 +30,8 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 不切换全局授权；撤销保留历史证据。运行合同见 [原生聊天](native-chat-mvp.md)。
 `pg0013_memory_mentions` 新增 `memory_mentions`，记录主人哪条消息提到过哪条记忆，只用于召回
 排序；随来源消息或记忆一起清除，离线导入时为空。见[召回鲜明度](memory-salience.md)。
+`pg0014_keepsakes` 新增 `keepsakes`，记录主人授权牢记后被裁剪成节选的原消息支撑哪条记忆；
+随消息或记忆遗忘一起清除，离线导入时为空。见[牢记设计稿](plans/2026-11-16-memory-keepsakes.md)。
 
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
 `pg0003_native_chat`，保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite
