@@ -437,6 +437,18 @@ point, reversal through a later STOP/activation, original financial rows, scope
 drift and current UNKNOWN refusal. After this revision, recovery must retain a
 Core image that understands the bounded Life conversation transition.
 
+## Keepsake grant or revocation
+
+Under a carried authority the native STOP/preview/activate path may add or remove
+`keepsake` (see [owner authority](../owner-authority.md)) when every other owner-policy
+field, including `authorization_sha256`, stays identical. Changing the bounds of an
+existing grant is not admitted. The grant changes no paid term, purpose or capability
+fingerprint: it only lets an expiring owner message be trimmed to a memory excerpt.
+Historical UNKNOWN liabilities keep their original admission, reservation and custody;
+nonterminal work or UNKNOWN under the immediately preceding authority still blocks the
+change. `tests/test_model_carry_keepsake_activation.py` covers grant, revocation,
+financial rows and a rejected combined change.
+
 ## Closing an attempt that never started I/O
 
 A refusal after admission but before `io_started` (for example a background yield,

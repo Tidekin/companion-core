@@ -892,7 +892,7 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
 
 
 def purpose_revision(old, new):
-    """A scoped device, private-purpose or existing capability permission revision."""
+    """A scoped device, private-purpose, keepsake or existing capability permission revision."""
     if old == new:
         return
     before, after = old.model_dump(mode="json"), new.model_dump(mode="json")
@@ -908,6 +908,13 @@ def purpose_revision(old, new):
         and old.life_shadow.conversation_id != new.life_shadow.conversation_id
         and after == {**before, "life_shadow": {**before["life_shadow"],
                       "conversation_id": new.life_shadow.conversation_id}}):
+        return
+    # Granting or revoking keepsakes changes no paid term, purpose or capability: only
+    # whether an expiring owner message may be trimmed to a memory excerpt. Exactly one
+    # side has it, and every other field is byte-for-byte the approved policy.
+    if ((old.keepsake is None) != (new.keepsake is None)
+            and {k: v for k, v in before.items() if k != "keepsake"}
+            == {k: v for k, v in after.items() if k != "keepsake"}):
         return
     for capability in ("voice", "meme"):
         fingerprint = new.capability_policies.get(capability)

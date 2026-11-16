@@ -46,7 +46,7 @@ Core Journal 的字节解码沿用 Bridge 的有界前缀机制，源字节和�
 | `max_items` | 10000 | 容量上限，只防失控；达到后停止新增，不淘汰已有牢记 |
 | `max_excerpt_chars` | 120 | 每条节选的字数上限 |
 
-需要 `memory` 用途且 `memory_scope=owner_private`。当前版本只校验和保存这项授权，尚未改变
+需要 `memory` 用途且 `memory_scope=owner_private`。授权挂着承接的 UNKNOWN（`unknown_carry_sha256`）时，也可以单独新增或撤回这一项，其余字段必须完全不变，见[承接合同](qq-beta/p0-model-carry-contract.md#keepsake-grant-or-revocation)。当前版本只校验和保存这项授权，尚未改变
 到期处理；行为设计见[牢记设计稿](plans/2026-11-16-memory-keepsakes.md)。
 
 ## HTTP v1 文字私聊边界
