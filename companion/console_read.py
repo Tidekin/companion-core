@@ -256,6 +256,12 @@ def _review_count(core):
     return count
 
 
+def _keepsake_capacity(core):
+    from companion import keepsakes
+
+    return keepsakes.capacity(core.store, core.settings, core.clock)
+
+
 def overview(core):
     s, now = core.store, core.clock()
     counts = {
@@ -266,6 +272,7 @@ def overview(core):
         "unknown_calls": s.one('SELECT COUNT(*) AS n FROM model_usage WHERE state = '
             "'UNKNOWN'")["n"],
         "review_memories": _review_count(core),
+        "keepsakes": _keepsake_capacity(core),
         "companion_proposals": s.one(
             "SELECT COUNT(*) n FROM capability_overrides WHERE state='PROPOSED'")["n"]
         if s.has_table("capability_overrides") else 0,
