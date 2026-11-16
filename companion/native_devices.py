@@ -126,7 +126,9 @@ def authorize(context, body):
         view = owner_authority.current(store, context.settings, context.clock, purpose='chat')
         revision_id = uid('ndev')
         epoch = 'native-v2-' + revision_id.removeprefix('ndev_')
-        device_id, identity = device_identity(body.public_key, protocol_epoch=epoch)
+        device_id, identity = device_identity(body.public_key)
+        identity.update(protocol_epoch=epoch,
+            identity_sha256=digest(['native.chat', device_id, body.public_key, epoch]))
         version = value['device_revision'] + 1
         store.insert('native_device_revisions', revision_id=revision_id, device_id=device_id,
             version=version, state='ACTIVE', identity_json=encode(identity),

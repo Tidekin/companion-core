@@ -40,10 +40,11 @@ def packet(core, key, authority, text='原生文本输入', request_id=None, ima
     row = _row(core.store, device_id)
     import json
 
-    epoch = json.loads(row['identity_json'])['protocol_epoch'] if row else 'native-v1'
-
     value = capture(key.public_key().public_bytes_raw().hex(), authority,
-                    request_id or uuid.uuid4().hex, text, core.clock(), protocol_epoch=epoch)
+                    request_id or uuid.uuid4().hex, text, core.clock())
+    if row:
+        identity = json.loads(row['identity_json'])
+        value.update({name: identity[name] for name in ('identity_sha256', 'protocol_epoch')})
     value['input_sha256'] = input_sha256(
         text, [hashlib.sha256(data).hexdigest() for _, data in images])
     value['signature'] = key.sign(capture_signing_payload(value)).hex()
