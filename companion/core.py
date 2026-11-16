@@ -755,6 +755,25 @@ class Core(Runtime):
         if cfg.watch_ledger.enabled and job["kind"] == "chat" and turn.permits("exploration"):
             watch_ledger.add_reply_references(s, self.memory_context, self.clock, job, selection,
                                              related, available)
+        if job["kind"] == "chat" and turn.permits("moments") and turn.body.get("moment"):
+            from companion import moments
+
+            ref = turn.body["moment"]
+            subject = moments.target(s, ref.get("moment_id") or job["event_id"])
+            if subject is not None:
+                earlier = [] if ref["kind"] == "post" else [
+                    {"owner": json.loads(row["body_json"]).get("text", ""),
+                     "you": moments.replies(s, row["event_id"])}
+                    for row in moments.thread_events(s, subject["id"],
+                                                     before_event=job["event_id"])]
+                selection.add(moments.CONTEXT_HEADING, {
+                    "rules": moments.REPLY_RULES[ref["kind"]],
+                    "moment": {k: subject[k] for k in ("author", "text", "created_at")},
+                    "earlier_comments": earlier[-6:]},
+                    {*subject["source_event_ids"],
+                     *[row["event_id"] for row in moments.thread_events(
+                         s, subject["id"], before_event=job["event_id"])]},
+                    priority=context_selection.TOPIC, required=True, module="moments")
         if (cfg.mood_enabled and job["kind"] == "chat" and turn.permits("expression")
             and affect["state"].get("engagement") != "pause"):
             mood = self.mood.reference(at=job["created_at"], text=text)

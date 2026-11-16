@@ -1257,6 +1257,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                MomentPreviewCard(bot: widget.bot),
                 if (attachments.isNotEmpty)
                   AttachmentStrip(
                     key: ValueKey('attachments_${widget.bot.id}'),

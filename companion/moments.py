@@ -20,6 +20,13 @@ from companion.store import encode, uid
 STATES = ("PUBLISHED", "HIDDEN", "ERASED")
 # A moment about something she just learned that she rated this important at extraction.
 IMPORTANT = 0.9
+CONTEXT_HEADING = "这条消息是在动态里（数据）："
+REPLY_RULES = {
+    "post": "主人发了一条自己的动态，这是你在下面的评论：像朋友看到对方的说说那样，简短自然地回应，"
+            "不复述内容，不追问太多。",
+    "comment": "主人在评论动态，你在同一条动态下回复：一两句，接着主人的话说，不另起话题；"
+               "moment.author 是 companion 时那是你自己发的。",
+}
 
 
 def _day_bounds(settings, now):
@@ -125,7 +132,14 @@ def signature(store):
         "SELECT COUNT(*) AS n, COUNT(liked_at) AS liked, "
         "COUNT(*) FILTER (WHERE state = 'PUBLISHED') AS shown, MAX(updated_at) AS at "
         "FROM moments")
-    return [row["n"], row["liked"], row["shown"], row["at"]]
+    thread = store.one(
+        "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE e.redacted = 1) AS gone, "
+        "(SELECT COUNT(*) FROM outbox o JOIN events x ON x.event_id = o.origin_event_id "
+        "WHERE x.source = 'native.chat' AND x.body_json::jsonb ? 'moment' "
+        "AND o.state = 'SENT') AS replies FROM events e "
+        "WHERE e.source = 'native.chat' AND e.body_json::jsonb ? 'moment'")
+    return [row["n"], row["liked"], row["shown"], row["at"],
+            thread["n"], thread["gone"], thread["replies"]]
 
 
 def set_hidden(store, moment_id, hidden, now):
@@ -171,3 +185,111 @@ def erase(store, event_ids):
         "SELECT 1 FROM json_array_elements_text(m.source_event_ids_json::json) AS s(v) "
         "WHERE s.v = ANY(%s::text[])))", (events, events))]
     erase_ids(store, affected)
+
+
+_INPUTS = ("SELECT e.event_id, e.occurred_at, e.body_json, e.redacted, e.record_sequence "
+           "FROM events e JOIN jobs j USING (event_id) WHERE e.source = 'native.chat' "
+           "AND e.actor_id = 'owner' AND j.kind = 'chat' AND e.body_json::jsonb ? 'moment' ")
+
+
+def _images(body):
+    return [item["slot"] for item in body.get("shared_content", []) if item.get("kind") == "image"]
+
+
+def _owner_post(row):
+    body = json.loads(row["body_json"])
+    return {"id": row["event_id"], "author": "owner", "text": body.get("text", ""),
+            "trigger": "OWNER", "state": "PUBLISHED", "created_at": row["occurred_at"],
+            "liked": False, "images": _images(body), "source_event_ids": [row["event_id"]]}
+
+
+def owner_posts(store, *, before=None, limit=30):
+    return [_owner_post(row) for row in store.rows(
+        _INPUTS + "AND e.redacted = 0 AND e.body_json::jsonb #>> '{moment,kind}' = 'post' "
+        "AND (CAST(%s AS TEXT) IS NULL OR e.occurred_at < %s) "
+        "ORDER BY e.occurred_at DESC LIMIT %s", (before, before, limit))]
+
+
+def require_target(store, moment_id):
+    """A comment targets her published moment or the owner's standing post."""
+    if target(store, moment_id) is None:
+        raise CoreError("MOMENT_NOT_FOUND", 404)
+
+
+def target(store, moment_id):
+    """The moment a comment or post is about, or None once it is gone."""
+    if moment_id.startswith("moment_"):
+        row = store.one("SELECT moment_id, text, created_at, source_event_ids_json FROM moments "
+                        "WHERE moment_id = %s AND state = 'PUBLISHED'", (moment_id,))
+        return row and {"id": row["moment_id"], "author": "companion", "text": row["text"],
+                        "created_at": row["created_at"],
+                        "source_event_ids": json.loads(row["source_event_ids_json"])}
+    row = store.one(_INPUTS + "AND e.event_id = %s AND e.redacted = 0 "
+                    "AND e.body_json::jsonb #>> '{moment,kind}' = 'post'", (moment_id,))
+    return row and _owner_post(row)
+
+
+def thread_events(store, moment_id, *, before_event=None):
+    """Owner comments under one moment, oldest first, optionally only before one event."""
+    return store.rows(
+        _INPUTS + "AND e.redacted = 0 AND e.body_json::jsonb #>> '{moment,kind}' = 'comment' "
+        "AND e.body_json::jsonb #>> '{moment,moment_id}' = %s "
+        "AND (CAST(%s AS TEXT) IS NULL OR e.record_sequence < (SELECT record_sequence FROM "
+        "events WHERE event_id = %s)) ORDER BY e.record_sequence LIMIT 60",
+        (moment_id, before_event, before_event))
+
+
+def replies(store, event_id):
+    """Her delivered reply text to one owner post or comment."""
+    texts = []
+    for row in store.rows("SELECT content_json FROM outbox WHERE origin_event_id = %s "
+                          "AND state = 'SENT' ORDER BY record_sequence", (event_id,)):
+        value = json.loads(row["content_json"] or "{}")
+        if value.get("text"):
+            texts.append(value["text"])
+    return "\n".join(texts)
+
+
+def comments(store, moment_id):
+    """The thread under a moment: her reply to an owner post, then each comment and reply."""
+    if target(store, moment_id) is None:
+        raise CoreError("MOMENT_NOT_FOUND", 404)
+    items = []
+    if not moment_id.startswith("moment_") and (text := replies(store, moment_id)):
+        items.append({"author": "companion", "text": text, "reply_to": moment_id})
+    for row in thread_events(store, moment_id):
+        body = json.loads(row["body_json"])
+        items.append({"id": row["event_id"], "author": "owner", "text": body.get("text", ""),
+                      "created_at": row["occurred_at"], "images": _images(body)})
+        if text := replies(store, row["event_id"]):
+            items.append({"author": "companion", "text": text, "reply_to": row["event_id"]})
+    return items
+
+
+def comment_counts(store, moment_ids):
+    if not moment_ids:
+        return {}
+    return {row["moment_id"]: row["n"] for row in store.rows(
+        "SELECT e.body_json::jsonb #>> '{moment,moment_id}' AS moment_id, COUNT(*) AS n "
+        "FROM events e WHERE e.source = 'native.chat' AND e.redacted = 0 "
+        "AND e.body_json::jsonb #>> '{moment,kind}' = 'comment' "
+        "AND e.body_json::jsonb #>> '{moment,moment_id}' = ANY(%s::text[]) GROUP BY 1",
+        (sorted(moment_ids),))}
+
+
+def feed(store, *, before=None, limit=30):
+    """Her moments and the owner's posts together, newest first, with comment counts."""
+    mine = [{**item, "author": "companion", "images": []}
+            for item in items(store, before=before, limit=limit)]
+    merged = sorted([*mine, *owner_posts(store, before=before, limit=limit)],
+                    key=lambda item: item["created_at"], reverse=True)[:limit]
+    counts = comment_counts(store, [item["id"] for item in merged])
+    return [{**item, "comment_count": counts.get(item["id"], 0)} for item in merged]
+
+
+def latest_unseen(store, after):
+    """Her newest published moment after a time, for the chat page's preview card."""
+    row = store.one("SELECT moment_id, text, created_at FROM moments WHERE state = 'PUBLISHED' "
+                    "AND (CAST(%s AS TEXT) IS NULL OR created_at > %s) "
+                    "ORDER BY created_at DESC LIMIT 1", (after, after))
+    return row and {"id": row["moment_id"], "text": row["text"], "created_at": row["created_at"]}

@@ -56,6 +56,10 @@ def encoded(value):
 
 
 def input_digest(payload):
+    if payload.get("moment"):
+        # The moment reference is signed with the text so it cannot be re-targeted.
+        value = {k: payload[k] for k in ("text", "rich", "moment") if payload.get(k)}
+        return hashlib.sha256(encoded(value).encode()).hexdigest()
     value = {k: payload[k] for k in ("text", "rich")} if payload.get("rich") else payload["text"]
     return hashlib.sha256(encoded(value).encode()).hexdigest()
 

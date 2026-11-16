@@ -27,6 +27,7 @@ abstract interface class ChatBackend {
     String requestId,
     DateTime occurredAt, {
     List<OutgoingImage> images = const [],
+    Map<String, dynamic>? moment,
   });
   Future<String> submit(PendingMessage message);
 
@@ -88,6 +89,12 @@ abstract interface class ChatBackend {
 
   /// A marker whenever the feed changes; the page re-reads what it shows.
   Stream<void> get momentUpdates;
+
+  /// The thread under one moment, oldest first.
+  Future<List<MomentComment>> momentComments(String momentId);
+
+  /// Her newest moment after [after], for the chat page's preview card.
+  Future<Moment?> latestMoment(DateTime? after);
 }
 
 class CoreBackend implements ChatBackend {
@@ -157,6 +164,29 @@ class CoreBackend implements ChatBackend {
       query: {if (before != null) 'before': before.toUtc().toIso8601String()},
     ),
   );
+
+  @override
+  Future<List<MomentComment>> momentComments(String momentId) async => [
+    for (final item
+        in (await _request(
+              'GET',
+              '/v1/console/chat/moments/$momentId/comments',
+            ))['items']
+            as List)
+      MomentComment.fromJson(Map<String, dynamic>.from(item as Map)),
+  ];
+
+  @override
+  Future<Moment?> latestMoment(DateTime? after) async {
+    final value = (await _request(
+      'GET',
+      '/v1/console/chat/moments/latest',
+      query: {if (after != null) 'after': after.toUtc().toIso8601String()},
+    ))['item'];
+    if (value == null) return null;
+    final item = Map<String, dynamic>.from(value as Map);
+    return Moment.fromJson({...item, 'trigger': 'LIFE', 'liked': false});
+  }
 
   @override
   Future<List<Moment>> momentMemories() async =>
@@ -540,6 +570,7 @@ class CoreBackend implements ChatBackend {
     String requestId,
     DateTime occurredAt, {
     List<OutgoingImage> images = const [],
+    Map<String, dynamic>? moment,
   }) async {
     if (!await canPrepare()) throw const BackendError('请先登录并登记此设备。');
     final hashes = [
@@ -562,8 +593,13 @@ class CoreBackend implements ChatBackend {
       'event_id': eventId,
       'source_event_id': source,
       // Each image is signed by its hash inside the message projection.
+      // A moment reference is signed with the text, exactly as Core checks it.
       'input_sha256': await digest(
-        rich == null ? text : {'text': text, 'rich': rich},
+        moment != null
+            ? {'text': text, 'rich': ?rich, 'moment': moment}
+            : rich == null
+            ? text
+            : {'text': text, 'rich': rich},
       ),
       'frame_sha256': await digest([requestId, text, timestamp]),
       'evidence_sha256': await digest(['native.chat', deviceId, requestId]),
@@ -585,6 +621,7 @@ class CoreBackend implements ChatBackend {
       packet: {
         'capture': {...capture, 'signature': hexBytes(signature.bytes)},
         'text': text,
+        'moment': ?moment,
         if (images.isNotEmpty)
           'images': [
             for (final image in images)

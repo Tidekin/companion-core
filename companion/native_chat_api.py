@@ -192,8 +192,19 @@ def register_routes(app, settings, prefix, auth, authenticate):
     async def moments_feed(request: Request, before: str | None = None, limit: int = 30):
         if not 1 <= limit <= 60:
             raise CoreError("INVALID_PAGE", 400)
-        return await execute(request, lambda ctx, check: {"items": moments.items(
+        return await execute(request, lambda ctx, check: {"items": moments.feed(
             ctx.store, before=before, limit=limit)}, readonly=True)
+
+    @app.get(prefix + "/moments/latest", dependencies=auth)
+    async def moments_latest(request: Request, after: str | None = None):
+        # The chat page's preview card: her newest post since the device last looked.
+        return await execute(request, lambda ctx, check: {"item": moments.latest_unseen(
+            ctx.store, after)}, readonly=True)
+
+    @app.get(prefix + "/moments/{moment_id}/comments", dependencies=auth)
+    async def moment_comments(moment_id: str, request: Request):
+        return await execute(request, lambda ctx, check: {"items": moments.comments(
+            ctx.store, moment_id)}, readonly=True)
 
     @app.get(prefix + "/moments/memories", dependencies=auth)
     async def moments_memories(request: Request):
@@ -215,6 +226,12 @@ def register_routes(app, settings, prefix, auth, authenticate):
         def run(ctx, check):
             with ctx.store.transaction(control_write=True):
                 check()
+                if not moment_id.startswith("moment_"):
+                    # The owner's own post is an owner message: native erasure removes it,
+                    # its images and her reply, and replays from older backups.
+                    moments.require_target(ctx.store, moment_id)
+                    ctx.ledger.expire_events(ctx.store, [moment_id], ctx.clock())
+                    return {"moment_id": moment_id, "state": "ERASED"}
                 return moments.forget(ctx.store, ctx.ledger, moment_id, ctx.clock())
 
         return await execute(request, run)

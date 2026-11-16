@@ -123,6 +123,17 @@ class DemoBackend implements ChatBackend {
   ];
   @override
   Future<List<Moment>> momentMemories() async => const [];
+  final threads = <String, List<MomentComment>>{};
+  @override
+  Future<List<MomentComment>> momentComments(String momentId) async =>
+      threads[momentId] ?? const [];
+  @override
+  Future<Moment?> latestMoment(DateTime? after) async => feed
+      .where(
+        (item) =>
+            !item.mine && (after == null || item.createdAt.isAfter(after)),
+      )
+      .firstOrNull;
   @override
   Future<void> likeMoment(String momentId, bool liked) async {
     final index = feed.indexWhere((item) => item.id == momentId);
@@ -257,6 +268,7 @@ class DemoBackend implements ChatBackend {
     String requestId,
     DateTime occurredAt, {
     List<OutgoingImage> images = const [],
+    Map<String, dynamic>? moment,
   }) async => PendingMessage(
     requestId: requestId,
     text: text,
@@ -265,6 +277,7 @@ class DemoBackend implements ChatBackend {
       'request': requestId,
       'text': text,
       'original_authority': 1,
+      'moment': ?moment,
       if (images.isNotEmpty)
         'images': [
           for (final image in images)
@@ -295,6 +308,29 @@ class DemoBackend implements ChatBackend {
   Future<String> submit(PendingMessage message) async {
     submissions++;
     final id = 'event_${message.requestId}';
+    final moment = message.packet['moment'] as Map<String, dynamic>?;
+    if (moment != null) {
+      // Moment posts and comments stay under their moment, never in the chat.
+      if (moment['kind'] == 'post') {
+        feed.insert(
+          0,
+          Moment(
+            id: id,
+            text: message.text,
+            trigger: 'OWNER',
+            createdAt: DateTime.now().toUtc(),
+            liked: false,
+            author: 'owner',
+          ),
+        );
+      } else {
+        threads
+            .putIfAbsent(moment['moment_id'] as String, () => [])
+            .add(MomentComment(author: 'owner', text: message.text, id: id));
+      }
+      momentChanges.add(null);
+      return id;
+    }
     final rename = RegExp(r'^改名[:：]\s*(.+)$').firstMatch(message.text.trim());
     if (rename != null) simulateCompanionRename(rename.group(1)!.trim());
     if (!records.any((r) => r['event_id'] == id)) {

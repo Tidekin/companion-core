@@ -30,7 +30,7 @@ def enroll(client, key):
     return headers, value['authority']
 
 
-def packet(core, key, authority, text='原生文本输入', request_id=None, images=()):
+def packet(core, key, authority, text='原生文本输入', request_id=None, images=(), moment=None):
     """images: (mime, bytes) pairs, signed by hash inside the message projection."""
     from companion.native_devices import _row
     from companion.native_images import input_sha256
@@ -47,8 +47,15 @@ def packet(core, key, authority, text='原生文本输入', request_id=None, ima
         value.update({name: identity[name] for name in ('identity_sha256', 'protocol_epoch')})
     value['input_sha256'] = input_sha256(
         text, [hashlib.sha256(data).hexdigest() for _, data in images])
+    if moment is not None:
+        from companion.native_images import image_rich
+        from companion.qq_rich import input_digest
+
+        rich = image_rich(text, [hashlib.sha256(data).hexdigest() for _, data in images])
+        value['input_sha256'] = input_digest({'text': text, **({'rich': rich} if rich else {}),
+                                              'moment': moment})
     value['signature'] = key.sign(capture_signing_payload(value)).hex()
-    result = {'capture': value, 'text': text}
+    result = {'capture': value, 'text': text, **({'moment': moment} if moment else {})}
     if images:
         result['images'] = [{'mime_type': mime, 'data_base64': base64.b64encode(data).decode()}
                             for mime, data in images]

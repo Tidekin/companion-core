@@ -60,6 +60,76 @@ void main() {
     expect(moment.withLiked(false).text, moment.text);
   });
 
+  (ProviderContainer, DemoBackend) setUp() {
+    final backend = DemoBackend(bot);
+    final container = ProviderContainer(
+      overrides: [
+        repositoryProvider.overrideWithValue(EmptyRepository()),
+        vaultProvider.overrideWithValue(MemoryVault()),
+        backendFactoryProvider.overrideWithValue((_) => backend),
+        profileProvider.overrideWith((ref, _) => Stream.value(null)),
+      ],
+    );
+    return (container, backend);
+  }
+
+  Future<void> close(WidgetTester tester, ProviderContainer container) async {
+    await tester.pumpWidget(const SizedBox());
+    container.dispose();
+    await tester.pump(const Duration(seconds: 3));
+  }
+
+  Widget host(ProviderContainer container, Widget child) =>
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: warmTheme(),
+          home: Scaffold(body: child),
+        ),
+      );
+
+  testWidgets('the owner posts and comments; both stay under the moments', (
+    tester,
+  ) async {
+    final (container, backend) = setUp();
+    await tester.pumpWidget(host(container, MomentsPanel(bot: bot)));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('moment_post_text')),
+      '今天去爬山了',
+    );
+    await tester.tap(find.byKey(const ValueKey('moment_post_send')));
+    await tester.pumpAndSettle();
+    expect(backend.feed.first.mine, isTrue);
+    expect(find.text('今天去爬山了'), findsOneWidget);
+    expect(backend.records, isEmpty);
+    final hers = backend.feed.last;
+    await tester.tap(find.byKey(ValueKey('moment_comments_${hers.id}')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(ValueKey('moment_comment_text_${hers.id}')),
+      '我也想看看',
+    );
+    await tester.tap(find.byKey(ValueKey('moment_comment_send_${hers.id}')));
+    await tester.pumpAndSettle();
+    expect(backend.threads[hers.id]!.single.text, '我也想看看');
+    expect(find.textContaining('我也想看看'), findsOneWidget);
+    await close(tester, container);
+  });
+
+  testWidgets('her new post shows a chat card until it is dismissed', (
+    tester,
+  ) async {
+    final (container, backend) = setUp();
+    await tester.pumpWidget(host(container, MomentPreviewCard(bot: bot)));
+    await tester.pumpAndSettle();
+    expect(find.textContaining(backend.feed.single.text), findsOneWidget);
+    await tester.tap(find.byTooltip('知道了'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining(backend.feed.single.text), findsNothing);
+    await close(tester, container);
+  });
+
   testWidgets('the feed shows her posts and the like reaches Core', (
     tester,
   ) async {

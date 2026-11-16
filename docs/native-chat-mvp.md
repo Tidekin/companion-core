@@ -112,6 +112,13 @@ Set-Location clients/chat
 （`GET moments?before=`）、那年今日（`GET moments/memories`）、点赞（`POST moments/{id}/like`）、
 隐藏（`POST moments/{id}/visibility`）和忘记（`POST moments/{id}/forget`，经原遗忘日志）。
 事件流在动态有变化时推送 `event: moment`（只含变化标记），客户端据此重新读取当前列表。
+
+主人也可以发自己的动态（文字和图片），并在任意一条动态下评论。帖子和评论都是普通的签名原生输入，
+只多带一个 `moment` 引用：`{"kind":"post"}` 或 `{"kind":"comment","moment_id":...}`。这个引用和
+文字一起计入 `input_sha256`，不能被改指向别的动态；需要授权里有 `moments` 用途。它们走原聊天
+流程：她的回复照常计费、核对来源和记忆提取，只是不出现在对话历史里，而是显示在那条动态下面
+（`GET moments/{id}/comments`）。删除主人自己的帖子走原生事件遗忘。对话页有她新动态时，在输入框
+上方显示一张预览卡片（`GET moments/latest?after=`），点开进入动态面板；本机记住看过的时间。
 授权与发布规则见[动态设计稿](plans/2026-11-16-native-moments.md)。
 
 ## 复用依据

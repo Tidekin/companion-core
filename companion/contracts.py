@@ -40,6 +40,20 @@ class SharedFile(StrictModel):
     slot: int = Field(ge=0, le=63, strict=True)
 
 
+class MomentRef(StrictModel):
+    """The owner's own moment post, or a comment under a moment; signed with the input."""
+
+    kind: Literal["post", "comment"]
+    moment_id: str | None = Field(default=None, pattern=r"^(moment|evt)_[A-Za-z0-9]{8,80}$",
+                                  exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def target(self):
+        if (self.kind == "comment") != (self.moment_id is not None):
+            raise ValueError("a comment names its moment; a post names none")
+        return self
+
+
 class Payload(StrictModel):
     text: str = Field(max_length=20000)
     media: list[Media] = Field(max_length=10)
@@ -48,6 +62,8 @@ class Payload(StrictModel):
     ] = Field(default_factory=list, max_length=64)
     # Absent plain input serializes exactly as before, including historical fingerprints.
     rich: dict | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Native moment posts and comments; absent for every ordinary message.
+    moment: MomentRef | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("rich")
     @classmethod
