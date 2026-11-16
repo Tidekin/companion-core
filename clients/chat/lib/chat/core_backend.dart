@@ -76,6 +76,18 @@ abstract interface class ChatBackend {
 
   /// Profile snapshots pushed by the event stream while it is connected.
   Stream<CompanionProfile> get profileUpdates;
+
+  /// Owner-only moments, newest first; `before` pages by creation time.
+  Future<List<Moment>> moments({DateTime? before});
+
+  /// Moments from this calendar day in earlier years.
+  Future<List<Moment>> momentMemories();
+  Future<void> likeMoment(String momentId, bool liked);
+  Future<void> hideMoment(String momentId);
+  Future<void> forgetMoment(String momentId);
+
+  /// A marker whenever the feed changes; the page re-reads what it shows.
+  Stream<void> get momentUpdates;
 }
 
 class CoreBackend implements ChatBackend {
@@ -124,9 +136,49 @@ class CoreBackend implements ChatBackend {
 
   CancelToken? _events;
   final _profiles = StreamController<CompanionProfile>.broadcast();
+  final _moments = StreamController<void>.broadcast();
 
   @override
   Stream<CompanionProfile> get profileUpdates => _profiles.stream;
+
+  @override
+  Stream<void> get momentUpdates => _moments.stream;
+
+  List<Moment> _momentList(Map<String, dynamic> value) => [
+    for (final item in value['items'] as List)
+      Moment.fromJson(Map<String, dynamic>.from(item as Map)),
+  ];
+
+  @override
+  Future<List<Moment>> moments({DateTime? before}) async => _momentList(
+    await _request(
+      'GET',
+      '/v1/console/chat/moments',
+      query: {if (before != null) 'before': before.toUtc().toIso8601String()},
+    ),
+  );
+
+  @override
+  Future<List<Moment>> momentMemories() async =>
+      _momentList(await _request('GET', '/v1/console/chat/moments/memories'));
+
+  @override
+  Future<void> likeMoment(String momentId, bool liked) => _request(
+    'POST',
+    '/v1/console/chat/moments/$momentId/like',
+    body: {'liked': liked},
+  );
+
+  @override
+  Future<void> hideMoment(String momentId) => _request(
+    'POST',
+    '/v1/console/chat/moments/$momentId/visibility',
+    body: {'hidden': true},
+  );
+
+  @override
+  Future<void> forgetMoment(String momentId) =>
+      _request('POST', '/v1/console/chat/moments/$momentId/forget', body: {});
 
   @override
   Future<CompanionProfile> profile() async => CompanionProfile.fromJson(
@@ -623,6 +675,7 @@ class CoreBackend implements ChatBackend {
             if (event == 'profile') {
               _profiles.add(CompanionProfile.fromJson(value));
             }
+            if (event == 'moment') _moments.add(null);
           }
           event = '';
           data.clear();
@@ -657,6 +710,7 @@ class CoreBackend implements ChatBackend {
     _sessionGeneration++;
     stopWatching();
     unawaited(_profiles.close());
+    unawaited(_moments.close());
     _cookie = _csrf = null;
     http.close(force: true);
   }

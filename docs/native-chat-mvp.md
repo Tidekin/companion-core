@@ -105,6 +105,15 @@ Set-Location clients/chat
 
 服务端需迁移到 `pg0004_native_stream`。反向代理应关闭 `/v1/console/chat/events` 的响应缓冲与缓存，并允许长连接；服务端发送约 10 秒心跳，客户端在 30 秒无数据时重连。订阅初始返回最近 100 轮快照，其后按变化推送；旧任务仍由原状态/历史接口补查。活跃预览每次读取都重新校验来源与租约，静止历史不会被每 250ms 全量重新投影。
 
+## 她的动态
+
+对话页顶栏的“她的动态”打开动态面板：她用第一人称发的、只给主人看的说说，最新在前，可以点赞、
+隐藏或忘记；那年今日在顶部列出往年同一天的动态。接口都在 `/v1/console/chat/moments` 下：列表
+（`GET moments?before=`）、那年今日（`GET moments/memories`）、点赞（`POST moments/{id}/like`）、
+隐藏（`POST moments/{id}/visibility`）和忘记（`POST moments/{id}/forget`，经原遗忘日志）。
+事件流在动态有变化时推送 `event: moment`（只含变化标记），客户端据此重新读取当前列表。
+授权与发布规则见[动态设计稿](plans/2026-11-16-native-moments.md)。
+
 ## 复用依据
 
 - [Flutter 官方 MCP](https://docs.flutter.dev/ai/get-started)、[工具说明](https://docs.flutter.dev/ai/tools)：复用 SDK 的 MCP 与 Widget/Driver 能力。

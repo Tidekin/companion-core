@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../chat/models.dart';
 import '../chat/session.dart';
 import 'avatar.dart';
+import 'moments.dart';
 import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
@@ -1100,6 +1101,16 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                       style: const TextStyle(fontSize: 11, color: Warm.meta),
                     ),
                   ],
+                ),
+              ),
+              IconButton(
+                key: ValueKey('moments_${widget.bot.id}'),
+                tooltip: '她的动态',
+                color: Warm.textSoft,
+                icon: const Icon(Icons.auto_awesome_outlined),
+                onPressed: () => showWarmSheet<void>(
+                  context,
+                  (context) => MomentsPanel(bot: widget.bot),
                 ),
               ),
               IconButton(

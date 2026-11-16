@@ -102,6 +102,43 @@ class DemoBackend implements ChatBackend {
 
   @override
   Stream<CompanionProfile> get profileUpdates => profiles.stream;
+
+  final momentChanges = StreamController<void>.broadcast();
+  late final List<Moment> feed = [
+    Moment(
+      id: 'moment_synthetic_${bot.id}',
+      text: '今天读到恒星的颜色和温度有关，想再弄懂一点光谱。',
+      trigger: 'LIFE',
+      createdAt: DateTime.now().toUtc().subtract(const Duration(hours: 2)),
+      liked: false,
+    ),
+  ];
+
+  @override
+  Stream<void> get momentUpdates => momentChanges.stream;
+  @override
+  Future<List<Moment>> moments({DateTime? before}) async => [
+    for (final item in feed)
+      if (before == null || item.createdAt.isBefore(before)) item,
+  ];
+  @override
+  Future<List<Moment>> momentMemories() async => const [];
+  @override
+  Future<void> likeMoment(String momentId, bool liked) async {
+    final index = feed.indexWhere((item) => item.id == momentId);
+    if (index < 0) throw const BackendError('MOMENT_NOT_FOUND', status: 404);
+    feed[index] = feed[index].withLiked(liked);
+    momentChanges.add(null);
+  }
+
+  @override
+  Future<void> hideMoment(String momentId) async {
+    feed.removeWhere((item) => item.id == momentId);
+    momentChanges.add(null);
+  }
+
+  @override
+  Future<void> forgetMoment(String momentId) => hideMoment(momentId);
   @override
   Future<CompanionProfile> profile() async => current;
   @override

@@ -66,7 +66,8 @@ def save(store, settings, clock, data, body):
 def rows(store, *, before=None, limit=30, include_hidden=False):
     states = ("PUBLISHED", "HIDDEN") if include_hidden else ("PUBLISHED",)
     return store.rows(
-        "SELECT moment_id, text, trigger, state, created_at, source_event_ids_json FROM moments "
+        "SELECT moment_id, text, trigger, state, created_at, liked_at, source_event_ids_json "
+        "FROM moments "
         "WHERE state = ANY(%s::text[]) AND (CAST(%s AS TEXT) IS NULL OR created_at < %s) "
         "ORDER BY created_at DESC, moment_id DESC LIMIT %s",
         (list(states), before, before, limit),
@@ -76,8 +77,45 @@ def rows(store, *, before=None, limit=30, include_hidden=False):
 def items(store, **kwargs):
     return [{"id": row["moment_id"], "text": row["text"], "trigger": row["trigger"],
              "state": row["state"], "created_at": row["created_at"],
+             "liked": row["liked_at"] is not None,
              "source_event_ids": json.loads(row["source_event_ids_json"])}
             for row in rows(store, **kwargs)]
+
+
+def set_liked(store, moment_id, liked, now):
+    """The owner's like; liking twice or unliking twice changes nothing."""
+    with nullcontext() if store.in_transaction else store.transaction(control_write=True):
+        row = store.one("SELECT state, liked_at FROM moments WHERE moment_id = %s FOR UPDATE",
+                        (moment_id,))
+        if not row or row["state"] != "PUBLISHED":
+            raise CoreError("MOMENT_NOT_FOUND", 404)
+        if (row["liked_at"] is not None) != liked:
+            store.execute("UPDATE moments SET liked_at = %s, updated_at = %s WHERE moment_id = %s",
+                          (now if liked else None, now, moment_id))
+            store.audit("moment.liked" if liked else "moment.unliked", moment_id, moment_id, now)
+        return {"moment_id": moment_id, "liked": liked}
+
+
+def memories(store, settings, now):
+    """Published moments from this calendar day in earlier years (那年今日); no model call."""
+    zone = ZoneInfo(settings.timezone)
+    today = datetime.fromisoformat(now).astimezone(zone)
+    found = []
+    for row in rows(store, limit=200, before=_day_bounds(settings, now)[0]):
+        local = datetime.fromisoformat(row["created_at"]).astimezone(zone)
+        if (local.month, local.day) == (today.month, today.day) and local.year < today.year:
+            found.append({"id": row["moment_id"], "text": row["text"], "trigger": row["trigger"],
+                          "state": row["state"], "created_at": row["created_at"],
+                          "liked": row["liked_at"] is not None,
+                          "years_ago": today.year - local.year,
+                          "source_event_ids": json.loads(row["source_event_ids_json"])})
+    return found
+
+
+def signature(store):
+    """Changes whenever a moment is published, hidden, liked or erased."""
+    row = store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM moments")
+    return [row["n"], row["at"]]
 
 
 def set_hidden(store, moment_id, hidden, now):
