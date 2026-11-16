@@ -859,6 +859,14 @@ class MemoryContext:
                     "source_event_ids": reference["proof"]["source_event_ids"],
                     "owner_confirmed": row["origin"] == "user_confirmed"}
             (conflicts if row["needs_review"] else facts).append(item)
+        from companion import keepsakes
+
+        # Kept memories tell every reader, tools included, that only the gist remains.
+        kept = keepsakes.states(self.store, [item["memory_id"] for item in [*facts, *conflicts]],
+                                now) if facts or conflicts else {}
+        for item in [*facts, *conflicts]:
+            if item["memory_id"] in kept:
+                item["recollection"] = keepsakes.RECOLLECTION
         check_version(self.memory, version)
         facts = facts[:self._limit()]
         selected = {row["memory_id"] for row in [*facts, *conflicts[:2]]}

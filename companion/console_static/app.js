@@ -715,6 +715,7 @@ function todoList(data) {
   const uncertain = (data.diagnostics?.items || []).filter(i => i.status === "DELIVERY_UNCERTAIN");
   if (uncertain.length) out.push(["bad", uncertain.length, "条投递结果不明", "不会自动重发,请到 QQ 里看看是否已出现", "去核对", "diagnostics"]);
   if (counts.review_memories) out.push(["", counts.review_memories, "条记忆互相矛盾", "她不确定哪个说法对，需要你判断", "去核对", "memories"]);
+  if (counts.keepsakes && counts.keepsakes.held >= counts.keepsakes.max_items) out.push(["info", counts.keepsakes.held, "条牢记已到上限", "新的重要的事暂时不会再牢记，可以放宽授权里的上限或让她不用牢记一些", "去看看", "memories"]);
   if (counts.companion_proposals) out.push(["info", counts.companion_proposals, "条她的调整提议", "她想少打扰或休息一下,等你批准", "去看看", "caps/wake"]);
   if (counts.pending_goals) out.push(["", counts.pending_goals, "个目标等你决定", "她提出了新目标,需要你接受或取消", "去看看", "life"]);
   if (counts.pending_reflections) out.push(["", counts.pending_reflections, "条反思等你批准", "每日反思已完成,需要你批准或拒绝", "去看看", "life"]);

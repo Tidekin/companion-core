@@ -252,6 +252,15 @@ def states(store, memory_ids, now):
         "until": row["until"]} for row in rows}
 
 
+def capacity(store, settings, clock):
+    """{"held", "max_items"} under a current grant, else None."""
+    policy = grant(store, settings, clock)
+    if policy is None:
+        return None
+    return {"held": store.one("SELECT COUNT(*) AS n FROM keepsakes")["n"],
+            "max_items": policy.max_items}
+
+
 def release_by_owner(store, settings, ledger, memory_id, now):
     """The owner lets a keepsake go: its excerpt expires now through the native Ledger."""
     row = store.one("SELECT event_id FROM keepsakes WHERE memory_id = %s", (memory_id,))

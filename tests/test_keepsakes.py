@@ -95,3 +95,12 @@ def test_replay_trims_the_same_excerpt_and_expires_on_mismatch(core, tmp_path):
         assert keepsakes.apply(core.store, [entry], core.clock()) == ({event_id}, set())
         wrong = {**entry, "excerpt_sha256": "0" * 64}
         assert keepsakes.apply(core.store, [wrong], core.clock()) == (set(), {event_id})
+
+
+def test_capacity_reports_held_keepsakes_under_a_grant_only(core, tmp_path):
+    assert keepsakes.capacity(core.store, core.settings, core.clock) is None
+    kept_memory(core, tmp_path)
+    core.clock.advance(4 * 86400)
+    core.expire_raw_events()
+    assert keepsakes.capacity(core.store, core.settings, core.clock) == {
+        "held": 1, "max_items": 10000}
