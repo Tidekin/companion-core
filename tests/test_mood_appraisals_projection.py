@@ -81,7 +81,7 @@ def test_repeats_are_dulled_per_reason_during_projection(core):
         core.clock.advance(1)
     assert len(core.store.rows("SELECT * FROM mood_appraisals")) == 3
     signals = core.mood.snapshot()["signals"]
-    assert [(s["event_id"], s["weight"]) for s in signals] == list(zip(keys, [1, .5, .25]))
+    assert [(s["event_id"], s["weight"]) for s in signals] == list(zip(keys, [1, .5, .25], strict=True))
     other = appraise(core, 4, "逗你玩", "OWNER_PLAYFUL")
     signals = core.mood.snapshot()["signals"]
     assert [(s["event_id"], s["weight"]) for s in signals][-1] == (other, 1)
