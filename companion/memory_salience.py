@@ -8,6 +8,7 @@ bonus itself never count, so salience cannot feed itself.
 
 import json
 import math
+import re
 from datetime import datetime
 
 from companion import mood_appraisals
@@ -20,7 +21,12 @@ VIVID_CAP = 4.0
 VIVID_WEIGHT = 0.0008
 MOOD_WEIGHT = 0.0005
 MOOD_FULL = 0.1
-MIN_TERMS = 2
+# Everyday two-character words that say nothing about which memory is meant.
+COMMON = frozenset({
+    "今天", "明天", "昨天", "现在", "刚才", "我们", "你们", "他们", "什么", "怎么", "这个", "那个",
+    "一下", "一个", "就是", "还是", "但是", "因为", "所以", "可以", "没有", "不是", "知道", "觉得",
+    "时候", "真的", "有点", "已经", "主人", "你的", "我的", "一起", "自己", "这样", "那样", "好像",
+})
 
 
 def _age(now, at):
@@ -87,13 +93,20 @@ def boosts(store, memory_ids, now, mood=None):
     return result
 
 
-def mentioned(text, content):
-    """The owner's message literally shares at least two terms with the memory."""
-    from companion.memory_candidates import terms
+def words(text):
+    """Two-character Chinese pieces and 2+ character Latin/number tokens, minus filler."""
+    found = set()
+    for run in re.findall(r"[一-鿿]{2,}", text[:4096]):
+        found.update(run[i:i + 2] for i in range(len(run) - 1))
+    found.update(token.casefold() for token in re.findall(r"[A-Za-z0-9]{2,}", text[:4096]))
+    return found - COMMON
 
+
+def mentioned(text, content):
+    """The owner's own message shares a meaningful word with a memory recalled for it."""
     if not text or not content:
         return False
-    return sum(1 for term in terms(text) if term in content) >= MIN_TERMS
+    return bool(words(text) & words(content))
 
 
 def record(store, job, rows, now):

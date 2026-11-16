@@ -48,8 +48,11 @@ def test_bonuses_stay_below_a_few_reciprocal_rank_steps():
 
 @pytest.mark.parametrize(("text", "content", "expected"), [
     ("我下周要去杭州出差", "主人下周要去杭州出差", True),
-    ("杭州", "主人下周要去杭州出差", False),
+    ("杭州好玩吗", "主人下周要去杭州出差", True),
+    ("我生日快到了", "主人的生日是3月5日", True),
+    ("I booked the GPU", "主人在用 gpu 训练模型", True),
     ("今天天气不错", "主人下周要去杭州出差", False),
+    ("我们今天聊点什么", "主人今天加班到很晚", False),
     ("", "主人下周要去杭州出差", False),
 ])
 def test_only_owner_words_that_share_terms_count_as_a_mention(text, content, expected):
