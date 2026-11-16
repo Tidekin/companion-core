@@ -11,17 +11,11 @@ from companion.store import after
 from tests.support.life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
-from tests.support.life_expression_consumption import prepared
+from tests.support.moments import moment_ready
 from tests.support.owner_console import client as client
 from tests.support.owner_console import login
 
 TEXT = "这段关于恒星颜色的介绍让我想再弄懂光谱与温度的关系。"
-
-
-def moment_ready(core, tmp_path, **options):
-    return prepared(core, tmp_path, destination="PRIVATE_MOMENT", purposes=["moments"],
-                    life_purposes=["PRIVATE_MOMENT"], automatic_actions=["moment.save"],
-                    **options)
 
 
 def test_automatic_moment_keeps_the_settled_wording_once_without_a_model_call(core, tmp_path):

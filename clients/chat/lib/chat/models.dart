@@ -359,3 +359,39 @@ class ProfileChange {
     createdAt: DateTime.parse(value['created_at'] as String),
   );
 }
+
+/// One owner-only moment the companion posted; Core keeps the original wording.
+class Moment {
+  const Moment({
+    required this.id,
+    required this.text,
+    required this.trigger,
+    required this.createdAt,
+    required this.liked,
+    this.yearsAgo,
+  });
+  final String id;
+  final String text;
+  final String trigger;
+  final DateTime createdAt;
+  final bool liked;
+  final int? yearsAgo;
+
+  Moment withLiked(bool value) => Moment(
+    id: id,
+    text: text,
+    trigger: trigger,
+    createdAt: createdAt,
+    liked: value,
+    yearsAgo: yearsAgo,
+  );
+
+  factory Moment.fromJson(Map<String, dynamic> value) => Moment(
+    id: value['id'] as String,
+    text: value['text'] as String,
+    trigger: value['trigger'] as String? ?? 'LIFE',
+    createdAt: DateTime.parse(value['created_at'] as String),
+    liked: value['liked'] as bool? ?? false,
+    yearsAgo: value['years_ago'] as int?,
+  );
+}

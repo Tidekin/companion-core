@@ -12,7 +12,7 @@ from fastapi import Request
 from pydantic import Field
 from starlette.responses import Response, StreamingResponse
 
-from companion import companion_avatar, companion_profile, native_chat, native_devices
+from companion import companion_avatar, companion_profile, moments, native_chat, native_devices
 from companion.console_api import _operation, _request_fields
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger
@@ -52,6 +52,14 @@ class AvatarChoice(StrictModel):
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
 
 
+class MomentLike(StrictModel):
+    liked: bool
+
+
+class MomentVisibility(StrictModel):
+    hidden: bool
+
+
 class DeviceRevocation(StrictModel):
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
 
@@ -61,6 +69,10 @@ def _decoded(text):
         return base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError) as error:
         raise CoreError("AVATAR_IMAGE_INVALID", 400) from error
+
+
+def _moment_event(signature):
+    return "event: moment\ndata: " + json.dumps({"signature": signature}) + "\n\n"
 
 
 def _profile_event(view):
@@ -129,11 +141,11 @@ def register_routes(app, settings, prefix, auth, authenticate):
     async def events(request: Request):
         # Admission before response headers preserves normal HTTP authentication errors.
         initial = await execute(request, lambda ctx, check: (
-            native_chat.changes(ctx, {}), companion_profile.view(ctx.store, ctx.settings)),
-                                readonly=True)
+            native_chat.changes(ctx, {}), companion_profile.view(ctx.store, ctx.settings),
+            moments.signature(ctx.store)), readonly=True)
 
         async def stream():
-            ((items, signatures), profile), heartbeat = initial, time.monotonic()
+            ((items, signatures), profile, feed), heartbeat = initial, time.monotonic()
             seen, announced = {}, False
             while True:
                 for item in items:
@@ -156,13 +168,18 @@ def register_routes(app, settings, prefix, auth, authenticate):
                 if await request.is_disconnected():
                     return
                 try:
-                    (items, signatures), latest = await execute(request,
+                    (items, signatures), latest, current = await execute(request,
                         lambda ctx, check, prior=signatures: (native_chat.changes(ctx, prior),
-                            companion_profile.view(ctx.store, ctx.settings)),
+                            companion_profile.view(ctx.store, ctx.settings),
+                            moments.signature(ctx.store)),
                         readonly=True)
                     if latest != profile:
                         profile = latest
                         yield _profile_event(profile)
+                    if current != feed:
+                        # Only a change marker; the client re-reads the feed it is showing.
+                        feed = current
+                        yield _moment_event(feed)
                 except CoreError as error:
                     # No old text accompanies a revoked/expired subscription.
                     yield "event: session\ndata: " + json.dumps({"error": error.code}) + "\n\n"
@@ -170,6 +187,37 @@ def register_routes(app, settings, prefix, auth, authenticate):
 
         return StreamingResponse(stream(), media_type="text/event-stream", headers={
             "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.get(prefix + "/moments", dependencies=auth)
+    async def moments_feed(request: Request, before: str | None = None, limit: int = 30):
+        if not 1 <= limit <= 60:
+            raise CoreError("INVALID_PAGE", 400)
+        return await execute(request, lambda ctx, check: {"items": moments.items(
+            ctx.store, before=before, limit=limit)}, readonly=True)
+
+    @app.get(prefix + "/moments/memories", dependencies=auth)
+    async def moments_memories(request: Request):
+        return await execute(request, lambda ctx, check: {"items": moments.memories(
+            ctx.store, ctx.settings, ctx.clock())}, readonly=True)
+
+    @app.post(prefix + "/moments/{moment_id}/like", dependencies=auth)
+    async def moment_like(moment_id: str, body: MomentLike, request: Request):
+        return await execute(request, write(lambda ctx: moments.set_liked(
+            ctx.store, moment_id, body.liked, ctx.clock())))
+
+    @app.post(prefix + "/moments/{moment_id}/visibility", dependencies=auth)
+    async def moment_visibility(moment_id: str, body: MomentVisibility, request: Request):
+        return await execute(request, write(lambda ctx: moments.set_hidden(
+            ctx.store, moment_id, body.hidden, ctx.clock())))
+
+    @app.post(prefix + "/moments/{moment_id}/forget", dependencies=auth)
+    async def moment_forget(moment_id: str, request: Request):
+        def run(ctx, check):
+            with ctx.store.transaction(control_write=True):
+                check()
+                return moments.forget(ctx.store, ctx.ledger, moment_id, ctx.clock())
+
+        return await execute(request, run)
 
     @app.get(prefix + "/profile", dependencies=auth)
     async def profile(request: Request):
