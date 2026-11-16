@@ -114,8 +114,11 @@ def memories(store, settings, now):
 
 def signature(store):
     """Changes whenever a moment is published, hidden, liked or erased."""
-    row = store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM moments")
-    return [row["n"], row["at"]]
+    row = store.one(
+        "SELECT COUNT(*) AS n, COUNT(liked_at) AS liked, "
+        "COUNT(*) FILTER (WHERE state = 'PUBLISHED') AS shown, MAX(updated_at) AS at "
+        "FROM moments")
+    return [row["n"], row["liked"], row["shown"], row["at"]]
 
 
 def set_hidden(store, moment_id, hidden, now):

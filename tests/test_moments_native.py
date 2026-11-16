@@ -7,9 +7,10 @@ from companion.store import after
 from tests.support.life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
+from tests.support.moments import moment_ready, seed_moment
 from tests.support.native_chat import enroll
 from tests.support.owner_console import client as client
-from tests.test_moments import moment_ready
+from tests.support.owner_input import captured
 
 TEXT = "这段关于恒星颜色的介绍让我想再弄懂光谱与温度的关系。"
 
@@ -46,8 +47,9 @@ def test_memories_show_the_same_day_from_earlier_years_only(core, tmp_path):
 
 
 def test_native_routes_read_like_hide_and_forget(client, core, tmp_path):
-    moment_id = published(core, tmp_path)
+    captured(core, tmp_path)
     headers, _ = enroll(client, Ed25519PrivateKey.generate())
+    moment_id = seed_moment(core, TEXT)
     feed = client.get("/v1/console/chat/moments", headers=headers)
     assert feed.status_code == 200, feed.text
     assert [(i["id"], i["text"], i["liked"]) for i in feed.json()["items"]] == [
