@@ -19,7 +19,7 @@
 | 准入 | 登记公钥只允许该设备提交输入；实际模型、记忆、工具权限仍由现有目的授权、预算和来源校验决定 |
 | 恢复与撤销 | 保留旧来源证据；恢复代际、撤销、遗忘和过期使旧执行权限失效；离线请求不自动改签到新授权 |
 
-设备登记会更新原主人授权版本，尚未完成的旧授权任务可能失效；界面需要在批准前明确这一影响。原有 QQ capture 和原生设备映射分别保留，登记原生设备不替换 QQ 密钥。新增字段的默认序列化保持现存授权记录的原始摘要可读。
+设备登记由独立的凭据修订保存，不改变主人运行授权版本、预算或 QQ capture。主人登录后预览并批准即可在线添加；其他设备和正在执行的任务继续使用原授权。每次重新登记都有独立签名代际，撤销只取消对应设备的未完成工作，保留已发送历史、原账务和不确定责任。历史授权中的设备字段仅保留为原签名证据及一次性迁移输入。
 
 备选方案是仅凭登录会话写入原生消息。它可以减少客户端签名，但需要新增另一套可恢复的来源证明，并重新界定数据库外证据的保证。首期建议沿用已有签名证据模型。
 
@@ -79,9 +79,13 @@ Set-Location clients/chat
 ../../scripts/flutter.ps1 -Tool flutter -ToolArguments @('run','-d','windows')
 ```
 
-打开后添加多个 Bot 的名称和 HTTPS 地址，分别登录主人凭据，预览并批准登记。首次登记会更新授权版本。若 Core 尚无允许 chat 的主人授权，需先用原主人授权 status / preview / revisions 流程批准该设备公钥与 chat 目的；后续撤销也走同一流程。设备密钥与 QQ capture 独立。
+打开后添加多个 Bot 的名称和 HTTPS 地址，分别登录主人凭据，预览并批准登记。Core 已有 chat 目的授权时，设备在线登记立即生效。若尚未批准 chat，仍须先用原主人授权 status / preview / revisions 流程授予该目的；设备登记不扩大用途或预算。设备密钥与 QQ capture 独立。
 
-保留历史 UNKNOWN 的既有生产实例，设备变更使用原有 STOP → 受控授权 preview/apply → Bridge/Worker 交接流程，并要求当前授权下工作已终态且没有 UNKNOWN；仅改变 `native_devices`，预算、原 UNKNOWN 与其他权限保持不变。部署时可先登记客户端公钥，再启动会话。普通登录不自动停止生产服务或重跑旧请求。空设备字段保持省略，原授权摘要及签名证据不变。
+`pg0012_native_devices` 将当前已经批准的设备导入独立凭据表，原授权和历史签名字节保持不变。后续登记不需要 STOP、Bridge 交接或清除 UNKNOWN；运行权限、模型结算和投递责任仍沿用原流程。`POST /v1/console/chat/devices/{device_id}/revoke` 由主人控制台或该设备自己的主人会话调用，撤销后的旧会话不能重新登记，须重新输入主人凭据。全局授权内的历史设备字段不再作为修改设备的入口。
+
+聊天历史的 SENT 状态只证明原先发送成功；若正文已按删除指令清空，接口返回 `content_erased=true`，客户端显示“这条回复已清除”，并阻止迟到的缓存帧恢复正文。新设备会从服务端同步主人消息和仍保留的完整回复；每次打开对话定位最新消息，上翻阅读时保持当前位置。
+
+凭据边界参考固定 DSH 实现的[独立凭据记录](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/credentials/credentials/src/types.ts)与[授权完成后原子提交](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/credentials/authorization/src/index.ts)：复用本项目原主人会话、CSRF、操作回执、修订记录和 Ed25519 字段，不引入 DSH 运行依赖。新代际使用原签名的 `protocol_epoch` / `identity_sha256` 绑定，历史证明不因撤销而消失。
 
 正式 Windows 构建使用 `flutter build windows --release`；需分发整个 `build/windows/x64/runner/Release` 目录，不能只复制 exe。Android 使用同一源码 `flutter build apk --debug` 进行开发安装；公开发布前另行配置自己的 release 签名、升级与分发渠道。Android 最低 API 24。Android 构建还需 JDK 17、Android SDK 36，以及各插件要求的 NDK；下载和构建缓存放在工作区 `.local`。
 

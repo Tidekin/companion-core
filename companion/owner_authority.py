@@ -650,6 +650,10 @@ def preview(store, settings, clock, request):
     previous = _latest(store)
     if request.expected_revision != (previous["revision"] if previous else 0):
         raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
+    if previous and not previous['policy_redacted'] and (
+            policy.native_devices != OwnerGrantPolicy.model_validate_json(
+                previous['policy_json']).native_devices):
+        raise CoreError('NATIVE_DEVICE_REGISTRY_REQUIRED', 409)
     # Permission-only revisions use the same paid/carry approval and must prove
     # stopped custody at preview as well as in the activation transaction.
     if policy.unknown_carry_sha256 is not None:
@@ -850,6 +854,10 @@ def _append(store, settings, clock, operation, request_hash, policy, state, prev
     )
     _put(store, CURRENT, result["head_sha256"])
     _put(store, MODE, "ENABLED" if state == "ACTIVE" else "OFF")
+    if previous is None and state == 'ACTIVE':
+        from companion.native_devices import seed_legacy
+
+        seed_legacy(store)
     store.audit(
         "owner_authority." + state.lower(),
         authority["grant_id"],

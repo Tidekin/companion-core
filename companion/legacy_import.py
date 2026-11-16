@@ -14,11 +14,11 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0011_mood_refusal"
-# Native-only tables created after the SQLite era; an offline import leaves them empty.
+TARGET_REVISION = "pg0012_native_devices"
+# Native-only tables start empty; credential rows are seeded after exact legacy comparison.
 NATIVE_ONLY_TABLES = frozenset({"companion_profile", "companion_profile_settings",
                                 "companion_profile_changes", "companion_avatar_assets",
-                                "care_plans"})
+                                "care_plans", "native_devices", "native_device_revisions"})
 
 
 def migrate_sqlite(path, revision="head"):
@@ -93,6 +93,9 @@ def import_sqlite_backup(path, conninfo: SecretStr):
                 if counts[name]:
                     _compare_table(source, target, name)
             _require_empty(target, [name for name in tables if not counts[name]])
+            from companion.native_devices import SEED_LEGACY
+
+            target.execute(SEED_LEGACY)
             return {"source_revision": SOURCE_REVISION, "target_revision": TARGET_REVISION,
                     "tables": counts, "business_rows_compared": sum(counts.values())}
     finally:

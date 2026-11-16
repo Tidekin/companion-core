@@ -257,7 +257,8 @@ def _capture(store, settings, event_id, custody, authority):
         or value.get("input_sha256") != capture.input_sha256
         or value.get("authority") != capture.authority
         or capture.authority != authority
-        or custody_for(settings, event["source"], event["platform_session_key"], capture, view)
+        or custody_for(settings, event["source"], event["platform_session_key"],
+                       capture, view, store=store)
         != {"identity": identity, "capture_public_key": custody["capture_public_key"]}
     ):
         raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
@@ -266,17 +267,22 @@ def _capture(store, settings, event_id, custody, authority):
 NATIVE_SESSION = "native:owner"
 
 
-def custody_for(settings, source, platform_session_key, capture, view):
+def custody_for(settings, source, platform_session_key, capture, view, *, store=None):
     """Who signed an asset's source message: the QQ Bridge capture or one native device.
 
-    The native identity names the device whose key in the capture's own grant
-    signed the message; a QQ identity keeps its original fields unchanged.
+    The native identity names the immutable registration that signed the capture;
+    archived policy identities remain readable. QQ custody fields stay unchanged.
     """
     if source == "native.chat":
         from companion_delivery_protocol.native_chat import source_identity
 
         device_id = source_identity(capture.source_event_id)[0]
-        device = view.policy.native_devices.get(device_id)
+        if store is not None:
+            from companion.native_devices import historical_identity
+
+            device = historical_identity(store, capture, view)
+        else:
+            device = view.policy.native_devices.get(device_id)
         if device is None or platform_session_key != NATIVE_SESSION:
             raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
         return {"identity": ["native.chat", device_id, platform_session_key,
@@ -302,7 +308,7 @@ def original_custody(store, settings, event_id):
     value = strict_json(saved["value"])
     capture, view = owner_input.verify(store, settings, value.get("capture", {}))
     custody = custody_for(settings, event["source"], event["platform_session_key"],
-                          capture, view)
+                          capture, view, store=store)
     _capture(store, settings, event_id, custody, capture.authority)
     return custody
 
