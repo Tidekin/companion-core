@@ -218,16 +218,6 @@ Each tool requires its current purpose on the original owner-authorized job.
                                        "selection": trace})
         value = {key: item for key, item in result.items() if key != "rows"}
         value["search_can_continue"] = work is None or not work.exhausted()
-        from companion import keepsakes
-
-        listed = [item["memory_id"] for name in ("facts", "conflicts")
-                  for item in value.get(name, []) if isinstance(item, dict)]
-        kept = core.store.read_or_write(lambda: keepsakes.states(
-            core.store, listed, core.clock())) if listed else {}
-        for name in ("facts", "conflicts"):
-            value[name] = [{**item, "recollection": keepsakes.RECOLLECTION}
-                           if isinstance(item, dict) and item.get("memory_id") in kept else item
-                           for item in value.get(name, [])]
         fresh = 0
         for name in ("facts", "conflicts"):
             shown = []
