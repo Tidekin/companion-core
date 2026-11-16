@@ -20,6 +20,7 @@ class Wire implements HttpClientAdapter {
   Completer<void>? loginEntered;
   Future<void>? loginBarrier;
   String? eventData;
+  Map<String, dynamic>? captureIdentity;
   @override
   Future<ResponseBody> fetch(
     RequestOptions options,
@@ -63,6 +64,7 @@ class Wire implements HttpClientAdapter {
             : {
                 'registered': true,
                 'authority': {'revision': requests.length, 'for': name},
+                'capture_identity': ?captureIdentity,
                 'items': [],
                 'next_before': null,
               },
@@ -84,6 +86,57 @@ class Wire implements HttpClientAdapter {
 }
 
 void main() {
+  test('signed credential generation survives a client restart', () async {
+    final db = ChatDatabase(NativeDatabase.memory());
+    final vault = MemoryVault();
+    final repo = ChatRepository(db, CacheCipher(vault));
+    final bot = BotProfile(
+      id: 'generation',
+      name: 'A',
+      endpoint: Uri.parse('https://a.test'),
+    );
+    await repo.addBot(bot);
+    final wire = Wire('generation')
+      ..captureIdentity = {
+        'identity_sha256': 'd' * 64,
+        'protocol_epoch': 'native-v2-registration_generation',
+      };
+    final first = CoreBackend(
+      bot,
+      repo,
+      vault,
+      transport: Dio()..httpClientAdapter = wire,
+    );
+    await first.login('owner');
+    final packet = await first.prepare(
+      'before restart',
+      'a' * 32,
+      DateTime.utc(2026),
+    );
+    expect(
+      (packet.packet['capture'] as Map)['protocol_epoch'],
+      wire.captureIdentity!['protocol_epoch'],
+    );
+    first.close();
+    final restored = CoreBackend(
+      bot,
+      repo,
+      vault,
+      transport: Dio()..httpClientAdapter = Wire('restored'),
+    );
+    final next = await restored.prepare(
+      'after restart',
+      'b' * 32,
+      DateTime.utc(2026),
+    );
+    expect((next.packet['capture'] as Map)['identity_sha256'], 'd' * 64);
+    expect(
+      (next.packet['capture'] as Map)['protocol_epoch'],
+      wire.captureIdentity!['protocol_epoch'],
+    );
+    restored.close();
+    await db.close();
+  });
   test(
     'logout during login prevents a late cookie from restoring saved access',
     () async {

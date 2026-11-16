@@ -6,7 +6,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0012_memory_mentions`。迁移链先应用既有的
+当前新建与离线导入目标为 `pg0013_memory_mentions`。迁移链先应用既有的
 `pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
 再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
@@ -25,7 +25,10 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 行为、配置及验收范围见 [约好的关心](caring-followups.md)。
 `pg0011_mood_refusal` 只替换 `mood_appraisals.reason` 的取值约束，加入
 `OWNER_PRESSED_AFTER_REFUSAL`；已有行不变。行为见[动态心情](qq-beta/dynamic-mood.md)。
-`pg0012_memory_mentions` 新增 `memory_mentions`，记录主人哪条消息提到过哪条记忆，只用于召回
+`pg0012_native_devices` 新增独立设备凭据修订和当前引用表，一次性导入当前授权已经批准的
+公钥，保留原授权 JSON、摘要、签名和全部财务行。之后添加或撤销设备只修订设备记录，
+不切换全局授权；撤销保留历史证据。运行合同见 [原生聊天](native-chat-mvp.md)。
+`pg0013_memory_mentions` 新增 `memory_mentions`，记录主人哪条消息提到过哪条记忆，只用于召回
 排序；随来源消息或记忆一起清除，离线导入时为空。见[召回鲜明度](memory-salience.md)。
 
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到

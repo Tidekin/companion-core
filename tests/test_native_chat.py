@@ -19,11 +19,14 @@ def test_native_session_capture_isolated_and_idempotent(client, core, tmp_path):
     original, _ = captured(core, tmp_path)
     key = Ed25519PrivateKey.generate()
     headers, authority = enroll(client, key)
-    assert authority['revision'] == original.authority['revision'] + 1
+    assert authority == original.authority
     view = owner_authority.current(core.store, core.settings, core.clock, purpose='chat')
     assert view.policy.capture is not None
     device_id, _ = device_identity(key.public_key().public_bytes_raw().hex())
-    assert device_id in view.policy.native_devices
+    from companion.native_devices import current_identity
+
+    assert current_identity(core.store, device_id, view).public_key == (
+        key.public_key().public_bytes_raw().hex())
     assert client.get('/v1/console/configuration').status_code == 403
     body = packet(core, key, authority)
     assert client.post('/v1/console/chat/messages', json=body).status_code == 403
@@ -107,20 +110,25 @@ def test_revoked_device_cannot_regrant_using_old_login(client, core, tmp_path):
     key = Ed25519PrivateKey.generate()
     headers, authority = enroll(client, key)
     public_key = key.public_key().public_bytes_raw().hex()
-    view = owner_authority.current(core.store, core.settings, core.clock, purpose='chat')
-    policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(), 'native_devices': {}})
-    activate(core, policy, revision=authority['revision'], operation='remove-native-device')
+    device_id, _ = device_identity(public_key)
+    core.clock.advance(1)
+    revoked = client.post('/v1/console/chat/devices/'+device_id+'/revoke',
+        json={'operation_id': 'remove-native-device'}, headers=headers)
+    assert revoked.status_code == 200, revoked.text
     denied = client.post('/v1/console/chat/messages', json=packet(core, key, authority),
                          headers=headers)
     assert denied.status_code == 403
     preview = client.post('/v1/console/chat/devices/preview', json={'public_key': public_key},
-                          headers=headers).json()
+                          headers=headers)
+    assert preview.status_code == 403
     denied = client.post('/v1/console/chat/devices/authorize', headers=headers, json={
-        'public_key': public_key, **{name: preview[name]
-                                   for name in ('expected_revision', 'preview_sha256')}})
+        'public_key': public_key, 'expected_revision': authority['revision'],
+        'preview_sha256': '0' * 64})
     assert denied.status_code in {403, 409}, denied.text
-    assert not owner_authority.current(core.store, core.settings, core.clock,
-                                       purpose='chat').policy.native_devices
+    from companion.native_devices import active
+
+    view = owner_authority.current(core.store, core.settings, core.clock, purpose='chat')
+    assert active(core.store, device_id, view) is None
 
 
 def memory_scope(core):

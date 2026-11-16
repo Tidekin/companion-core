@@ -12,7 +12,7 @@ from fastapi import Request
 from pydantic import Field
 from starlette.responses import Response, StreamingResponse
 
-from companion import companion_avatar, companion_profile, native_chat
+from companion import companion_avatar, companion_profile, native_chat, native_devices
 from companion.console_api import _operation, _request_fields
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger
@@ -49,6 +49,10 @@ class AvatarUpload(StrictModel):
 class AvatarChoice(StrictModel):
     asset_id: str = Field(pattern=r"^avt_[a-f0-9]{32}$")
     expected_revision: int = Field(ge=0, strict=True)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
+
+
+class DeviceRevocation(StrictModel):
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
 
 
@@ -102,6 +106,19 @@ def register_routes(app, settings, prefix, auth, authenticate):
         options = app.state.core.content.options
         return await execute(request, lambda ctx, check: native_chat.submit(
             ctx, body, content_options=options))
+
+    @app.post(prefix + '/devices/{device_id}/revoke', dependencies=auth)
+    async def revoke_device(device_id: str, body: DeviceRevocation, request: Request):
+        captured = _request_fields(request)
+
+        def apply(context, check):
+            if context.session.get('native_device_id') not in (None, device_id):
+                raise CoreError('NATIVE_SESSION_SCOPE_REQUIRED', 403)
+            return _operation(context, captured,
+                'native_revoke:'+body.operation_id, {'device_id': device_id},
+                lambda: native_devices.revoke(context, device_id), owner_check=check)
+
+        return await execute(request, apply)
 
     @app.get(prefix + "/messages", dependencies=auth)
     async def history(request: Request, before: int | None = None, limit: int = 50):

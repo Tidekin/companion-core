@@ -8,11 +8,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion import model_carry, owner_authority
 from companion.contracts import CoreError
-from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy
+from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion_delivery_protocol.native_chat import device_identity
 from tests.model_carry_support import migrated
 from tests.support.model_carry_lifecycle import current_unknown, stop_current
+from tests.support.native_chat import enroll
 from tests.support.owner_authority import activate
+from tests.support.owner_console import client as client
 
 
 def device_policy(case):
@@ -52,29 +54,34 @@ def test_pre_native_policy_bytes_and_carry_remain_valid(core, tmp_path, monkeypa
     assert Path(core.settings.paid_model.journal_path).read_bytes().startswith(prefix)
 
 
-def test_stopped_device_only_revision_retains_original_unknown(core, tmp_path):
+def test_hot_device_enrollment_retains_original_unknown(client, core, tmp_path):
     case = migrated(core, tmp_path)
     before = core.store.rows('SELECT * FROM model_usage')
-    stop_current(core, case)
-    active, _ = activate(core, device_policy(case), revision=4, operation='native-device-only')
+    journal = Path(core.settings.paid_model.journal_path).read_bytes()
+    key = Ed25519PrivateKey.generate()
+    headers, authority = enroll(client, key)
     view = owner_authority.current(core.store, core.settings, core.clock)
-    assert view.authority.as_dict() == active['authority']
-    assert len(view.policy.native_devices) == 1
+    assert view.authority.as_dict() == authority == case.successor['authority']
+    assert view.policy == case.policy
     assert core.store.rows('SELECT * FROM model_usage') == before
     assert before[0]['state'] == 'UNKNOWN'
-    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
-        operation_id='stop-before-native-device-removal', authority=active['authority']))
-    activate(core, case.policy, revision=6, operation='remove-native-device-only')
-    assert not owner_authority.current(core.store, core.settings, core.clock).policy.native_devices
+    device_id, _ = device_identity(key.public_key().public_bytes_raw().hex())
+    core.clock.advance(1)
+    assert client.post('/v1/console/chat/devices/'+device_id+'/revoke',
+        json={'operation_id': 'revoke-carry-device'}, headers=headers).status_code == 200
+    assert owner_authority.current(
+        core.store, core.settings, core.clock).authority.as_dict() == authority
     assert core.store.rows('SELECT * FROM model_usage') == before
+    assert Path(core.settings.paid_model.journal_path).read_bytes() == journal
 
 
-def test_current_unknown_still_blocks_a_device_revision(core, tmp_path):
+def test_current_unknown_does_not_require_a_device_authority_revision(client, core, tmp_path):
     case = migrated(core, tmp_path)
     current_unknown(core)
-    stop_current(core, case)
-    with pytest.raises(CoreError, match='OWNER_MODEL_CARRY_NOT_QUIESCENT'):
-        activate(core, device_policy(case), revision=4, operation='reject-live-device-revision')
+    before = core.store.rows('SELECT * FROM model_usage')
+    _, authority = enroll(client, Ed25519PrivateKey.generate())
+    assert authority == case.successor['authority']
+    assert core.store.rows('SELECT * FROM model_usage') == before
 
 
 @pytest.mark.parametrize('extra', [{'max_reply_chars': 199}, {'source_retention_days': 12}])

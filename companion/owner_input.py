@@ -43,8 +43,12 @@ def _verify(store, settings, value, evidence):
         capture = OwnerCapture.model_validate(value)
         view = evidence(capture.authority)
         native = capture.kind == NATIVE_KIND
-        identity = (view.policy.native_devices.get(source_identity(capture.source_event_id)[0])
-                    if native else view.policy.capture)
+        if native:
+            from companion.native_devices import historical_identity
+
+            identity = historical_identity(store, capture, view)
+        else:
+            identity = view.policy.capture
         if identity is None:
             raise ValueError("capture identity absent")
         signed = capture.model_dump(mode="json", exclude={"signature"})
@@ -82,6 +86,10 @@ def approve(store, settings, clock, capture, *, meme_offer=None):
         view = owner_authority.current(
             store, settings, clock, purpose="chat", authority=capture.authority
         )
+        if capture.kind == NATIVE_KIND:
+            from companion.native_devices import require_capture
+
+            require_capture(store, capture, view)
         value = capture.model_dump(mode="json")
         verify(store, settings, value)
         offer = None
@@ -154,6 +162,10 @@ def check_input(store, settings, clock, event):
     try:
         value = json.loads(receipt["value"]) if receipt else {}
         capture, _ = verify(store, settings, value["capture"])
+        if capture.kind == NATIVE_KIND:
+            from companion.native_devices import require_capture
+
+            require_capture(store, capture, view)
         native = event.source == NATIVE_SOURCE
         body = event.payload.model_dump(mode="json")
         if (
@@ -355,6 +367,10 @@ def _source(
         ):
             raise ValueError("source changed")
         capture, original = verify_capture(value["capture"])
+        if not history and capture.kind == NATIVE_KIND:
+            from companion.native_devices import require_capture
+
+            require_capture(store, capture, view)
         if (
             (capture.kind == NATIVE_KIND) != (event["source"] == NATIVE_SOURCE)
             or

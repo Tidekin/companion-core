@@ -180,9 +180,9 @@ def verify_postgres(destination, environment):
         native.migrate(info)
         with native.Database(info) as database, database.session() as session:
             assert session.one('SELECT version_num FROM alembic_version')=={
-                'version_num':'pg0012_memory_mentions'}
+                'version_num':'pg0013_memory_mentions'}
             assert session.one("SELECT count(*) AS n FROM information_schema.tables "
-                "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':109}
+                "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':111}
         print('PASS: extracted wheel initializes native PostgreSQL migrations')
     """)
     with psycopg.connect(**connection, autocommit=True) as admin:
@@ -276,7 +276,8 @@ def main():
             "companion/migrations/postgresql/versions/pg0009_memory_time.py",
             "companion/migrations/postgresql/versions/pg0010_care_plans.py",
             "companion/migrations/postgresql/versions/pg0011_mood_refusal.py",
-            "companion/migrations/postgresql/versions/pg0012_memory_mentions.py",
+            "companion/migrations/postgresql/versions/pg0012_native_devices.py",
+            "companion/migrations/postgresql/versions/pg0013_memory_mentions.py",
             "companion/care.py",
             "companion/care_protocol.py",
             "companion/care_tools.py",

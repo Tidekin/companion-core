@@ -96,6 +96,7 @@ class CoreBackend implements ChatBackend {
   final Dio http;
   Future<SimpleKeyPair>? _key;
   Map<String, dynamic>? _authority;
+  Map<String, dynamic>? _captureIdentity;
   String? _csrf;
   String? _cookie;
   String get _sessionKey => 'companion_${bot.id}_session';
@@ -441,6 +442,11 @@ class CoreBackend implements ChatBackend {
   Future<void> _bind(Map<String, dynamic> value) async {
     _authority = Map<String, dynamic>.from(value['authority'] as Map);
     await repository.setMeta(bot.id, 'core_authority', _authority);
+    _captureIdentity = switch (value['capture_identity']) {
+      final Map identity => Map<String, dynamic>.from(identity),
+      _ => null,
+    };
+    await repository.setMeta(bot.id, 'core_capture_identity', _captureIdentity);
   }
 
   @override
@@ -464,6 +470,13 @@ class CoreBackend implements ChatBackend {
   Future<bool> canPrepare() async {
     _authority ??= switch (await repository.meta(bot.id, 'core_authority')) {
       final Map value => Map<String, dynamic>.from(value),
+      _ => null,
+    };
+    _captureIdentity ??= switch (await repository.meta(
+      bot.id,
+      'core_capture_identity',
+    )) {
+      final Map identity => Map<String, dynamic>.from(identity),
       _ => null,
     };
     return _authority != null;
@@ -502,8 +515,10 @@ class CoreBackend implements ChatBackend {
       ),
       'frame_sha256': await digest([requestId, text, timestamp]),
       'evidence_sha256': await digest(['native.chat', deviceId, requestId]),
-      'identity_sha256': await digest(['native.chat', deviceId, publicKey]),
-      'protocol_epoch': 'native-v1',
+      'identity_sha256':
+          _captureIdentity?['identity_sha256'] ??
+          await digest(['native.chat', deviceId, publicKey]),
+      'protocol_epoch': _captureIdentity?['protocol_epoch'] ?? 'native-v1',
       'received_at': timestamp,
       'occurred_at': timestamp,
     };

@@ -77,8 +77,6 @@ class OwnerGrantPolicy(StrictModel):
 
         if len(set(self.purposes)) != len(self.purposes):
             raise ValueError("duplicate owner purposes")
-        if "chat" in self.purposes and self.capture is None and not self.native_devices:
-            raise ValueError("chat requires authenticated capture identity")
         from companion_delivery_protocol.native_chat import device_identity
 
         for device_id, identity in self.native_devices.items():

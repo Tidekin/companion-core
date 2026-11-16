@@ -303,7 +303,7 @@ class MemeRetrieval:
                 self.settings, source["source"] if source else "",
                 meme_assets.NATIVE_SESSION if native
                 else "onebot-direct:FriendMessage:" + self.settings.owner_qq_id,
-                capture, original)
+                capture, original, store=s)
         except ValueError as error:
             raise CoreError("MEME_ASSET_UNAVAILABLE", 409) from error
         if (

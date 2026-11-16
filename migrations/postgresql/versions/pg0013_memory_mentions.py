@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "pg0012_memory_mentions"
-down_revision = "pg0011_mood_refusal"
+revision = "pg0013_memory_mentions"
+down_revision = "pg0012_native_devices"
 branch_labels = None
 depends_on = None
 
