@@ -12,10 +12,11 @@ from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
 
 
-def captured(core, tmp_path):
+def captured(core, tmp_path, **policy_changes):
     policy = prepare(core, tmp_path)
     key = Ed25519PrivateKey.generate()
     policy = OwnerGrantPolicy.model_validate({**policy.model_dump(), "purposes": ["chat"],
+        **policy_changes,
         "capture": {"public_key": key.public_key().public_bytes_raw().hex(),
                     "identity_sha256": paid_budget.sha(
                         [core.settings.owner_qq_id, core.settings.bot_qq_id]),
