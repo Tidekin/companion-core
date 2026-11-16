@@ -264,6 +264,9 @@ class Store:
 
     def schema_capabilities(self):
         required = {
+            "native_devices": {"device_id", "revision_id"},
+            "native_device_revisions": {"revision_id", "device_id", "version", "state",
+                                        "identity_json", "grant_id", "restore_generation"},
             "conversations": {"conversation_id", "reply_revision"},
             "events": {"event_id", "redacted", "memory_processed", "fingerprint", "reply_revision"},
             "jobs": {"lease_token", "state", "context_tracked", "authority_json"},

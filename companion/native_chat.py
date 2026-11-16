@@ -4,13 +4,10 @@ import json
 
 from pydantic import Field
 
-from companion import inbox, native_images, owner_authority, owner_input, qq_rich
+from companion import inbox, native_devices, native_images, owner_authority, owner_input, qq_rich
 from companion.contracts import CoreError, InboundEvent, StrictModel
 from companion.owner_authority_protocol import (
-    AuthorityChange,
-    AuthorityPreview,
     OwnerCapture,
-    OwnerGrantPolicy,
 )
 from companion.store import encode, uid
 from companion_delivery_protocol.native_chat import (
@@ -45,48 +42,25 @@ def device_view(context, public_key=None, *, registered=True):
     if public_key is not None and device_identity(public_key)[0] != device_id:
         raise CoreError("NATIVE_DEVICE_SESSION_MISMATCH", 403)
     view = owner_authority.current(context.store, context.settings, context.clock, purpose="chat")
-    if registered and device_id not in view.policy.native_devices:
-        raise CoreError("NATIVE_DEVICE_APPROVAL_REQUIRED", 403)
+    if registered:
+        native_devices.current_identity(context.store, device_id, view)
     return device_id, view
 
 
-def _policy(view, public_key):
-    device_id, identity = device_identity(public_key)
-    if device_id not in view.policy.native_devices and len(view.policy.native_devices) >= 16:
-        raise CoreError("NATIVE_DEVICE_LIMIT", 409)
-    policy = view.policy.model_dump()
-    policy["native_devices"] = {**policy.get("native_devices", {}), device_id: identity}
-    return OwnerGrantPolicy.model_validate(policy)
-
-
 def device_preview(context, body):
-    device_id, view = device_view(context, body.public_key, registered=False)
-    if device_id in view.policy.native_devices:
-        return {"registered": True, "device_id": device_id, "authority": view.authority.as_dict()}
-    preview = owner_authority.preview(context.store, context.settings, context.clock,
-        AuthorityPreview(expected_revision=view.authority.revision,
-                         policy=_policy(view, body.public_key)))
-    return {"registered": False, "device_id": device_id,
-            "expected_revision": view.authority.revision,
-            "preview_sha256": preview["preview_sha256"]}
+    device_view(context, body.public_key, registered=False)
+    return native_devices.preview(context, body.public_key)
 
 
 def authorize_device(context, body):
-    device_id, view = device_view(context, body.public_key, registered=False)
-    if device_id in view.policy.native_devices:
-        return {"registered": True, "device_id": device_id, "authority": view.authority.as_dict()}
-    result = owner_authority.activate(context.store, context.settings, context.clock,
-        AuthorityChange(operation_id="native_device_" + context.session["token_sha256"][:32],
-                        expected_revision=body.expected_revision,
-                        policy=_policy(view, body.public_key),
-                        preview_sha256=body.preview_sha256))
-    return {"registered": True, "device_id": device_id, "authority": result["authority"]}
+    device_view(context, body.public_key, registered=False)
+    return native_devices.authorize(context, body)
 
 
 def recover_authorization(context, body):
     device_id, view = device_view(context, body.public_key, registered=False)
-    if device_id in view.policy.native_devices:
-        return {"registered": True, "device_id": device_id, "authority": view.authority.as_dict()}
+    if native_devices.active(context.store, device_id, view):
+        return native_devices.preview(context, body.public_key)
     return None
 
 
@@ -152,7 +126,8 @@ def _turn(context, row):
 
     erased = bool(row["redacted"])
     replies = context.store.rows(
-        "SELECT message_id,content_json,state,created_at FROM outbox WHERE origin_event_id=%s "
+        "SELECT message_id,content_json,content_sha256,state,created_at FROM outbox "
+        "WHERE origin_event_id=%s "
         "AND action_type IN ('native.private.reply','native.private.proactive') "
         "ORDER BY record_sequence", (row["event_id"],),
     )
@@ -176,6 +151,8 @@ def _reply(item, erased):
     content = json.loads(item["content_json"]) if visible else {}
     value = {"message_id": item["message_id"], "state": item["state"],
              "text": content.get("text", ""), "created_at": item["created_at"]}
+    if visible and item['content_json'] == '{}' and not item['content_sha256']:
+        value['content_erased'] = True
     # Only a reference: the client shows the quoted text from its own synchronized copy.
     if visible and content.get("quote"):
         value["quote"] = content["quote"]

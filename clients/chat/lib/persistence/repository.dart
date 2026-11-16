@@ -101,27 +101,63 @@ class ChatRepository {
           if (previous['redacted'] == true) continue;
           if (item['redacted'] != true) {
             const terminal = {'SUCCEEDED', 'FAILED', 'CANCELLED'};
-            if (terminal.contains(previous['state']) &&
-                !terminal.contains(item['state'])) {
-              continue;
-            }
-            final before = previous['preview'] as Map?;
-            final after = item['preview'] as Map?;
-            final oldVersion = before?['version'] as int? ?? 0;
-            final newVersion = after?['version'] as int? ?? 0;
-            if (oldVersion > newVersion) continue;
-            const priority = {
-              'GENERATING': 0,
-              'WAITING': 1,
-              'INTERRUPTED': 2,
-              'COMPLETE': 3,
-              'WITHDRAWN': 4,
+            final erased = <String, Map>{
+              for (final reply in [
+                ...previous['replies'] as List,
+                ...item['replies'] as List,
+              ])
+                if (reply['content_erased'] == true)
+                  reply['message_id'] as String: reply as Map,
             };
-            if (before != null &&
-                oldVersion == newVersion &&
-                (priority[before['state']] ?? 0) >
-                    (priority[after?['state']] ?? 0)) {
-              item = {...item, 'preview': before};
+            if (erased.isNotEmpty) {
+              final incoming = item['replies'] as List;
+              final ids = incoming.map((reply) => reply['message_id']).toSet();
+              item = {
+                ...item,
+                'preview': null,
+                'replies': [
+                  for (final reply in incoming)
+                    if (erased.containsKey(reply['message_id']))
+                      {
+                        ...reply as Map,
+                        'text': '',
+                        'content_erased': true,
+                        'sticker': false,
+                        'quote': null,
+                      }
+                    else
+                      reply,
+                  for (final entry in erased.entries)
+                    if (!ids.contains(entry.key)) entry.value,
+                ],
+              };
+              if (terminal.contains(previous['state']) &&
+                  !terminal.contains(item['state'])) {
+                item['state'] = previous['state'];
+              }
+            } else {
+              if (terminal.contains(previous['state']) &&
+                  !terminal.contains(item['state'])) {
+                continue;
+              }
+              final before = previous['preview'] as Map?;
+              final after = item['preview'] as Map?;
+              final oldVersion = before?['version'] as int? ?? 0;
+              final newVersion = after?['version'] as int? ?? 0;
+              if (oldVersion > newVersion) continue;
+              const priority = {
+                'GENERATING': 0,
+                'WAITING': 1,
+                'INTERRUPTED': 2,
+                'COMPLETE': 3,
+                'WITHDRAWN': 4,
+              };
+              if (before != null &&
+                  oldVersion == newVersion &&
+                  (priority[before['state']] ?? 0) >
+                      (priority[after?['state']] ?? 0)) {
+                item = {...item, 'preview': before};
+              }
             }
           }
         }

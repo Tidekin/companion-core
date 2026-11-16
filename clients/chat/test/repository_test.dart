@@ -25,6 +25,54 @@ Map<String, dynamic> turn(String text) => {
 
 void main() {
   test(
+    'reply erasure overrides an old preview and survives late frames',
+    () async {
+      final db = ChatDatabase(NativeDatabase.memory());
+      final repo = ChatRepository(db, CacheCipher(MemoryVault()));
+      await repo.addBot(
+        BotProfile(id: 'a', name: 'A', endpoint: Uri.parse('https://a.test')),
+      );
+      final original = {
+        ...turn('owner retained'),
+        'preview': {'version': 8, 'state': 'COMPLETE', 'text': ''},
+      };
+      await repo.merge('a', [original]);
+      await repo.merge('a', [
+        {
+          ...turn('owner retained'),
+          'replies': [
+            {
+              'message_id': 'same-reply',
+              'state': 'SENT',
+              'text': '',
+              'content_erased': true,
+            },
+          ],
+        },
+      ]);
+      await repo.merge('a', [
+        original,
+        {
+          ...original,
+          'state': 'RUNNING',
+          'replies': [],
+          'preview': {
+            'version': 9,
+            'state': 'GENERATING',
+            'text': 'old private preview',
+          },
+        },
+      ]);
+      final value = (await repo.turns('a')).single;
+      expect(value.text, 'owner retained');
+      expect(value.state, 'SUCCEEDED');
+      expect(value.preview, isNull);
+      expect(value.replies.single.text, isEmpty);
+      expect(value.replies.single.contentErased, isTrue);
+      await db.close();
+    },
+  );
+  test(
     'late frames cannot resurrect withdrawn, completed or erased previews',
     () async {
       final db = ChatDatabase(NativeDatabase.memory());

@@ -130,6 +130,7 @@ class ChatReply {
     required this.state,
     this.quote,
     this.sticker = false,
+    this.contentErased = false,
     this.createdAt,
   });
   final String id;
@@ -142,12 +143,14 @@ class ChatReply {
 
   /// The reply carries a meme; its bytes are fetched through the session.
   final bool sticker;
+  final bool contentErased;
   factory ChatReply.fromJson(Map<String, dynamic> value) => ChatReply(
     id: value['message_id'] as String,
     text: value['text'] as String,
     state: value['state'] as String,
     quote: ChatQuote.fromJson(value['quote']),
     sticker: value['sticker'] == true,
+    contentErased: value['content_erased'] == true,
     createdAt: switch (value['created_at']) {
       final String at => DateTime.tryParse(at),
       _ => null,

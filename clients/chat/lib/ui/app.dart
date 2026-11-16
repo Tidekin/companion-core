@@ -660,6 +660,12 @@ Future<void> addBot(BuildContext context, WidgetRef ref) async {
 
 /// Owner-readable text for a login that did not reach a usable session.
 String loginProblemText(String status) {
+  if (status.contains('NATIVE_DEVICE_RELOGIN_REQUIRED')) {
+    return '此设备的登记已撤销，请重新输入主人凭据后登记。';
+  }
+  if (status.contains('NATIVE_DEVICE_REGISTRATION_CHANGED')) {
+    return '设备登记已更新，请重新连接后发送。';
+  }
   if (status.contains('OWNER_MODEL_CARRY_CHANGED')) {
     return '服务器暂时不能在线登记新设备。'
         '请把下面的设备公钥发给维护者，在下次停写维护时登记；登记后重新登录即可。';
@@ -737,7 +743,7 @@ class ChatPane extends ConsumerStatefulWidget {
 
 class _ChatPaneState extends ConsumerState<ChatPane> {
   final input = TextEditingController();
-  final scroll = ScrollController();
+  final scroll = ScrollController(keepScrollOffset: false);
   // Lets a quote jump to its original turn.
   final turnKeys = <String, GlobalKey>{};
   // Images picked for the next message, in order.
@@ -786,7 +792,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final position = scroll.position;
     scroll.jumpTo(
       position.maxScrollExtent *
-          index /
+          (timeline.length - 1 - index) /
           (timeline.length - 1).clamp(1, 1 << 30),
     );
     await WidgetsBinding.instance.endOfFrame;
@@ -840,7 +846,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       if (mounted) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (scroll.hasClients) {
-            final end = scroll.position.maxScrollExtent;
+            final end = scroll.position.minScrollExtent;
             if (Motion.reduced(context)) {
               scroll.jumpTo(end);
             } else {
@@ -915,7 +921,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           title: const Text('登记此设备'),
           content: const Text(
             '允许此设备以主人身份聊天？\n\n'
-            '登记会更新授权版本，旧版本下尚未完成的任务可能失效。',
+            '允许此设备使用当前聊天权限；现有对话和其他设备会继续运行。',
           ),
           actions: [
             TextButton(
@@ -1154,6 +1160,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             child: ListView.builder(
               key: ValueKey('messages_${widget.bot.id}'),
               controller: scroll,
+              reverse: true,
               padding: EdgeInsets.fromLTRB(
                 compact ? 14 : 24,
                 22,
@@ -1162,6 +1169,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               ),
               itemCount: timeline.length + pending.length,
               itemBuilder: (context, index) {
+                index = timeline.length + pending.length - 1 - index;
                 if (index < timeline.length) {
                   final item = timeline[index];
                   if (item is ProfileChange) {
@@ -1578,7 +1586,12 @@ class TurnView extends StatelessWidget {
               turn.state;
     // A meme-only part has no text but is still a bubble.
     final replies = turn.replies
-        .where((r) => r.text.isNotEmpty || r.sticker && loadSticker != null)
+        .where(
+          (r) =>
+              r.text.isNotEmpty ||
+              r.contentErased ||
+              r.sticker && loadSticker != null,
+        )
         .toList();
     final preview = turn.redacted || replies.isNotEmpty ? null : turn.preview;
     final previewLines = preview == null
@@ -1614,7 +1627,7 @@ class TurnView extends StatelessWidget {
                 key: ValueKey('bot_${turn.id}_$index'),
                 animate: animate || index > 0,
                 child: Bubble(
-                  text: reply.text,
+                  text: reply.contentErased ? '这条回复已清除' : reply.text,
                   bot: index == 0 ? bot : null,
                   content: reply.sticker && reply.text.trim().isEmpty
                       ? MessageImages(images: [loadSticker!(reply.id)])
