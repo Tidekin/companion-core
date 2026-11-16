@@ -869,15 +869,31 @@ PAGES.memories = data => {
         el("div", {}, el("h3", {}, m.title), el("div", { class: "meta" }, tag(m.status), d.memory_kind ? el("span", { class: "chip" }, MEM_KIND[d.memory_kind] || "其他") : null,
           d.subject ? el("span", {}, MEM_SUBJECT[d.subject] || "") : null, el("span", {}, "更新于 " + fmtDate(m.occurred_at)),
           Array.isArray(d.evidence_ids) ? el("span", {}, "来自 " + d.evidence_ids.length + " 条消息") : null),
+          d.keepsake ? el("div", { class: "meta mt" }, el("span", { class: "chip" }, d.keepsake.state === "FRESH" ? "牢记 · 常想起" : "牢记 · 有印象"),
+            el("span", { class: "note" }, d.keepsake.until ? "原话节选保留到 " + fmtDate(d.keepsake.until) : "原话节选一直保留")) : null,
           d.needs_review ? el("div", { class: "alert mt" }, icon("warn"), el("span", {}, "这条记忆和其他说法可能冲突，需要你核对。")) : null),
         el("div", { class: "acts" }, m.status !== "CONFIRMED" ? btn("确认", () => memoryAction(m, "confirm"), { cls: "sm primary", symbol: "check" }) : null,
           btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }),
+          d.keepsake ? btn("不用牢记", () => keepsakeRelease(m), { cls: "sm", symbol: "close" }) : null,
           btn("删除这条记忆（记忆有误）", () => memoryAction(m, "delete"), { cls: "sm danger", symbol: "trash" }),
           btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })));
     })) : empty(state.memQ ? "没有匹配的记忆" : state.memTab === "conflicts" ? "没有互相矛盾的记忆" : state.memTab === "new" ? "没有未确认的新记忆" : "还没有记忆",
       state.memQ ? "换个关键词试试。" : state.memTab === "conflicts" ? "新记住的内容在“新记住的”里，可以随时浏览。" : "新提取的记忆会显示在“新记住的”中，也可以在“全部”查看。"),
     state.memTab !== "jargon" && state.memTab !== "recall" && data.meta?.more ? el("p", { class: "note mt" }, "只显示最近 60 条，可以用搜索找更早的记忆。") : null);
 };
+function keepsakeRelease(item) {
+  const form = el("form", { class: "dlg-form" }, el("p", {}, "“" + item.title + "”"),
+    el("p", { class: "muted" }, "她保留的原话节选会按普通保留期立即清除。没有其他来源时，这条记忆随之失效；想彻底清除请用“忘记”。"));
+  const submit = el("button", { type: "submit", class: "btn primary" }, "不用牢记");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/memories/" + encodeURIComponent(item.id) + "/keepsake/release", {}, "POST",
+      r => r.memory_id === String(item.id) && r.state === "RELEASED"),
+      async () => { closeDialog(); toast("已不再牢记"); await loadRoute({ reset: true }); });
+  });
+  openDialog("不用牢记这条", form);
+}
 // 逐条调用单条确认接口：每条记忆各有自己的幂等键、审计和回执，遇到错误就停下，不跳过继续。
 function confirmMany(items) {
   const form = el("form", { class: "dlg-form" });
