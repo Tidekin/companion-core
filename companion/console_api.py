@@ -35,6 +35,7 @@ MEMORY_REJECTIONS = frozenset(
         "CORRECTION_REQUIRED",
         "CREDENTIAL_MEMORY_DENIED",
         "CORRECTION_NOT_APPLICABLE",
+        "KEEPSAKE_NOT_FOUND",
     }
 )
 
@@ -495,6 +496,20 @@ def register_console_routes(app, settings):
         return await write(
             request, idempotency_key, body.model_dump(), apply, rejected_errors=MEMORY_REJECTIONS
         )
+
+    @app.post(prefix + "/memories/{memory_id}/keepsake/release", dependencies=auth)
+    async def keepsake_release(memory_id: str, request: Request,
+                               idempotency_key: str = Header(default="")):
+        def apply(context, owner_check):
+            from companion import keepsakes
+
+            with context.store.transaction(control_write=True):
+                owner_check()
+                return keepsakes.release_by_owner(
+                    context.store, settings, context.ledger, memory_id, context.clock())
+
+        return await write(request, idempotency_key, {"memory_id": memory_id}, apply,
+                           rejected_errors=MEMORY_REJECTIONS)
 
     from companion.console_cognition import register_console_cognition_routes
 

@@ -120,6 +120,9 @@ def memories(core, query="", view="all", limit=30):
     conflicts = _conflict_count(core, now)
     # Recheck early pages after the complete scan, without returning stale evidence.
     rows = {row["memory_id"]: row for row in _memory_page(core, now, selected)}
+    from companion import keepsakes
+
+    kept = keepsakes.states(core.store, selected, now)
     check_version(core.memory, version)
     items = []
     for memory_id in selected:
@@ -129,7 +132,8 @@ def memories(core, query="", view="all", limit=30):
         items.append(entry(row["memory_id"], "memory", row["content"], row["status"],
                            row["updated_at"], subject=row["subject"], memory_kind=row["kind"],
                            needs_review=bool(row["needs_review"]),
-                           evidence_ids=row["evidence_ids"]))
+                           evidence_ids=row["evidence_ids"],
+                           **({"keepsake": kept[memory_id]} if memory_id in kept else {})))
     return {**collection(core, items), "meta": {"conflict_count": conflicts, "more": more}}
 
 

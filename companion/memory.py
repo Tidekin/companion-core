@@ -239,7 +239,14 @@ class Memory:
         rerank_scores = None
         boosts = None
         if salience is not None and query != "*" and review is None and rows:
-            from companion import memory_salience
+            from companion import keepsakes, memory_salience
+
+            # Automatic recall skips long-dormant keepsakes unless the words touch them.
+            touched = set(lexical) | {row["memory_id"] for row in rows if query in row["content"]}
+            dormant = {key for key, value in self.store.read_or_write(lambda: keepsakes.states(
+                self.store, [row["memory_id"] for row in rows], now)).items()
+                if value["state"] == "DORMANT" and key not in touched}
+            rows = [row for row in rows if row["memory_id"] not in dormant]
 
             # Ordering only: eligibility, floors and the exact-match lead are fixed above.
             boosts = self.store.read_or_write(lambda: memory_salience.boosts(

@@ -16,6 +16,10 @@ from companion.memory_salience import words
 from companion.store import after, encode
 
 SUBJECTS = ("user", "relationship", "project")
+# Recently kept or recently mentioned keepsakes are recalled as usual; older ones only when
+# the owner's words literally touch them or she looks them up herself.
+FRESH_DAYS = 365
+MENTION_FRESH_DAYS = 90
 SALIENCE_MIN = 0.9
 MENTION_DAYS = 3
 # Derived records the kept memory still stands on; every other projection is cleared.
@@ -228,3 +232,30 @@ def kept_input(body):
     if digest(body["text"]) != marker.get("excerpt_sha256"):
         return None
     return marker.get("input_sha256")
+
+
+def states(store, memory_ids, now):
+    """memory_id -> {"state": "FRESH"|"DORMANT", "until"} for kept memories."""
+    if not memory_ids:
+        return {}
+    rows = store.rows(
+        "SELECT k.memory_id, k.kept_at, k.until, (SELECT MAX(mentioned_at) FROM memory_mentions "
+        "AS n WHERE n.memory_id = k.memory_id) AS mentioned FROM keepsakes k "
+        "WHERE k.memory_id = ANY(%s::text[]) AND (k.until IS NULL OR k.until > %s)",
+        (sorted(set(memory_ids)), now))
+    fresh_kept, fresh_mention = after(now, -FRESH_DAYS * 86400), after(
+        now, -MENTION_FRESH_DAYS * 86400)
+    return {row["memory_id"]: {
+        "state": "FRESH" if row["kept_at"] > fresh_kept or (
+            row["mentioned"] and row["mentioned"] > fresh_mention) else "DORMANT",
+        "until": row["until"]} for row in rows}
+
+
+def release_by_owner(store, settings, ledger, memory_id, now):
+    """The owner lets a keepsake go: its excerpt expires now through the native Ledger."""
+    row = store.one("SELECT event_id FROM keepsakes WHERE memory_id = %s", (memory_id,))
+    if not row:
+        raise CoreError("KEEPSAKE_NOT_FOUND", 404)
+    cutoff = after(now, -86400 * settings.raw_event_retention_days)
+    ledger.expire_events(store, [row["event_id"]], now, retention_cutoff=cutoff)
+    return {"memory_id": memory_id, "state": "RELEASED"}

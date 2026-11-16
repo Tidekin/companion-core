@@ -564,6 +564,10 @@ class MemoryContext:
 
         hits, relations, standing, memory_proof = facts
         memory_references = []
+        from companion import keepsakes
+
+        kept = self.store.read_or_write(lambda: keepsakes.states(
+            self.store, [h["memory_id"] for h in hits], clock())) if hits else {}
         if standing:
             selection.add(RELATIONSHIP_HEADING,
                 {"memories": [{k: row[k] for k in (
@@ -584,6 +588,7 @@ class MemoryContext:
                 **({"origin": h["origin"]} if h.get("origin") else {}),
                 **relations.get(h["memory_id"], {}),
                 **({"event_time": event_time} if event_time else {}),
+                **({"recollection": "approximate"} if h["memory_id"] in kept else {}),
                 **({"source_message_on": source_day}
                    if chat and settings.chat_time_labels
                    and (source_day := self._memory_source_days(h, settings.timezone)) else {})}
