@@ -16,6 +16,18 @@ class EmptyRepository implements ChatRepository {
   Future<List<BotProfile>> bots() async => [];
   @override
   Stream<List<BotProfile>> watchBots() => Stream.value([]);
+  @override
+  Future<List<ChatTurn>> turns(String botId) async => [];
+  @override
+  Future<List<PendingMessage>> queue(String botId) async => [];
+  @override
+  Future<Object?> meta(String botId, String name) async => null;
+  @override
+  Future<void> setMeta(String botId, String name, Object? value) async {}
+  @override
+  Future<Set<String>> viewed(String botId) async => {};
+  @override
+  Future<void> markViewed(String botId, Iterable<String> ids) async {}
 }
 
 final bot = BotProfile(
@@ -41,11 +53,10 @@ void main() {
       'created_at': '2026-11-16T12:00:00Z',
       'liked': true,
     });
-    expect((moment.id, moment.trigger, moment.liked), (
-      'moment_1',
-      'KEEPSAKE',
-      true,
-    ));
+    expect(
+      (moment.id, moment.trigger, moment.liked),
+      ('moment_1', 'KEEPSAKE', true),
+    );
     expect(moment.withLiked(false).text, moment.text);
   });
 
@@ -61,7 +72,6 @@ void main() {
         profileProvider.overrideWith((ref, _) => Stream.value(null)),
       ],
     );
-    addTearDown(container.dispose);
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
@@ -85,5 +95,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(backend.feed, isEmpty);
     expect(find.textContaining('还没有发过动态'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    container.dispose();
+    await tester.pump(const Duration(seconds: 3));
   });
 }

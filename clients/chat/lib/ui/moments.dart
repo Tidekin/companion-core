@@ -77,9 +77,8 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
       await action();
     } catch (failure) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(_failure(failure))));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_failure(failure))));
       }
     }
     await load();
@@ -172,7 +171,10 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
             if (error != null)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(error!, style: const TextStyle(color: Warm.warning)),
+                child: Text(
+                  error!,
+                  style: const TextStyle(color: Warm.warning),
+                ),
               ),
             if (feed == null && error == null)
               const Padding(
