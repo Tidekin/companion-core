@@ -68,6 +68,7 @@ def cleanup_contracts():
     from companion.memory_salience import erase as erase_memory_mentions
     from companion.memory_time import erase as erase_memory_time
     from companion.memory_work import erase_memory_work
+    from companion.moments import erase as erase_moments
     from companion.mood_appraisals import erase as erase_mood_appraisals
     from companion.observation import erase_observations
     from companion.owner_authority import erase_sources as erase_owner_authority
@@ -103,6 +104,7 @@ def cleanup_contracts():
         event_cleanup("memory-references", erase_memory_references),
         event_cleanup("memory-mentions", erase_memory_mentions),
         event_cleanup("keepsakes", erase_keepsakes),
+        event_cleanup("moments", erase_moments),
         event_cleanup("mood-appraisals", erase_mood_appraisals),
         event_cleanup("goals", erase_goals),
         event_cleanup("care-plans", erase_care),

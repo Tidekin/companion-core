@@ -649,6 +649,8 @@ class Settings(BaseModel):
     proactive_interval_seconds: int = Field(default=10800, ge=60)
     proactive_idle_seconds: int = Field(default=3600, ge=0)
     proactive_daily_limit: int = Field(default=2, ge=0, le=20)
+    # Owner-only moments in the native client; Life decides, this caps a local day.
+    moments_daily_limit: int = Field(default=2, ge=0, le=10)
     quiet_start: int = Field(default=23, ge=0, le=23)
     quiet_end: int = Field(default=8, ge=0, le=23)
     lease_seconds: int = Field(default=120, ge=10, le=900)

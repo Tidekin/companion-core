@@ -8,7 +8,9 @@ from companion.contracts import StrictModel
 from companion.goal_protocol import GoalContinuationDecision, GoalProposal
 from companion_delivery_protocol.authority import validate_authority_ref
 
-LifeChannelAction = Literal["qq.private.proactive", "diary.save", "qzone.publish", "rem.save"]
+LifeChannelAction = Literal[
+    "qq.private.proactive", "diary.save", "qzone.publish", "rem.save", "moment.save",
+]
 
 
 class LifeLoopConfig(StrictModel):
@@ -44,15 +46,14 @@ class LifeShadowApproval(StrictModel):
         default="selected", exclude_if=lambda value: value == "selected",
     )
     source_event_ids: list[str] = Field(default_factory=list, max_length=64)
-    purposes: list[Literal["PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "PRIVATE_CREATION"]] = Field(
-        min_length=0,
-        max_length=3,
-    )
+    purposes: list[Literal[
+        "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "PRIVATE_CREATION", "PRIVATE_MOMENT",
+    ]] = Field(min_length=0, max_length=4)
     expires_at: AwareDatetime
     max_items: int = Field(ge=1, le=100, strict=True)
     qzone_draft_sources: list[LifeQZoneSourceGrant] = Field(default_factory=list, max_length=64)
     automatic_actions: list[LifeChannelAction] = Field(
-        default_factory=list, max_length=4, exclude_if=lambda value: not value,
+        default_factory=list, max_length=5, exclude_if=lambda value: not value,
     )
 
     @model_validator(mode="after")
@@ -80,6 +81,7 @@ class LifeShadowApproval(StrictModel):
             and "PRIVATE_MESSAGE_DRAFT" not in self.purposes
             or "diary.save" in self.automatic_actions and "PRIVATE_DIARY" not in self.purposes
             or "rem.save" in self.automatic_actions and "PRIVATE_CREATION" not in self.purposes
+            or "moment.save" in self.automatic_actions and "PRIVATE_MOMENT" not in self.purposes
             or "qzone.publish" in self.automatic_actions and not self.qzone_draft_sources):
             raise ValueError("automatic consumption requires its original draft purpose")
         return self
@@ -90,6 +92,7 @@ class LifeDecision(StrictModel):
     action: Literal["SKIP", "CONTINUE", "EXPLORE", "FOLLOW_UP", "SHARE", "DEFER"]
     destination: Literal[
         "NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT", "PRIVATE_CREATION",
+        "PRIVATE_MOMENT",
     ]
     source_event_ids: list[str] = Field(max_length=8)
     reason: str = Field(min_length=1, max_length=160)

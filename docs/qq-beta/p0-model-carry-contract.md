@@ -449,6 +449,16 @@ nonterminal work or UNKNOWN under the immediately preceding authority still bloc
 change. `tests/test_model_carry_keepsake_activation.py` covers grant, revocation,
 financial rows and a rejected combined change.
 
+## Owner-only moments grant or revocation
+
+Under a carried authority the native STOP/preview/activate path may add, in one revision,
+the `moments` purpose (appended last), the `PRIVATE_MOMENT` Life destination and its
+`moment.save` automatic action, or remove all three. Every other policy and Life field,
+including both authorization digests, stays identical. Moments are owner-only native
+records: no paid term, public channel or capability fingerprint changes. Historical
+UNKNOWN custody and the quiescence check are unchanged. `tests/test_moments_authority.py`
+covers the admitted pair and partial or combined changes.
+
 ## Closing an attempt that never started I/O
 
 A refusal after admission but before `io_started` (for example a background yield,

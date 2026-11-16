@@ -49,6 +49,15 @@ Core Journal 的字节解码沿用 Bridge 的有界前缀机制，源字节和�
 需要 `memory` 用途且 `memory_scope=owner_private`。授权挂着承接的 UNKNOWN（`unknown_carry_sha256`）时，也可以单独新增或撤回这一项，其余字段必须完全不变，见[承接合同](qq-beta/p0-model-carry-contract.md#keepsake-grant-or-revocation)。当前版本只校验和保存这项授权，尚未改变
 到期处理；行为设计见[牢记设计稿](plans/2026-11-16-memory-keepsakes.md)。
 
+## 动态授权
+
+`moments` 用途允许 Life 把写好的第一人称文字保存为只给主人看的动态（Life 去处
+`PRIVATE_MOMENT`，自动动作 `moment.save`）。需要 `life` 用途。动态可以使用私聊、日记、牢记等
+私密来源，但不会流向 QQ 空间或任何公开出口，和 `qzone_publication` 互不共用。每个自然日最多
+`moments_daily_limit` 条（默认 2），免打扰时段不发。授权挂着承接的 UNKNOWN 时，可以一次性新增
+或撤回这三项（用途、去处、自动动作），其余字段必须完全不变。设计见
+[动态设计稿](plans/2026-11-16-native-moments.md)。
+
 ## HTTP v1 文字私聊边界
 
 所有路径均位于 `/internal/v1`。授权 preview、activate/revisions、stop、status

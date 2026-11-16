@@ -13,7 +13,7 @@ Purpose = Literal[
     "chat", "history", "memory", "diary", "affect", "consolidation", "reflection", "goals",
     "wake", "exploration", "social", "expression", "proactive", "content", "image", "file",
     "meme", "poke", "voice", "account_actions", "bili_video", "life", "evaluation", "rem",
-    "qzone_publication", "profile",
+    "qzone_publication", "profile", "moments",
 ]
 CapabilityPolicy = Literal[
     "image", "file", "meme", "poke", "voice", "account_actions", "bili_video", "rem",
@@ -100,6 +100,8 @@ class OwnerGrantPolicy(StrictModel):
             raise ValueError("history purpose and source scope must agree")
         if ("memory" in self.purposes) != (self.memory_scope != "none"):
             raise ValueError("memory purpose and source scope must agree")
+        if "moments" in self.purposes and "life" not in self.purposes:
+            raise ValueError("owner-only moments are written by Life")
         if self.keepsake is not None and (
             "memory" not in self.purposes or self.memory_scope != "owner_private"
         ):

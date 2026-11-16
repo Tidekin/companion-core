@@ -36,6 +36,7 @@ MEMORY_REJECTIONS = frozenset(
         "CREDENTIAL_MEMORY_DENIED",
         "CORRECTION_NOT_APPLICABLE",
         "KEEPSAKE_NOT_FOUND",
+        "MOMENT_NOT_FOUND",
     }
 )
 
@@ -48,6 +49,10 @@ class Login(StrictModel):
 class Mode(StrictModel):
     target: Literal["diary", "life", "proactive"]
     enabled: bool = Field(strict=True)
+
+
+class MomentVisibility(StrictModel):
+    hidden: bool
 
 
 class MemoryChange(StrictModel):
@@ -496,6 +501,44 @@ def register_console_routes(app, settings):
         return await write(
             request, idempotency_key, body.model_dump(), apply, rejected_errors=MEMORY_REJECTIONS
         )
+
+    @app.get(prefix + "/moments", dependencies=auth)
+    async def moments_list(before: str | None = None, limit: int = 30):
+        from companion import moments
+
+        if not 1 <= limit <= 60:
+            raise CoreError("INVALID_PAGE", 400)
+        core = app.state.core
+        items = moments.items(core.store, before=before, limit=limit, include_hidden=True)
+        return {"items": items, "observed_at": core.clock(),
+                "next_cursor": items[-1]["created_at"] if len(items) == limit else None}
+
+    @app.post(prefix + "/moments/{moment_id}/visibility", dependencies=auth)
+    async def moment_visibility(moment_id: str, body: MomentVisibility, request: Request,
+                                idempotency_key: str = Header(default="")):
+        def apply(context, owner_check):
+            from companion import moments
+
+            with context.store.transaction(control_write=True):
+                owner_check()
+                return moments.set_hidden(context.store, moment_id, body.hidden,
+                                          context.clock())
+
+        return await write(request, idempotency_key, {"moment_id": moment_id,
+                           **body.model_dump()}, apply, rejected_errors=MEMORY_REJECTIONS)
+
+    @app.post(prefix + "/moments/{moment_id}/forget", dependencies=auth)
+    async def moment_forget(moment_id: str, request: Request,
+                            idempotency_key: str = Header(default="")):
+        def apply(context, owner_check):
+            from companion import moments
+
+            with context.store.transaction(control_write=True):
+                owner_check()
+                return moments.forget(context.store, context.ledger, moment_id, context.clock())
+
+        return await write(request, idempotency_key, {"moment_id": moment_id}, apply,
+                           rejected_errors=MEMORY_REJECTIONS)
 
     @app.post(prefix + "/memories/{memory_id}/keepsake/release", dependencies=auth)
     async def keepsake_release(memory_id: str, request: Request,

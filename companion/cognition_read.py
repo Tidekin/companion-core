@@ -426,7 +426,7 @@ class CognitionRead:
             item["decision_reason"] = decision_reason(row, self.core.settings)
             item["destination"] = symbol(
                 row["destination"],
-                {"NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT"},
+                {"NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT", "PRIVATE_MOMENT"},
             )
             item["candidate_reference"] = {
                 "topic_id": row["topic_id"],
