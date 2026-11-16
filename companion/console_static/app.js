@@ -882,7 +882,7 @@ PAGES.memories = data => {
       state.memQ ? "换个关键词试试。" : state.memTab === "conflicts" ? "新记住的内容在“新记住的”里，可以随时浏览。" : "新提取的记忆会显示在“新记住的”中，也可以在“全部”查看。"),
     state.memTab !== "jargon" && state.memTab !== "recall" && data.meta?.more ? el("p", { class: "note mt" }, "只显示最近 60 条，可以用搜索找更早的记忆。") : null);
 };
-const MOMENT_TRIGGER = { LIFE: "她自己想发的", KEEPSAKE: "牢记了一件事" };
+const MOMENT_TRIGGER = { LIFE: "她自己想发的", MEMORY: "记住了一件重要的事" };
 function momentsView(data) {
   const items = data.items || [];
   if (!items.length) return empty("她还没有发过动态", "授权里开启“动态”后，她每天最多发两条，只有你能看到。");

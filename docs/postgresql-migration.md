@@ -6,7 +6,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0016_moment_likes`。迁移链先应用既有的
+当前新建与离线导入目标为 `pg0017_moment_trigger`。迁移链先应用既有的
 `pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
 再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
@@ -35,6 +35,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 `pg0015_moments` 新增 `moments`，保存 Life 写给主人看的动态原文、来源和状态；随来源或主人遗忘
 一起清除，离线导入时为空。见[动态设计稿](plans/2026-11-16-native-moments.md)。
 `pg0016_moment_likes` 给 `moments` 增加可空 `liked_at`，记录主人点赞的时间。
+`pg0017_moment_trigger` 把动态触发来源改为 `LIFE`、`MEMORY`（来源里有她刚记下的重要的事）；此前未写过计划中的 `KEEPSAKE`。
 
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
 `pg0003_native_chat`，保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite
