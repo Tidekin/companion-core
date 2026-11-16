@@ -9,7 +9,9 @@ repair of older COMPLETE snapshots via the existing runtime_meta projection.
 Diary projection resolution runs before memory/evidence removal and may return
 readback event IDs. The handlers below retain their original order after that
 phase. Unattributed summaries/traits/Outbox still use Ledger's conservative raw-
-fact fallback on a new erasure, never on the one-time COMPLETE repair.
+fact fallback on a new erasure, never on the one-time COMPLETE repair. Raw
+retention clears only the summaries, episodes, trait evidence and replies that
+name an expired event.
 """
 
 from collections.abc import Callable
