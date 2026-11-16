@@ -99,13 +99,15 @@ def test_console_lists_hides_and_forgets_moments(client, core, tmp_path):
 def test_a_moment_about_something_important_is_tagged_the_same_day(
     core, tmp_path, importance, trigger,
 ):
-    from tests.support.confirmed_memory import remember
-
     _, _, _, source = moment_ready(core, tmp_path)
-    memory_id = remember(core, 900, "主人的生日是三月五号", confirmed=True)
+    # Only the evidence link and her rating matter here; extraction is tested elsewhere.
+    memory_id = "mem_" + "a" * 32
+    now = core.clock()
+    core.store.insert("memories", memory_id=memory_id, subject="user", kind="fact",
+                      content="主人的生日是三月五号", status="CONFIRMED", origin="user_confirmed",
+                      confidence=1.0, importance=importance, privacy_scope="private",
+                      created_at=now, updated_at=now, fact_key="birthday", needs_review=0)
     core.store.execute("INSERT INTO memory_evidence VALUES (%s, %s, 1, %s)",
-                       (memory_id, source, core.clock()))
-    core.store.execute("UPDATE memories SET importance=%s WHERE memory_id=%s",
-                       (importance, memory_id))
+                       (memory_id, source, now))
     assert core.life_topics.consume_due(diary=core.diary)
     assert core.store.one("SELECT trigger FROM moments")["trigger"] == trigger
