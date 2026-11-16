@@ -43,11 +43,18 @@ def test_appraisals_respect_shared_candidate_limit(core, monkeypatch):
     assert not any(view["undertone"].values())
 
 
-def test_appraisals_decay_with_half_life(core):
+def test_appraisals_decay_with_their_reason_half_life(core):
     appraise(core, 1, "开玩笑", "OWNER_PLAYFUL")
     assert core.mood.snapshot()["immediate"]["pleasure"] == pytest.approx(.03)
-    core.clock.advance(3 * 3600)
+    core.clock.advance(90 * 60)
     assert core.mood.snapshot()["immediate"]["pleasure"] == pytest.approx(.015)
+    appraise(core, 2, "想你了")
+    core.clock.advance(6 * 3600)
+    view = core.mood.snapshot()
+    # Affection halves over six hours; the earlier joke is nearly gone by then.
+    assert view["immediate"]["pleasure"] == pytest.approx(
+        .05 * (1 - .015 / .35) / 2 + .015 / 16, rel=1e-3)
+    assert view["reason_half_life_seconds"]["OWNER_AFFECTION"] == 6 * 3600
 
 
 @pytest.mark.parametrize("damage", ["erase", "quote", "usage", "scenario"])

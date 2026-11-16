@@ -2797,7 +2797,8 @@ const MOOD_REASONS = { HELPFUL_FEEDBACK: "明确的正向互动反馈", THANKS_F
   VERIFIED_GOAL_COMPLETION: "有执行证据的目标完成", REVIEWED_GOAL_COMPLETION: "完成目标与阅读评价",
   OWNER_AFFECTION: "主人表达亲近或在乎（模型判断）", OWNER_HURT_BY_REPLY: "主人被刚才的回复伤到（模型判断）",
   OWNER_DISTRESS: "主人难过或压力大（模型判断）", OWNER_EXPECTATION: "主人表达期待或想念（模型判断）",
-  OWNER_PLAYFUL: "主人在逗你玩（模型判断）" };
+  OWNER_PLAYFUL: "主人在逗你玩（模型判断）", OWNER_PRESSED_AFTER_REFUSAL: "拒绝后主人仍坚持（模型判断）",
+  COMMITMENT_MISSED: "答应的事没按时做到" };
 const padText = value => ["pleasure", "arousal", "dominance"].map(k => Number(value?.[k] || 0).toFixed(3)).join(" / ");
 function moodSheet(m) {
   if (!m || m.error) return sheet("伙伴的心情", failNote("心情", m?.error));

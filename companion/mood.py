@@ -17,11 +17,23 @@ from companion.memory_projections import MemoryProjections
 from companion.paid_budget import sha
 from companion.store import after, encode, uid
 
-VERSION = "mood-2"
+VERSION = "mood-3"
 RESET_KEY = "mood_reset_at"
 PAUSE_KEY = "mood_paused"
 DIMENSIONS = ("pleasure", "arousal", "dominance")
 HALF_LIVES = {"immediate": 3 * 3600, "undertone": 3 * 86400}
+# Immediate half-life by reason; others use HALF_LIVES["immediate"]. Light play fades fast;
+# warmth, worry and feeling wronged or at fault linger. Undertone keeps one slow rate.
+REASON_HALF_LIVES = {
+    "OWNER_PLAYFUL": 90 * 60,
+    "OWNER_AFFECTION": 6 * 3600,
+    "OWNER_DISTRESS": 6 * 3600,
+    "OWNER_HURT_BY_REPLY": 8 * 3600,
+    "OWNER_PRESSED_AFTER_REFUSAL": 8 * 3600,
+    "COMMITMENT_MISSED": 12 * 3600,
+}
+# A commitment that ran past its deadline: a little at fault and wanting to make it up.
+COMMITMENT_MISSED = (-0.03, 0.02, -0.02)
 WINDOW = 14 * 86400
 LIMIT = 256
 INTERACTION_REPLY_WINDOW = 3600
@@ -183,31 +195,56 @@ def vector(values):
     return dict(zip(DIMENSIONS, (round(x, 6) for x in values), strict=True))
 
 
+def half_life(reason):
+    return REASON_HALF_LIVES.get(reason, HALF_LIVES["immediate"])
+
+
+def weights(signals):
+    """Repetition dulls a reason instead of a daily quota: each earlier signal of the same
+    reason within that reason's half-life halves the next one. Ordered input, pure."""
+    recent, result = {}, []
+    for item in signals:
+        reason, time = item.get("reason"), datetime.fromisoformat(item["at"])
+        window = half_life(reason)
+        times = [t for t in recent.get(reason, []) if (time - t).total_seconds() < window]
+        result.append(0.5 ** len(times))
+        recent[reason] = times + [time]
+    return result
+
+
 def fold(signals, at):
-    """Bounded impulses with time-based exponential relaxation; replay is deterministic."""
-    values = {name: [0.0, 0.0, 0.0] for name in HALF_LIVES}
+    """Bounded impulses with time-based exponential relaxation; replay is deterministic.
+
+    Each immediate impulse relaxes at its own reason's half-life; saturation uses their sum.
+    """
+    parts, undertone = [], [0.0, 0.0, 0.0]
     previous = at
     seen = set()
-    for item in signals:
+
+    def relax(seconds):
+        nonlocal undertone
+        for part in parts:
+            part[0] = [x * 2 ** (-seconds / part[1]) for x in part[0]]
+        undertone = [x * 2 ** (-seconds / HALF_LIVES["undertone"]) for x in undertone]
+
+    def immediate():
+        return [sum(part[0][i] for part in parts) for i in range(3)]
+
+    for item, weight in zip(signals, weights(signals), strict=True):
         time = item["at"]
         if seen:
-            seconds = (
-                datetime.fromisoformat(time) - datetime.fromisoformat(previous)
-            ).total_seconds()
-            for layer, half in HALF_LIVES.items():
-                values[layer] = [x * 2 ** (-seconds / half) for x in values[layer]]
+            relax((datetime.fromisoformat(time) - datetime.fromisoformat(previous)).total_seconds())
         seen.add(item["independent_id"])
-        for i, delta in enumerate(item["delta"]):
+        current, applied = immediate(), []
+        for i, delta in enumerate(x * weight for x in item["delta"]):
             # One event never changes a dimension by more than .08; saturation is smooth.
-            values["immediate"][i] += delta * (1 - abs(values["immediate"][i]) / 0.35)
+            applied.append(delta * (1 - abs(current[i]) / 0.35))
             if len(seen) >= 3:
-                values["undertone"][i] += delta * 0.12 * (1 - abs(values["undertone"][i]) / 0.15)
+                undertone[i] += delta * 0.12 * (1 - abs(undertone[i]) / 0.15)
+        parts.append([applied, half_life(item.get("reason"))])
         previous = time
-    seconds = max(
-        0.0, (datetime.fromisoformat(at) - datetime.fromisoformat(previous)).total_seconds()
-    )
-    for layer, half in HALF_LIVES.items():
-        values[layer] = [x * 2 ** (-seconds / half) for x in values[layer]]
+    relax(max(0.0, (datetime.fromisoformat(at) - datetime.fromisoformat(previous)).total_seconds()))
+    values = {"immediate": immediate(), "undertone": undertone}
     return {
         **{name: vector(value) for name, value in values.items()},
         "expression": vector([values["immediate"][i] + values["undertone"][i] for i in range(3)]),
@@ -378,11 +415,18 @@ class MoodService:
                     "g.updated_at,'goal' FROM goals g WHERE g.state='DONE' "
                     'AND g.redacted=0 AND g.result_event_id IS NOT NULL AND '
                     'g.updated_at>%s AND g.updated_at<=%s' + scoped("g.result_event_id")
+                    # Only a deadline that actually passed, at the deadline itself.
+                    + ' UNION ALL SELECT c.accepted_event_id,'
+                    "c.deadline,'commitment' FROM commitments c JOIN goals g USING(goal_id) "
+                    "WHERE c.feedback_outcome='EXPLAINED_FAILURE' AND "
+                    "c.failure_code='DEADLINE_EXCEEDED' AND c.state<>'ERASED' AND "
+                    'g.redacted=0 AND c.deadline>%s AND c.deadline<=%s'
+                    + scoped("c.accepted_event_id")
                     + ' ORDER BY at DESC,event_id,kind LIMIT %s'
                 )
             ),
             (cutoff, at, cutoff, at, encode(list(CHAT_SIGNALS)), *ids, cutoff, at, *ids,
-             cutoff, at, *ids, LIMIT + 1),
+             cutoff, at, *ids, cutoff, at, *ids, LIMIT + 1),
         )
         signals, used = [], set()
         for candidate in candidates[:LIMIT]:
@@ -392,7 +436,11 @@ class MoodService:
                 continue
             event = next(row for row in lineage if row["event_id"] == key)
             # Reset and lookback follow the original event too: a delayed review cannot revive it.
-            if (
+            # A missed commitment happens at its deadline, after the owner's earlier request.
+            if kind == "commitment":
+                if not cutoff < stamp(candidate["at"]) <= at:
+                    continue
+            elif (
                 not cutoff < stamp(event["ingested_at"]) <= at
                 or not cutoff < stamp(event["occurred_at"]) <= at
             ):
@@ -505,6 +553,21 @@ class MoodService:
                 lineage += prior
                 identity = "reply:" + reply["message_id"]
                 detail, reason, delta = sha(reply), rule[0], rule[1]
+            elif kind == "commitment":
+                if not permitted("goals") or event["actor_id"] != "owner":
+                    continue
+                missed = s.one(
+                    "SELECT c.commitment_id, c.goal_id, c.deadline, c.failure_code FROM "
+                    "commitments c JOIN goals g USING(goal_id) WHERE c.accepted_event_id = %s "
+                    "AND c.deadline = %s AND c.feedback_outcome = 'EXPLAINED_FAILURE' AND "
+                    "c.failure_code = 'DEADLINE_EXCEEDED' AND c.state <> 'ERASED' AND "
+                    "g.redacted = 0 ORDER BY c.commitment_id LIMIT 1",
+                    (key, candidate["at"]),
+                )
+                if not missed:
+                    continue
+                identity, detail = "commitment:" + missed["commitment_id"], missed
+                reason, delta = "COMMITMENT_MISSED", COMMITMENT_MISSED
             elif kind == "watch":
                 if not permitted("exploration"):
                     continue
@@ -643,14 +706,19 @@ class MoodService:
             if (category, identity) not in used:
                 signals.append(signal)
                 used.add((category, identity))
+        # A missed commitment is keyed by the owner's earlier request; what the owner felt
+        # in that message is a separate experience and still counts.
         signals += self._appraisals(
-            at, allowed, cutoff, sources, {x["event_id"] for x in signals}, source_check,
+            at, allowed, cutoff, sources,
+            {x["event_id"] for x in signals if x["kind"] != "commitment"}, source_check,
             memo, only,
         )
         # The same observation's review and verified goal result form one bounded impulse.
         merged = {}
         for item in signals:
             key = item["event_id"]
+            if item["kind"] in {"commitment", "appraisal"}:
+                key = (key, item["kind"])
             if key in merged:
                 prior = merged[key]
                 prior["delta"] = [
@@ -743,7 +811,7 @@ class MoodService:
                     "fingerprint": sha([lineage, row]),
                 }
             )
-        return mood_appraisals.capped(signals, self.settings.timezone)
+        return signals
 
     def snapshot(self, *, at=None, allowed=None, only=None):
         at = stamp(at or self.clock())
@@ -769,10 +837,14 @@ class MoodService:
             "active": active,
             "reset_at": reset_at(self.store),
             **state,
-            "signals": signals,
+            "signals": [
+                {**item, "weight": weight}
+                for item, weight in zip(signals, weights(signals), strict=True)
+            ],
             "truncated": truncated,
             "confidence": "limited" if signals else "unknown",
             "half_life_seconds": HALF_LIVES,
+            "reason_half_life_seconds": REASON_HALF_LIVES,
             "source_event_ids": sorted(
                 {key for item in signals for key in item["source_event_ids"]}
             ),
