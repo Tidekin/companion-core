@@ -328,6 +328,9 @@ policy fields, existing purposes in order, capability fingerprints, source grant
 paid/window identity, limits, carry digest and expiry remain byte-equivalent.
 The existing evaluation-only addition remains supported by the same finite policy
 revision validator; no general capability-extension rule or new journal kind is added.
+Appending only `profile` (with a new `authorization_sha256`) is admitted the same way:
+it lets her change her own display name and avatar and carries no paid call, quota or
+capability fingerprint.
 
 Historical authority-chain validation recognizes this same explicit REM transition,
 so later STOP/activation and paid approval renewals can retain the granted purpose.
