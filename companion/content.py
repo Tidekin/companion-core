@@ -188,10 +188,9 @@ def owner_source(store, settings, clock, options, event_id, upload=False):
     ) not in {("qq.onebot", "owner", "private", "owner"),
               ("native.chat", "owner", "private", "owner")}:
         raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
+    # A native message's text and image projection are both covered by its signed input
+    # digest, so links in it have the same owner provenance as a QQ owner message.
     body = json.loads(event["body_json"])
-    # A native message enters content intake only through its signed image projection.
-    if event["source"] == "native.chat" and not body.get("rich"):
-        raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
     if owner_authority.required(store, settings):
         view = owner_authority.current(store, settings, clock, purpose="content")
         owner_input.source(store, settings, view, event_id, clock())

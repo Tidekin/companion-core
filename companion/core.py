@@ -334,19 +334,9 @@ class Core(Runtime):
         if (self.settings.voice.enabled and row["kind"] == "chat"
             and self.voice.input_status(row["event_id"], row["job_id"]).state == "WAITING"):
             return None
-        from companion.transport import native_text
-
-        if (self.settings.content_enabled and row["kind"] == "chat" and row.get("authority_json")
-                and native_text(s, row["event_id"]) and body.get("rich")):
-            from companion import agent_images
-
-            # A native message's images are staged right after it is admitted.
-            if agent_images.waiting(self, row):
-                return None
         if (
             self.settings.content_enabled
             and row["kind"] == "chat"
-            and not native_text(s, row["event_id"])
             and not body.get("diary_command")
             and not body.get("control_command")
         ):
@@ -686,7 +676,6 @@ class Core(Runtime):
         return prompt_rules, affect, style, conversation_decision
 
     def _reply_input(self, turn, rules, notice_messages):
-        from companion.transport import native_text
 
         job, cfg, body, text = turn.job, turn.settings, turn.body, turn.text
         current = {"role": "user", "content": text or (
@@ -705,7 +694,6 @@ class Core(Runtime):
         if (
             cfg.content_enabled and turn.permits("content")
             and job["kind"] == "chat"
-            and not native_text(self.store, job["event_id"])
             and not body.get("diary_command")
             and not body.get("control_command")
         ):
