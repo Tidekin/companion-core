@@ -170,6 +170,18 @@ def test_restore_refuses_existing_native_database_and_bad_key(tmp_path):
                 )
 
 
+def test_restore_refuses_missing_native_feed_schema(core, tmp_path, empty_database):
+    core.store.execute("ALTER TABLE moment_images RENAME TO unavailable_moment_images")
+    archive = tmp_path / "incomplete.enc"
+    key = Fernet.generate_key()
+    backup(core.settings.database, archive, key)
+    with pytest.raises(CoreError, match="BACKUP_INTEGRITY_FAILED"):
+        restore(archive, empty_database, key, core.settings.erasure_ledger,
+                state_directory=tmp_path / "restore")
+    with psycopg.connect(empty_database.get_secret_value()) as observer:
+        assert observer.execute("SELECT to_regclass('events')").fetchone() == (None,)
+
+
 def test_restore_keeps_target_private_until_fenced_and_retries_atomically(
     core, tmp_path, empty_database, monkeypatch,
 ):
