@@ -29,3 +29,16 @@ def test_appending_only_profile_with_a_new_approval_is_admitted():
 def test_profile_cannot_carry_any_other_change(changes):
     with pytest.raises(ValueError):
         purpose_revision(policy(), policy(**changes))
+
+
+def test_a_grant_may_hold_every_purpose_once():
+    from typing import get_args
+
+    from companion.owner_authority_protocol import Purpose
+
+    every = list(get_args(Purpose))
+    assert len(every) > 25
+    allowed = OwnerGrantPolicy.model_fields["purposes"]
+    assert any(getattr(item, "max_length", None) == len(every) for item in allowed.metadata)
+    with pytest.raises(ValueError):
+        policy(purposes=["chat", "chat"])
