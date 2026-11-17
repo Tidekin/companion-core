@@ -8,11 +8,12 @@ erasing any of its sources erases it.
 
 import json
 from contextlib import nullcontext
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from companion import owner_authority
 from companion.contracts import CoreError
+from companion.diary import day_bounds
 from companion.paid_budget import sha
 from companion.privacy import advance_epoch, redact, sensitive
 from companion.store import encode, uid
@@ -32,8 +33,7 @@ REPLY_RULES = {
 def _day_bounds(settings, now):
     zone = ZoneInfo(settings.timezone)
     local = datetime.fromisoformat(now).astimezone(zone)
-    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start.isoformat(), (start + timedelta(days=1)).isoformat()
+    return day_bounds(local.date(), settings.timezone)
 
 
 def save(store, settings, clock, data, body):
