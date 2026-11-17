@@ -90,10 +90,11 @@ class LifeShadowApproval(StrictModel):
 class LifeDecision(StrictModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     action: Literal["SKIP", "CONTINUE", "EXPLORE", "FOLLOW_UP", "SHARE", "DEFER"]
+    # A decision not to express anything often omits it; expression still names one below.
     destination: Literal[
         "NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT", "PRIVATE_CREATION",
         "PRIVATE_MOMENT",
-    ]
+    ] = "NONE"
     source_event_ids: list[str] = Field(max_length=8)
     reason: str = Field(min_length=1, max_length=160)
     text: str = Field(default="", max_length=500)
