@@ -1,6 +1,6 @@
 """Bounded owner-policy data, distinct from a native execution lease or paid policy."""
 
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_validator
 
@@ -64,7 +64,8 @@ class OwnerGrantPolicy(StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     owner_qq_id: str = Field(pattern=r"^[1-9][0-9]{4,19}$")
     audience: Literal["owner_only"] = "owner_only"
-    purposes: list[Purpose] = Field(min_length=1, max_length=25)
+    # Every purpose at most once (duplicates are refused below).
+    purposes: list[Purpose] = Field(min_length=1, max_length=len(get_args(Purpose)))
     authorization_sha256: str = Field(pattern=SHA)
     paid_contract_sha256: str = Field(pattern=SHA)
     unknown_carry_sha256: str | None = Field(
