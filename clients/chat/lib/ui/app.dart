@@ -13,6 +13,7 @@ import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
 import 'attachments.dart';
+import 'stickers.dart';
 import 'quote.dart';
 import 'typing.dart';
 
@@ -749,6 +750,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   final turnKeys = <String, GlobalKey>{};
   // Images picked for the next message, in order.
   final attachments = <OutgoingImage>[];
+  bool stickersOpen = false;
   Timer? draftTimer;
   String lastDraft = '';
   bool sending = false;
@@ -817,6 +819,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(error.message)));
       }
+    }
+  }
+
+  /// A favorite goes out alone, like tapping a sticker in QQ; the draft stays.
+  Future<void> sendSticker(OutgoingImage sticker) async {
+    if (sending) return;
+    setState(() => sending = true);
+    try {
+      await session.send('', images: [sticker]);
+    } finally {
+      if (mounted) setState(() => sending = false);
     }
   }
 
@@ -1265,36 +1278,18 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     onRemove: (index) =>
                         setState(() => attachments.removeAt(index)),
                   ),
-                Container(
-                  padding: const EdgeInsets.fromLTRB(4, 4, 5, 4),
-                  decoration: BoxDecoration(
-                    color: Warm.composer,
-                    borderRadius: BorderRadius.circular(28),
-                    border: Border.all(color: Warm.bubbleBorder),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0x0B80664D),
-                        blurRadius: 8,
-                        offset: Offset(0, 3),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      IconButton(
-                        key: ValueKey('attach_${widget.bot.id}'),
-                        tooltip: '添加图片',
-                        color: Warm.textSoft,
-                        onPressed:
-                            !state.ready ||
-                                sending ||
-                                attachments.length >= maxImagesPerMessage
-                            ? null
-                            : attach,
-                        icon: const Icon(Icons.image_outlined),
-                      ),
-                      Expanded(
+                // QQ layout: the input and 发送 on one row, the tool icons below.
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        decoration: BoxDecoration(
+                          color: Warm.composer,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Warm.bubbleBorder),
+                        ),
                         child: CallbackShortcuts(
                           bindings: {
                             const SingleActivator(
@@ -1304,6 +1299,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                           },
                           child: TextField(
                             key: ValueKey('compose_${widget.bot.id}'),
+                            onTap: () {
+                              if (stickersOpen) {
+                                setState(() => stickersOpen = false);
+                              }
+                            },
                             controller: input,
                             minLines: 1,
                             maxLines: 5,
@@ -1336,14 +1336,58 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      _SendButton(
-                        key: ValueKey('send_${widget.bot.id}'),
-                        onPressed: !state.ready || sending ? null : send,
+                    ),
+                    const SizedBox(width: 8),
+                    _SendButton(
+                      key: ValueKey('send_${widget.bot.id}'),
+                      onPressed: !state.ready || sending ? null : send,
+                    ),
+                  ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      IconButton(
+                        key: ValueKey('attach_${widget.bot.id}'),
+                        tooltip: '添加图片',
+                        color: Warm.textSoft,
+                        iconSize: 28,
+                        onPressed:
+                            !state.ready ||
+                                sending ||
+                                attachments.length >= maxImagesPerMessage
+                            ? null
+                            : attach,
+                        icon: const Icon(Icons.image_outlined),
+                      ),
+                      IconButton(
+                        key: ValueKey('stickers_${widget.bot.id}'),
+                        tooltip: stickersOpen ? '收起表情' : '表情',
+                        color: stickersOpen ? Warm.accent : Warm.textSoft,
+                        iconSize: 28,
+                        onPressed: () {
+                          // Like QQ: the panel takes the keyboard's place.
+                          if (!stickersOpen) FocusScope.of(context).unfocus();
+                          setState(() => stickersOpen = !stickersOpen);
+                        },
+                        icon: const Icon(
+                          Icons.sentiment_satisfied_alt_outlined,
+                        ),
                       ),
                     ],
                   ),
                 ),
+                if (stickersOpen)
+                  StickerPanel(
+                    onEmoji: (emoji) {
+                      insertAtCaret(input, emoji);
+                      lastDraft = input.text;
+                      unawaited(session.setDraft(input.text));
+                    },
+                    onSticker: state.ready && !sending ? sendSticker : null,
+                  ),
                 if (!compact)
                   const Padding(
                     padding: EdgeInsets.fromLTRB(18, 6, 0, 0),
@@ -1408,16 +1452,20 @@ class _SendButton extends StatelessWidget {
           opacity: onPressed == null ? 0.5 : 1,
           duration: Motion.press,
           child: Container(
-            width: 43,
-            height: 43,
-            decoration: const BoxDecoration(
+            height: 44,
+            padding: const EdgeInsets.symmetric(horizontal: 18),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
               color: Warm.accent,
-              shape: BoxShape.circle,
+              borderRadius: BorderRadius.circular(14),
             ),
-            child: const Icon(
-              Icons.arrow_upward_rounded,
-              color: Colors.white,
-              size: 22,
+            child: const Text(
+              '发送',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ),
