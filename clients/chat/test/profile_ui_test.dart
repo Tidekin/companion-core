@@ -65,6 +65,27 @@ void main() {
     expect(find.text('Core 尚未开启伙伴自行更新资料。'), findsNothing);
   });
 
+  testWidgets(
+    'closing the alias dialog keeps its field alive through the animation',
+    (tester) async {
+      await tester.pumpWidget(
+        host(ProfilePanel(bot: bot), profile(alias: '鱼鱼')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('profile_alias_row')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const ValueKey('profile_alias')), '小鱼');
+      await tester.tap(find.text('取消'));
+      // Each frame of the closing animation rebuilds the field.
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('profile_alias')), findsNothing);
+    },
+  );
+
   testWidgets('without the Core capability the switch is not offered', (
     tester,
   ) async {
