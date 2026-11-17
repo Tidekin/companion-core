@@ -225,8 +225,8 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
             )
             if authority:
                 owner_authority.bind_job(s, cfg, clock, job_id, purpose="chat")
-            # Native content intake covers only the images its signed projection names.
-            if ((not native or body.get("rich")) and not diary_command and not control_command
+            # Links in the text and native images enter the same owner content intake.
+            if (not diary_command and not control_command
                 and not body["text"].lstrip().startswith("/")):
                 if not authority or "content" in authority.policy.purposes:
                     content.schedule(event.event_id)

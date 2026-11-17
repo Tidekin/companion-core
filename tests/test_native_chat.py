@@ -75,15 +75,8 @@ def test_native_http_independent_worker_publishes_and_recovers_history(
     body = packet(core, key, authority)
     first = client.post('/v1/console/chat/messages', json=body, headers=headers)
     assert first.status_code == 202, first.text
+    # Plain text without a link schedules no content work.
     assert not core.store.rows('SELECT 1 FROM content_items')
-    if content_enabled:
-        from companion import content
-        from companion.contracts import CoreError
-
-        # The text-only native MVP must not widen the QQ media provenance boundary.
-        with pytest.raises(CoreError, match='CONTENT_OWNER_SOURCE_REQUIRED'):
-            content.owner_source(core.store, core.settings, core.clock, core.settings.content,
-                                 first.json()['event_id'])
     job_id, wire = run(sdk_step(core, tmp_path, first.json()['event_id'], 1))
     assert any(body['text'] in str(item) for item in wire['messages'])
     status = client.get('/v1/console/chat/messages/' + first.json()['event_id'])
@@ -103,6 +96,28 @@ def test_native_http_independent_worker_publishes_and_recovers_history(
     assert same == authority
     assert client.get('/v1/console/chat/messages').json()['items'] == [turn]
     assert len(core.store.rows('SELECT 1 FROM model_usage')) == 1
+
+
+def test_a_link_in_native_text_enters_owner_content_intake(client, core, tmp_path):
+    """A shared Bilibili link in the app is read like the same link sent over QQ."""
+    from tests.support.owner_authority_setup import prepare
+
+    core.settings.memory_enabled = False
+    core.settings.content_enabled = True
+    key = Ed25519PrivateKey.generate()
+    policy = prepare(core, tmp_path)
+    device_id, identity = device_identity(key.public_key().public_bytes_raw().hex())
+    activate(core, OwnerGrantPolicy.model_validate({**policy.model_dump(),
+        'purposes': ['chat', 'content'], 'capture': None,
+        'native_devices': {device_id: identity}}))
+    headers, authority = enroll(client, key)
+    text = '【养不到这样的绝世好鲸鲸就不死了-哔哩哔哩】 https://b23.tv/WGe7ORE'
+    first = client.post('/v1/console/chat/messages', json=packet(core, key, authority, text),
+                        headers=headers)
+    assert first.status_code == 202, first.text
+    [item] = core.store.rows('SELECT kind, target_url FROM content_items WHERE owner_event_id=%s',
+                             (first.json()['event_id'],))
+    assert item == {'kind': 'link', 'target_url': 'https://b23.tv/WGe7ORE'}
 
 
 def test_revoked_device_cannot_regrant_using_old_login(client, core, tmp_path):
