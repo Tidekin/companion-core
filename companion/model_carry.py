@@ -908,7 +908,11 @@ def _moments_revision(before, after):
 
 
 def purpose_revision(old, new):
-    """A scoped device, private-purpose, keepsake or existing capability permission revision."""
+    """A scoped device, private-purpose, keepsake or existing capability permission revision.
+
+    Appendable private purposes: `evaluation`, `rem` (with its exact policy) and `profile`,
+    which only lets her change her own display name and avatar (no paid call or quota).
+    """
     if old == new:
         return
     before, after = old.model_dump(mode="json"), new.model_dump(mode="json")
@@ -945,7 +949,7 @@ def purpose_revision(old, new):
             return
     if (len(new.purposes) != len(old.purposes) + 1
         or new.purposes[:-1] != old.purposes
-        or new.purposes[-1] not in {"evaluation", "rem"}
+        or new.purposes[-1] not in {"evaluation", "rem", "profile"}
         or old.authorization_sha256 == new.authorization_sha256):
         raise ValueError("explicit private purpose addition required")
     expected = {**before, "purposes": new.purposes,
