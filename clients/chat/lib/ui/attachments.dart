@@ -4,6 +4,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../chat/models.dart';
+import 'stickers.dart';
 import 'theme.dart';
 
 class AttachPickError implements Exception {
@@ -181,6 +182,7 @@ class MessageImages extends StatelessWidget {
         label: '图片 ${index + 1}',
         button: true,
         child: GestureDetector(
+          onLongPress: () => offerFavorite(context, bytes),
           onTap: () => showDialog<void>(
             context: context,
             builder: (context) => Dialog(

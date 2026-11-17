@@ -13,6 +13,7 @@ import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
 import 'attachments.dart';
+import 'stickers.dart';
 import 'quote.dart';
 import 'typing.dart';
 
@@ -749,6 +750,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   final turnKeys = <String, GlobalKey>{};
   // Images picked for the next message, in order.
   final attachments = <OutgoingImage>[];
+  bool stickersOpen = false;
   Timer? draftTimer;
   String lastDraft = '';
   bool sending = false;
@@ -817,6 +819,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(error.message)));
       }
+    }
+  }
+
+  /// A favorite goes out alone, like tapping a sticker in QQ; the draft stays.
+  Future<void> sendSticker(OutgoingImage sticker) async {
+    if (sending) return;
+    setState(() => sending = true);
+    try {
+      await session.send('', images: [sticker]);
+    } finally {
+      if (mounted) setState(() => sending = false);
     }
   }
 
@@ -1294,6 +1307,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                             : attach,
                         icon: const Icon(Icons.image_outlined),
                       ),
+                      IconButton(
+                        key: ValueKey('stickers_${widget.bot.id}'),
+                        tooltip: stickersOpen ? '收起表情' : '表情',
+                        color: stickersOpen ? Warm.accent : Warm.textSoft,
+                        onPressed: () =>
+                            setState(() => stickersOpen = !stickersOpen),
+                        icon: const Icon(Icons.emoji_emotions_outlined),
+                      ),
                       Expanded(
                         child: CallbackShortcuts(
                           bindings: {
@@ -1344,6 +1365,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     ],
                   ),
                 ),
+                if (stickersOpen)
+                  StickerPanel(
+                    onEmoji: (emoji) {
+                      insertAtCaret(input, emoji);
+                      lastDraft = input.text;
+                      unawaited(session.setDraft(input.text));
+                    },
+                    onSticker: state.ready && !sending ? sendSticker : null,
+                  ),
                 if (!compact)
                   const Padding(
                     padding: EdgeInsets.fromLTRB(18, 6, 0, 0),

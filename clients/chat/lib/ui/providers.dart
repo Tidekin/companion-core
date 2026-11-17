@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../chat/core_backend.dart';
 import '../chat/models.dart';
 import '../chat/session.dart';
+import '../chat/stickers.dart';
 import '../persistence/repository.dart';
 import '../persistence/vault.dart';
 
@@ -100,3 +101,11 @@ final avatarImageProvider =
         return null;
       }
     });
+
+/// The owner's favorite images on this device.
+final stickerStoreProvider = Provider<StickerStore>(
+  (ref) => FileStickerStore(),
+);
+final stickersProvider = FutureProvider<List<Sticker>>(
+  (ref) => ref.watch(stickerStoreProvider).list(),
+);
