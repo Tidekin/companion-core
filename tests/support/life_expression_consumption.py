@@ -29,7 +29,8 @@ def close_provider_clients(core):
 
 
 def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purposes=None,
-             execute=True, automatic_actions=(), social_options=None, life_purposes=None):
+             execute=True, automatic_actions=(), social_options=None, life_purposes=None,
+             decision_extra=None):
     configure(core)
     payload = envelope("bilibili")
     url = payload["observations"][0]["url"]
@@ -83,6 +84,7 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
         "action": "SHARE", "destination": destination, "source_event_ids": [source_id],
         "reason": "公开阅读后的一个想法" if not private else "私人想法",
         "text": "这段关于恒星颜色的介绍让我想再弄懂光谱与温度的关系。",
+        **(decision_extra or {}),
     })
     core.clock.advance(86400 if private else core.settings.proactive_idle_seconds + 1)
     if not execute:

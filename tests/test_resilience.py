@@ -185,6 +185,6 @@ def test_native_migrations_require_restore_for_downgrade(empty_database):
         migrate(empty_database)
         with psycopg.connect(empty_database.get_secret_value()) as db:
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0017_moment_trigger",)
+                "pg0018_moment_images",)
     finally:
         engine.dispose()

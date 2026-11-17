@@ -153,7 +153,7 @@ const CAP_FIELDS = {
   consolidation: ["consolidation_enabled", "consolidation_local_hour", "consolidation_catchup_days"],
   reflection: ["reflection_enabled", "reflection_daily_max_suggestions", "reflection_min_sources", "reflection_max_daily_calls", "reflection_max_output_tokens", ],
   goals: ["goals_enabled", "goals_max_active", "goal_max_attempts"], affect: ["affect_enabled", "affect_decay_minutes", "affect_max_evidence"],
-  proactive: ["proactive_enabled", "proactive_interval_seconds", "proactive_idle_seconds", "proactive_daily_limit", "moments_daily_limit", "quiet_start", "quiet_end"],
+  proactive: ["proactive_enabled", "proactive_interval_seconds", "proactive_idle_seconds", "proactive_daily_limit", "moments_daily_limit", "moments_image_daily_limit", "quiet_start", "quiet_end"],
   wake: ["wake_enabled", "wake_min_interval_minutes", "wake_max_daily_runs", ],
   exploration: ["exploration_enabled", "exploration_daily_candidate_limit", "exploration_daily_deep_reads", "exploration_daily_requests", "exploration_monthly_requests", "exploration_max_response_bytes", "exploration_daily_bytes"],
   social: ["social_enabled", "social_semantic_threshold"], "qq.poke": ["poke_policy"], "qq.poke.native": ["poke_policy"],

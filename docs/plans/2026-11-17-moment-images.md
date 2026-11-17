@@ -23,27 +23,30 @@
 
 `LifeDecision` 增加可选字段 `image_prompt`（最多 300 字，只在去处为 `PRIVATE_MOMENT` 时允许）：
 她认为这条动态配一张图更好时，写一句画面描述。规则：只描述她自己想画的画面，不写主人的照片、
-真实人物或敏感内容；拿不准就不配图。这是同一次 Life 调用的输出，不额外调用模型。
+真实人物或敏感内容；拿不准就不配图。这是同一次 Life 调用的输出，不额外调用模型。只有当时允许配图
+（见下文条件）时，Life 请求里才带 `moment_images: true` 和这条规则；否则她不知道有这个选项。
 
 ### 2. 保存动态后，单独排一个生图任务
 
 - `moments.save` 照常保存文字。决定里有 `image_prompt`、生图已开启、当天动态配图未满
   `moments_image_daily_limit`（默认 2）时，新建一个 `moment_image` 任务，绑定这条动态。
-- 任务由内容 worker 执行，复用 `image_generation` 的适配器、价格预留和结算：先预留、再调用，
+- 任务由 Life worker 的 `moment_image` 通道执行，复用 `image_generation` 的适配器、价格预留和结算：先预留、再调用，
   失败按原规则处理；结果不明（UNKNOWN）保留预留、不重试，这条动态就保持无图。
-- 生图的每日总上限（`image_generation.max_daily_images`）和冷却继续生效，动态配图也计入。
+- 生图的每日总上限（`image_generation.max_daily_images`）对两边都生效，动态配图也计入；按会话计的
+  冷却只用于私聊。
+- 排队超过 1 小时还没能发出请求（例如没有可用的服务商）的配图直接放弃，不预留费用，动态保持无图。
 
 ### 3. 图片随动态保存
 
 - 新表 `moment_images`：`moment_id`、`slot`、`sha256`、`mime_type`、`bytes`、`created_at`；
-  图片字节存在状态目录 `moment-images/`，按散列命名。
+  图片字节存在状态目录 `moment-images/`，按动态和序号命名，读取时核对散列和长度。
 - 遗忘或删除动态时，图片一起删除；来源被遗忘导致动态清除时同样删除；遗忘日志重放时一致。
 - 客户端通过 `GET /v1/console/chat/moments/{id}/images/{slot}` 读取，只在动态仍为 PUBLISHED 时返回。
 
 ### 4. 主人看到的
 
 - 动态卡片上显示配图；图片还在生成时先只显示文字，生成好后通过事件流刷新。
-- 控制台“她的动态”显示是否有配图、生图费用记在原有费用页。
+- 生图费用记在原有费用页（场景 `moment_image`）。控制台“她的动态”暂不显示配图。
 
 ## 配置
 
@@ -53,9 +56,10 @@
 | `image_generation.endpoint` | 空 | 主人在控制台填写服务商地址、模型和密钥 |
 | `moments_image_daily_limit` | 2 | 每天最多几张动态配图 |
 
-授权：生图已有的 `image` 能力指纹（`capability_policies.image`）继续作为开关依据；动态配图需要
-`moments` 和 `image` 两个用途。线上授权目前没有 `image` 用途，开启时需要一次授权变更（给主人确认
-哈希；授权挂着承接记录时，需要先在承接规则里允许只追加 `image`）。
+授权：动态配图需要 `moments` 和 `expression` 两个用途，和私聊生图用的 `expression` 一致。实现时发现
+`image` 用途的能力指纹是“看懂主人发来的图片”（`paid_model.image_input`），拿它管生图会顺带打开读图，
+所以没有用它。线上授权已有这两个用途，不需要授权变更；开关仍是 `image_generation.enabled`，
+真实请求还要等 F8 批准。
 
 ## 主人的决定（2026-11-17）
 
@@ -75,4 +79,4 @@
 
 1. Life 决定字段、`moment_images` 表与存取、客户端显示（生图关闭时什么都不发生）。
 2. `moment_image` 任务：预留、调用、结算、失败与结果不明处理；控制台显示。
-3. 授权变更（追加 `image` 用途），在主人确认哈希后发布。
+3. 不需要授权变更（见“配置”）。剩下的是 F8：主人确定服务商、地址和单价后，单独批准真实请求。

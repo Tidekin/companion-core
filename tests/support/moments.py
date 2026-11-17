@@ -6,7 +6,8 @@ from tests.support.life_expression_consumption import prepared
 
 
 def moment_ready(core, tmp_path, **options):
-    return prepared(core, tmp_path, destination="PRIVATE_MOMENT", purposes=["moments"],
+    options.setdefault("purposes", ["moments"])
+    return prepared(core, tmp_path, destination="PRIVATE_MOMENT",
                     life_purposes=["PRIVATE_MOMENT"], automatic_actions=["moment.save"],
                     **options)
 

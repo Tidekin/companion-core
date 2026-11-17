@@ -107,6 +107,10 @@ class LifeDecision(StrictModel):
         default=None, min_length=1, max_length=200,
         description="Private diary reflection about self-exploration interests",
     )
+    image_prompt: str | None = Field(
+        default=None, min_length=1, max_length=300, exclude_if=lambda value: value is None,
+        description="A picture she wants with this moment; see companion/moment_images.py",
+    )
 
     @model_validator(mode="after")
     def coherent(self):
@@ -114,6 +118,10 @@ class LifeDecision(StrictModel):
             self.destination != "PRIVATE_DIARY" or not self.interest_shift.strip()
         ):
             raise ValueError("interest reflection requires a private diary destination")
+        if self.image_prompt is not None and (
+            self.destination != "PRIVATE_MOMENT" or not self.image_prompt.strip()
+        ):
+            raise ValueError("a picture belongs only to a moment")
         if self.action in {"SKIP", "DEFER", "CONTINUE", "EXPLORE"}:
             if self.destination != "NONE" or self.text:
                 raise ValueError("non-expressive actions have no prose or destination")

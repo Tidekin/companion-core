@@ -1905,6 +1905,9 @@ class LifeTopics:
             or sensitive(decision.interest_shift or "")
             or redact(decision.interest_shift or "", self.settings)
             != (decision.interest_shift or "")
+            or sensitive(decision.image_prompt or "")
+            or redact(decision.image_prompt or "", self.settings)
+            != (decision.image_prompt or "")
         ):
             raise CoreError("LIFE_PROPOSAL_SCOPE_REQUIRED", 403)
         if not interest_shift_supported(decision, data["decision_context"]):

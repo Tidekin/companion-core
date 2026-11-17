@@ -36,6 +36,8 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 一起清除，离线导入时为空。见[动态设计稿](plans/2026-11-16-native-moments.md)。
 `pg0016_moment_likes` 给 `moments` 增加可空 `liked_at`，记录主人点赞的时间。
 `pg0017_moment_trigger` 把动态触发来源改为 `LIFE`、`MEMORY`（来源里有她刚记下的重要的事）；此前未写过计划中的 `KEEPSAKE`。
+`pg0018_moment_images` 新增 `moment_images`，记录她给动态生成的配图（状态、费用请求、散列），
+图片字节在状态目录 `moment-images/`；随动态遗忘一起删除，离线导入时为空。见[动态配图](plans/2026-11-17-moment-images.md)。
 
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
 `pg0003_native_chat`，保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite

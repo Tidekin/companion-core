@@ -121,6 +121,10 @@ Set-Location clients/chat
 上方显示一张预览卡片（`GET moments/latest?after=`），点开进入动态面板；本机记住看过的时间。
 授权与发布规则见[动态设计稿](plans/2026-11-16-native-moments.md)。
 
+她的动态可以带一张生成的配图（`GET moments/{id}/images/0`，只在动态仍公开时返回）。列表项的
+`images` 是已经生成好的图，`image_pending` 表示还在画；画好后事件流照常推送变化标记。规则与费用见
+[动态配图](plans/2026-11-17-moment-images.md)。
+
 ## 复用依据
 
 - [Flutter 官方 MCP](https://docs.flutter.dev/ai/get-started)、[工具说明](https://docs.flutter.dev/ai/tools)：复用 SDK 的 MCP 与 Widget/Driver 能力。
