@@ -79,54 +79,12 @@ class _ProfilePanelState extends ConsumerState<ProfilePanel> {
   });
 
   Future<void> editAlias(CompanionProfile profile) async {
-    final controller = TextEditingController(text: profile.viewerAlias ?? '');
+    // The dialog owns its controller: disposing it here, right after the pop,
+    // would run while the closing animation still builds the field.
     final result = await showDialog<(bool, String?)>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('你的备注'),
-        content: SizedBox(
-          width: 360,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '只在你这边显示，不会改变「${profile.displayName}」自己的名字。',
-                style: const TextStyle(fontSize: 13, color: Warm.muted),
-              ),
-              const SizedBox(height: 14),
-              TextField(
-                key: const ValueKey('profile_alias'),
-                controller: controller,
-                autofocus: true,
-                maxLength: 32,
-                decoration: const InputDecoration(labelText: '备注名'),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          if (profile.viewerAlias != null)
-            TextButton(
-              onPressed: () => Navigator.pop(context, (true, null)),
-              child: const Text('清除备注'),
-            ),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            key: const ValueKey('save_alias'),
-            onPressed: () => Navigator.pop(context, (
-              true,
-              controller.text.trim().isEmpty ? null : controller.text.trim(),
-            )),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+      builder: (context) => _AliasDialog(profile: profile),
     );
-    controller.dispose();
     if (result == null || !result.$1) return;
     await run(
       () => _backend.setProfileAlias(
@@ -565,6 +523,74 @@ class ProfileEventRow extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _AliasDialog extends StatefulWidget {
+  const _AliasDialog({required this.profile});
+  final CompanionProfile profile;
+
+  @override
+  State<_AliasDialog> createState() => _AliasDialogState();
+}
+
+class _AliasDialogState extends State<_AliasDialog> {
+  late final controller = TextEditingController(
+    text: widget.profile.viewerAlias ?? '',
+  );
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = widget.profile;
+    return AlertDialog(
+      title: const Text('你的备注'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '只在你这边显示，不会改变「${profile.displayName}」自己的名字。',
+              style: const TextStyle(fontSize: 13, color: Warm.muted),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              key: const ValueKey('profile_alias'),
+              controller: controller,
+              autofocus: true,
+              maxLength: 32,
+              decoration: const InputDecoration(labelText: '备注名'),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        if (profile.viewerAlias != null)
+          TextButton(
+            onPressed: () => Navigator.pop(context, (true, null)),
+            child: const Text('清除备注'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('save_alias'),
+          onPressed: () => Navigator.pop(context, (
+            true,
+            controller.text.trim().isEmpty ? null : controller.text.trim(),
+          )),
+          child: const Text('保存'),
+        ),
+      ],
     );
   }
 }
