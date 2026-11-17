@@ -496,8 +496,25 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
           MessageImages(
             images: [
               for (final slot in moment.imageSlots)
-                _backend.messageImage(moment.id, slot),
+                moment.mine
+                    ? _backend.messageImage(moment.id, slot)
+                    : _backend.momentImage(moment.id, slot),
             ],
+          ),
+        if (moment.imagePending && moment.imageSlots.isEmpty)
+          const Padding(
+            key: ValueKey('moment_image_pending'),
+            padding: EdgeInsets.only(bottom: 6),
+            child: Row(
+              children: [
+                Icon(Icons.brush_outlined, size: 16, color: Warm.muted),
+                SizedBox(width: 6),
+                Text(
+                  '配图生成中…',
+                  style: TextStyle(fontSize: 12, color: Warm.muted),
+                ),
+              ],
+            ),
           ),
         Row(
           children: [

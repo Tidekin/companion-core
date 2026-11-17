@@ -301,6 +301,11 @@ class DemoBackend implements ChatBackend {
   final demoImages = <String, Uint8List>{};
 
   @override
+  Future<Uint8List> momentImage(String momentId, int slot) async =>
+      demoImages['$momentId/$slot'] ??
+      (throw const BackendError('MOMENT_IMAGE_NOT_FOUND'));
+
+  @override
   Future<Uint8List> messageImage(String eventId, int slot) async =>
       demoImages['$eventId/$slot'] ??
       (throw const BackendError('NATIVE_IMAGE_NOT_FOUND'));

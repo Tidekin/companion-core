@@ -74,7 +74,12 @@ def save(store, settings, clock, data, body):
         updated_at=now,
     )
     store.audit("moment.published", moment_id, job["job_id"], now, trigger=trigger)
-    return {"moment_id": moment_id, "state": "PUBLISHED", "reused": False}
+    from companion import moment_images
+
+    drawing = moment_images.queue(store, settings, clock, moment_id, data["decision"],
+                                  body.authority)
+    return {"moment_id": moment_id, "state": "PUBLISHED", "reused": False,
+            **({"image": "QUEUED"} if drawing else {})}
 
 
 def rows(store, *, before=None, limit=30, include_hidden=False):
@@ -127,7 +132,7 @@ def memories(store, settings, now):
 
 
 def signature(store):
-    """Changes whenever a moment is published, hidden, liked or erased."""
+    """Changes whenever a moment is published, hidden, liked, erased or gets its picture."""
     row = store.one(
         "SELECT COUNT(*) AS n, COUNT(liked_at) AS liked, "
         "COUNT(*) FILTER (WHERE state = 'PUBLISHED') AS shown, MAX(updated_at) AS at "
@@ -138,8 +143,11 @@ def signature(store):
         "WHERE x.source = 'native.chat' AND x.body_json::jsonb ? 'moment' "
         "AND o.state = 'SENT') AS replies FROM events e "
         "WHERE e.source = 'native.chat' AND e.body_json::jsonb ? 'moment'")
+    pictures = store.one("SELECT COUNT(*) FILTER (WHERE state = 'READY') AS ready, "
+                         "COUNT(*) AS n, MAX(updated_at) AS at FROM moment_images")
     return [row["n"], row["liked"], row["shown"], row["at"],
-            thread["n"], thread["gone"], thread["replies"]]
+            thread["n"], thread["gone"], thread["replies"],
+            pictures["ready"], pictures["n"], pictures["at"]]
 
 
 def set_hidden(store, moment_id, hidden, now):
@@ -166,6 +174,9 @@ def forget(store, ledger, moment_id, now):
 
 
 def erase_ids(store, moment_ids):
+    from companion import moment_images
+
+    moment_images.erase(store, moment_ids)
     for moment_id in moment_ids:
         store.execute(
             "UPDATE moments SET text = '', content_sha256 = '', source_event_ids_json = '[]', "
@@ -279,8 +290,12 @@ def comment_counts(store, moment_ids):
 
 def feed(store, *, before=None, limit=30):
     """Her moments and the owner's posts together, newest first, with comment counts."""
-    mine = [{**item, "author": "companion", "images": []}
-            for item in items(store, before=before, limit=limit)]
+    from companion import moment_images
+
+    mine = items(store, before=before, limit=limit)
+    ready, pending = moment_images.slots(store, [item["id"] for item in mine])
+    mine = [{**item, "author": "companion", "images": ready.get(item["id"], []),
+             **({"image_pending": True} if item["id"] in pending else {})} for item in mine]
     merged = sorted([*mine, *owner_posts(store, before=before, limit=limit)],
                     key=lambda item: item["created_at"], reverse=True)[:limit]
     counts = comment_counts(store, [item["id"] for item in merged])

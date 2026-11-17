@@ -14,13 +14,13 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0017_moment_trigger"
+TARGET_REVISION = "pg0018_moment_images"
 # Native-only tables start empty; credential rows are seeded after exact legacy comparison.
 NATIVE_ONLY_TABLES = frozenset({"companion_profile", "companion_profile_settings",
                                 "companion_profile_changes", "companion_avatar_assets",
                                 "care_plans", "native_devices", "native_device_revisions",
                                 "memory_mentions", "keepsakes",
-                                "moments"})
+                                "moments", "moment_images"})
 
 
 def migrate_sqlite(path, revision="head"):

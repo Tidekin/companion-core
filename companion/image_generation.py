@@ -244,8 +244,11 @@ def _limit(store, settings, cfg, job, now):
     if store.one("SELECT 1 FROM generated_images WHERE job_id = %s", (job["job_id"],)):
         return "IMAGE_GENERATION_ONCE_PER_REPLY"
     day, _ = _day_and_month(settings, now)
+    from companion.moment_images import _today as moment_pictures
+
     if (
         store.one("SELECT COUNT(*) AS n FROM generated_images WHERE created_at >= %s", (day,))["n"]
+        + moment_pictures(store, settings, now)
         >= cfg.max_daily_images
     ):
         return "IMAGE_GENERATION_DAILY_LIMIT"

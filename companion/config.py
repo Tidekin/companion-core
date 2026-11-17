@@ -651,6 +651,9 @@ class Settings(BaseModel):
     proactive_daily_limit: int = Field(default=2, ge=0, le=20)
     # Owner-only moments in the native client; Life decides, this caps a local day.
     moments_daily_limit: int = Field(default=2, ge=0, le=10)
+    # Generated pictures for her moments per local day; they also count toward
+    # image_generation.max_daily_images. See companion/moment_images.py.
+    moments_image_daily_limit: int = Field(default=2, ge=0, le=10)
     quiet_start: int = Field(default=23, ge=0, le=23)
     quiet_end: int = Field(default=8, ge=0, le=23)
     lease_seconds: int = Field(default=120, ge=10, le=900)

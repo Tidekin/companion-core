@@ -413,6 +413,11 @@ def native_selector(core, worker_id) -> RoundRobin:
             return UnitResult(False)
         return await run_native_unit(core.memes.run_once, worker_id)
 
+    async def moment_image():
+        from companion import moment_images
+
+        return UnitResult(await moment_images.run_once(core))
+
     async def memory_index():
         from companion.memory_index_work import warm_once
 
@@ -456,6 +461,7 @@ def native_selector(core, worker_id) -> RoundRobin:
             # plans are hours apart; it is paced the same way as life_topic.
             lane("social", social, ("social",), interval=0.0,
                  idle_interval=MAINTENANCE_SECONDS),
+            lane("moment_image", moment_image, ("moments", "expression")),
         ),
         lambda: foreground_clear(core, hint),
     )

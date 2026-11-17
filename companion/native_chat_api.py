@@ -324,6 +324,15 @@ def register_routes(app, settings, prefix, auth, authenticate):
         return Response(data, media_type=mime, headers={
             "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
+    @app.get(prefix + "/moments/{moment_id}/images/{slot}", dependencies=auth)
+    async def moment_image(moment_id: str, slot: int, request: Request):
+        from companion import moment_images
+
+        data, mime = await execute(request, lambda ctx, check: moment_images.read(
+            ctx.store, moment_id, slot), readonly=True)
+        return Response(data, media_type=mime, headers={
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
     @app.get(prefix + "/replies/{message_id}/sticker", dependencies=auth)
     async def reply_sticker(message_id: str, request: Request):
         data, mime = await execute(request, lambda ctx, check: native_chat.sticker(

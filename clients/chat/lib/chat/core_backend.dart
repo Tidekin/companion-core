@@ -34,6 +34,9 @@ abstract interface class ChatBackend {
   /// The history preview of one image attached to the owner's message.
   Future<Uint8List> messageImage(String eventId, int slot);
 
+  /// A picture generated for one of her moments.
+  Future<Uint8List> momentImage(String momentId, int slot);
+
   /// The meme a delivered reply carries; refused once it is erased or excluded.
   Future<Uint8List> replySticker(String messageId);
   Future<void> refresh();
@@ -284,6 +287,20 @@ class CoreBackend implements ChatBackend {
   }
 
   final _messageImages = <String, Future<Uint8List>>{};
+
+  @override
+  Future<Uint8List> momentImage(String momentId, int slot) {
+    if (!RegExp(r'^moment_[a-f0-9]{32}$').hasMatch(momentId) || slot < 0) {
+      return Future.error(const BackendError('MOMENT_IMAGE_NOT_FOUND'));
+    }
+    final key = '$momentId/$slot';
+    return _messageImages[key] ??=
+        _fetchBytes('/v1/console/chat/moments/$momentId/images/$slot')
+            .catchError((Object error) {
+              _messageImages.remove(key);
+              throw error;
+            });
+  }
 
   @override
   Future<Uint8List> messageImage(String eventId, int slot) {

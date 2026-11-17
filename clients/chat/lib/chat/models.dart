@@ -370,6 +370,7 @@ class Moment {
     required this.liked,
     this.author = 'companion',
     this.imageSlots = const [],
+    this.imagePending = false,
     this.commentCount = 0,
     this.yearsAgo,
   });
@@ -382,6 +383,9 @@ class Moment {
   /// `companion` for her posts, `owner` for the owner's own posts.
   final String author;
   final List<int> imageSlots;
+
+  /// Her picture for this moment is still being drawn.
+  final bool imagePending;
   final int commentCount;
   final int? yearsAgo;
 
@@ -395,6 +399,7 @@ class Moment {
     liked: value,
     author: author,
     imageSlots: imageSlots,
+    imagePending: imagePending,
     commentCount: commentCount,
     yearsAgo: yearsAgo,
   );
@@ -409,6 +414,7 @@ class Moment {
     imageSlots: [
       for (final slot in value['images'] as List? ?? []) slot as int,
     ],
+    imagePending: value['image_pending'] as bool? ?? false,
     commentCount: value['comment_count'] as int? ?? 0,
     yearsAgo: value['years_ago'] as int?,
   );

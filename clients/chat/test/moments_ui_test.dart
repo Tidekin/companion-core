@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:companion_chat/chat/models.dart';
 import 'package:companion_chat/dev/demo_backend.dart';
 import 'package:companion_chat/persistence/repository.dart';
@@ -28,6 +30,17 @@ class EmptyRepository implements ChatRepository {
   Future<Set<String>> viewed(String botId) async => {};
   @override
   Future<void> markViewed(String botId, Iterable<String> ids) async {}
+}
+
+class RecordingBackend extends DemoBackend {
+  RecordingBackend(super.bot);
+  final pictures = <String>[];
+
+  @override
+  Future<Uint8List> momentImage(String momentId, int slot) {
+    pictures.add('$momentId/$slot');
+    return super.momentImage(momentId, slot);
+  }
 }
 
 final bot = BotProfile(
@@ -114,6 +127,49 @@ void main() {
     await tester.pumpAndSettle();
     expect(backend.threads[hers.id]!.single.text, '我也想看看');
     expect(find.textContaining('我也想看看'), findsOneWidget);
+    await close(tester, container);
+  });
+
+  testWidgets('her picture loads from the moment route; drawing shows a note', (
+    tester,
+  ) async {
+    final backend = RecordingBackend(bot);
+    final container = ProviderContainer(
+      overrides: [
+        repositoryProvider.overrideWithValue(EmptyRepository()),
+        vaultProvider.overrideWithValue(MemoryVault()),
+        backendFactoryProvider.overrideWithValue((_) => backend),
+        profileProvider.overrideWith((ref, _) => Stream.value(null)),
+      ],
+    );
+    final hers = backend.feed.single;
+    backend.feed
+      ..clear()
+      ..add(
+        Moment(
+          id: hers.id,
+          text: hers.text,
+          trigger: hers.trigger,
+          createdAt: hers.createdAt,
+          liked: false,
+          imagePending: true,
+        ),
+      );
+    await tester.pumpWidget(host(container, MomentsPanel(bot: bot)));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('moment_image_pending')), findsOneWidget);
+    backend.feed[0] = Moment(
+      id: hers.id,
+      text: hers.text,
+      trigger: hers.trigger,
+      createdAt: hers.createdAt,
+      liked: false,
+      imageSlots: const [0],
+    );
+    backend.momentChanges.add(null);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('moment_image_pending')), findsNothing);
+    expect(backend.pictures, ['${hers.id}/0']);
     await close(tester, container);
   });
 

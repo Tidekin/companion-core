@@ -477,6 +477,11 @@ def messages(store, settings, job, now, principles, *, data=None, prior_contacts
         from companion.life_topics import RULES as LIFE_RULES
 
         rules = LIFE_RULES
+        from companion import moment_images
+
+        if moment_images.offered_now(store, settings, data["allowed_destinations"], now):
+            payload["moment_images"] = True
+            rules += moment_images.RULES
         # The decision time is frozen per call and kept out of the material hash.
         payload["sources"] = [
             {**item, "occurred_at": time_context.stamp(item["occurred_at"], settings.timezone)}
