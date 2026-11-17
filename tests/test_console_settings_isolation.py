@@ -96,7 +96,7 @@ def test_settings_wait_keeps_health_versions_and_unknown_cost(core, monkeypatch,
                     await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())
-    assert len(opened) == len(closed) == 3 and opened == closed
+    assert len(opened) == len(closed) == 6 and opened == closed
     assert all(store is not core.store and thread != threading.get_ident()
                for store, thread in opened)
     assert core.store.rows("SELECT * FROM model_usage") == usage

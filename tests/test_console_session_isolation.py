@@ -8,7 +8,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from companion import api_store
+from companion import api_store, console_read
 from companion.store import Store, after
 from tests.api_store_lock_worker import start as start_lock_worker
 from tests.support.console_reset_isolation import ORIGIN, PASSWORD, configure, login
@@ -83,9 +83,10 @@ def test_session_write_wait_keeps_health_responsive(core, monkeypatch, record_pr
                     await asyncio.gather(pending, return_exceptions=True)
 
     asyncio.run(scenario())
-    assert len(opened) == len(closed) == 1
+    assert len(opened) == len(closed) == (2 if method == "DELETE" else 1)
     assert opened == closed
-    assert opened[0][0] is not core.store and opened[0][1] != threading.get_ident()
+    assert all(store is not core.store and thread != threading.get_ident()
+               for store, thread in opened)
 
 
 @pytest.mark.parametrize("method,change,expected", [
@@ -133,6 +134,42 @@ def test_session_write_rechecks_authority_after_queue(core, monkeypatch, method,
             finally:
                 release.set()
                 await asyncio.gather(pending, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_slow_recall_keeps_health_live_and_rechecks_logout(core, monkeypatch):
+    configure(core)
+    core.settings.memory_enabled = True
+    entered, release = threading.Event(), threading.Event()
+    caller = threading.get_ident()
+
+    def slow_recall(context, query, limit):
+        assert context.memory.store is not core.store and threading.get_ident() != caller
+        entered.set()
+        assert release.wait(10)
+        return {"items": ["private synthetic result"]}
+
+    monkeypatch.setattr(console_read, "recall", slow_recall)
+
+    async def scenario():
+        async with (
+            real_core_http(core) as port,
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client,
+        ):
+            headers = await login(client)
+            pending = asyncio.create_task(client.get("/v1/console/memories/recall",
+                                                     params={"q": "test"}, headers=headers))
+            try:
+                assert await asyncio.to_thread(entered.wait, 5)
+                live = await asyncio.wait_for(client.get("/internal/v1/health/live"), 2)
+                assert live.status_code == 200 and not pending.done()
+                assert (await client.delete(PATH, headers=headers)).status_code == 200
+            finally:
+                release.set()
+                response = await pending
+            assert response.status_code == 401
+            assert response.json() == {"error": "CONSOLE_LOGIN_REQUIRED"}
 
     asyncio.run(scenario())
 

@@ -56,7 +56,7 @@ def test_console_reset_wait_keeps_health_responsive_and_retry_idempotent(
                                          ({**headers, "Cookie": ""}, 401)]:
                     denied = await client.post(PATH, json={"confirm": True}, headers=rejected)
                     assert denied.status_code == status
-                assert not opened
+                assert len(opened) == 2 and opened == closed and not entered.is_set()
                 # Measure API responsiveness on an established connection while BEGIN is blocked.
                 assert (await probe.get("/internal/v1/health/live")).status_code == 200
                 pending = asyncio.create_task(client.post(PATH, json={"confirm": True},
@@ -86,7 +86,7 @@ def test_console_reset_wait_keeps_health_responsive_and_retry_idempotent(
                     await asyncio.gather(pending, return_exceptions=True)
 
     asyncio.run(scenario())
-    assert len(opened) == len(closed) == 2
+    assert len(opened) == len(closed) == 6
     assert {id(s): t for s, t in opened} == {id(s): t for s, t in closed}
     for store, thread in opened:
         assert store is not core.store and thread != threading.get_ident()
