@@ -141,7 +141,7 @@ def test_forget_one_imported_fact_erases_whole_raw_source_and_backup_replay(
 def test_native_retention_expires_import_and_role_together(core):
     result = imported(core)
     core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)
-    assert core.expire_raw_events() == 3
+    assert core.expire_raw_events() == 4  # archive, its bytes, attestation, role
     assert core.store.one("SELECT value FROM runtime_meta WHERE key=%s",
                            (history_import.ACTIVE,)) is None
     assert core.store.one("SELECT redacted FROM events WHERE event_id=%s",
@@ -212,3 +212,32 @@ def test_original_images_are_hashed_linked_exportable_and_forgotten(core, tmp_pa
     history_import.forget(core, result["archive_event_id"])
     with pytest.raises(CoreError, match="IMPORT_ARCHIVE_UNAVAILABLE"):
         history_import.export(core, result["archive_event_id"], image_sha)
+
+
+def test_large_pictures_stay_out_of_the_record_recall_reads(core, tmp_path):
+    """A copied archive with ~1 MiB pictures used to exceed reply recall and fail every reply."""
+    import os
+
+    from companion import retrieval_work
+
+    request, raw, sha = package()
+    buffer = BytesIO()
+    Image.frombytes("RGB", (640, 640), os.urandom(640 * 640 * 3)).save(buffer, format="PNG")
+    picture = buffer.getvalue()
+    assert len(picture) > retrieval_work.LIMITS["text_bytes"]
+    image_sha = history_import.digest(picture)
+    request.images = [history_import.ImportedImage(sha256=image_sha, mime="image/png",
+        description="合成的噪点图片", source_segments=[2])]
+    core.settings.memory_enabled = True
+    result = history_import.apply(core, request, raw, sha, {image_sha: picture})
+    archive = core.store.one("SELECT octet_length(body_json) AS n FROM events "
+                             "WHERE event_id=%s", (result["archive_event_id"],))
+    assert archive["n"] <= history_import.ARCHIVE_BYTES
+    assert core.memory_context.recall("米饭作为搬家后的暗号", core.clock())["rows"]
+    assert history_import.export(core, result["archive_event_id"]) == raw
+    assert history_import.export(core, result["archive_event_id"], image_sha) == picture
+    history_import.forget(core, result["archive_event_id"])
+    assert core.store.one("SELECT COUNT(*) AS n FROM events WHERE event_type='history.bytes' "
+                          "AND redacted=0")["n"] == 0
+    with pytest.raises(CoreError, match="IMPORT_PREVIOUSLY_FORGOTTEN"):
+        history_import.apply(core, request, raw, sha, {image_sha: picture})

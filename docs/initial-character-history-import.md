@@ -101,6 +101,10 @@ uv run python -m companion import-history --source .local/imports/example/source
 导入命令中加 `--images-dir .local/imports/example/images`。最多 20 张，单张最多
 4 MB、总计最多 16 MB；复用原生解码器检查 MIME、静态帧、尺寸和像素上限。
 原图随同一归档进入数据库与备份，保留原字节，不自动调用视觉模型或发送到提供商。
+原文件和每张原图各存为归档下的一条子记录（`history.bytes`）；归档本身只保存分段和图片说明。
+回复时的记忆召回会完整读取归档（每轮最多 1 MiB 来源文字），不会读到这些子记录，所以较大的
+原图不会让回复失败。归档摘要超过 256 KiB 时拒绝导入（`IMPORT_ARCHIVE_TOO_LARGE`）。
+遗忘或到期时，子记录随归档一起清除。
 
 ## 分析文字与接续
 
