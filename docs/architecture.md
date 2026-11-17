@@ -12,7 +12,7 @@ QQ / NapCat ⇄ OneBot Bridge ⇄ HTTP v1 ⇄ Core API ⇄ Core 数据库
 
 - Bridge 在本地 SQLite 持久化接收、重试和发送凭证，通过 Core 的事件与 Outbox 接口交接。平台返回的消息 ID 是发送回执。旧 AstrBot 插件只用于迁移期的历史数据核对。[原生入口与旧数据迁移](deployment.md#主人入口与旧-astrbot-数据迁移)
 - Reader 通过受限的适配器身份领取阅读请求并提交结果。语音节点独立保存本地任务与结果凭证，通过租约回传给 Core。Core 持有来源授权、任务状态和投递决定。
-- 此版本的 Core 运行时使用 SQLite。PostgreSQL 已有原生会话、业务表及离线导入，运行时切换按迁移候选独立验证。Bridge 与语音节点的本地 SQLite 继续承担离线恢复。[存储 ADR](adr/0002-core-postgresql-and-local-sqlite.md) · [迁移进度与验收](postgresql-migration.md)
+- Core 运行时使用 PostgreSQL。已有的 Core SQLite 备份由离线导入器迁移。Bridge 与语音节点的本地 SQLite 继续承担离线恢复。[存储 ADR](adr/0002-core-postgresql-and-local-sqlite.md) · [迁移进度与验收](postgresql-migration.md)
 
 ## Core 模块职责
 
@@ -22,8 +22,8 @@ QQ / NapCat ⇄ OneBot Bridge ⇄ HTTP v1 ⇄ Core API ⇄ Core 数据库
 - `companion.job_queue` 统一写入 Core 的 `jobs` 表，负责入队、领取和续租、结束尝试、重试、恢复及取消。各业务模块在原事务中核验权限、选择可处理的任务，并记录来源、收费及结果凭证。
 - ModelClient 只处理 HTTP 协议和标准化响应。它不读记忆库、不决定发送、不具备工具执行权限。以后替换提供商只需满足 `complete(messages, scenario)` 返回 `ModelResponse` 的合同。
 - Memory 拥有证据、检索、冲突、修订与自我观察；Transport 拥有 Outbox 状态转换；Budget 独立预留与结算。模型输出不能直接更新权限或配置。
-- Store 提供事务和 SQL 基础设施。跨模块保持一个本地数据库，重要多表变更仍在同一事务内。SQLite 使用 WAL、FULL synchronous、外键与 busy timeout。
-- 聊天 worker 的任务领取先在写事务中完成一次恢复，再以既有 `read_or_write` 快照检查待领任务和权限；空闲校验不占用 SQLite 写锁。领取、取消或其他写入会在独立写事务中重做完整校验，恢复中的文件清理不参与只读重试。
+- Store 提供事务和 SQL 基础设施。Core 的业务模块共用 PostgreSQL，重要多表变更在同一事务内提交。
+- 聊天 worker 的任务领取先在写事务中完成一次恢复，再以既有 `read_or_write` 快照检查待领任务和权限；空闲校验在只读快照中完成。领取、取消或其他写入会在独立写事务中重做完整校验，恢复中的文件清理不参与只读重试。
 - Diary 拥有日期调度、真实对话来源、结构化验证、私人正文及其修订。它不写发送 Outbox，也不自动修改 Memory/traits；主人主动读取沿用普通私聊回复。协议后端差异仍留在 Bridge，Core 不依赖 NapCat 或 SnowLuma 的 SDK。
 
 ## v0.4 相对 v0.3 合同的历史取舍

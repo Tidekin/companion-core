@@ -6,7 +6,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0017_moment_trigger`。迁移链先应用既有的
+当前新建与离线导入目标为 `pg0018_moment_images`。就绪检查与备份恢复共用运行结构校验，涵盖原生流预览、资料、动态及配图所需的列。迁移链先应用既有的
 `pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
 再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
@@ -39,8 +39,8 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 `pg0018_moment_images` 新增 `moment_images`，记录她给动态生成的配图（状态、费用请求、散列），
 图片字节在状态目录 `moment-images/`；随动态遗忘一起删除，离线导入时为空。见[动态配图](plans/2026-11-17-moment-images.md)。
 
-PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
-`pg0003_native_chat`，保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite
+PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 顺序升级到当前修订，
+保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite
 `0068_image_review_target` 的 103 张业务表。SQLite 的旧迁移历史仅用于读取原备份，
 不参与 PostgreSQL 运行时查询，也不形成另一套 Core 主库。
 

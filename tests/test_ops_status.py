@@ -235,6 +235,10 @@ def test_ready_and_diagnostics_require_upgrade_from_single_topic_schema(core, tm
     "DELETE FROM alembic_version",
     "DROP INDEX idx_memory_image_review_target",
     "DROP INDEX idx_memories_relationship_standing",
+    "ALTER TABLE moment_images RENAME TO unavailable_moment_images",
+    "ALTER TABLE moments RENAME COLUMN liked_at TO unavailable_liked_at",
+    "ALTER TABLE companion_profile_settings RENAME COLUMN viewer_alias TO unavailable_alias",
+    "ALTER TABLE agent_conversations RENAME COLUMN preview_version TO unavailable_version",
 ])
 def test_readiness_checks_revision_and_query_requirements_independently(core, change):
     core.store.execute(change)
