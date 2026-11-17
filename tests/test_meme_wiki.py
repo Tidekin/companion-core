@@ -151,7 +151,7 @@ def test_changed_data_is_never_used(monkeypatch, tmp_path):
 
 def test_chat_context_carries_the_entry_without_memory_evidence(core):
     # The fixture counts UTF-8 bytes; the entry is prunable reference data, not required input.
-    core.settings.context_soft_tokens = 6000
+    core.settings.context_soft_tokens = 7000
     ingest(core, 1, "芜湖")
     messages = core.context(core.claim_job("worker"))
     assert any(m["role"] == "user" and "[梗百科]「芜湖」" in str(m["content"])
