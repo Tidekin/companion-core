@@ -25,6 +25,10 @@ CHARACTER_SOURCE = "owner.character"
 MAX_BYTES = 2_000_000
 IMAGE_BYTES = 4_000_000
 IMAGES_BYTES = 16_000_000
+# The archive record is an ancestor of every imported memory, so recall reads it whole
+# (companion/retrieval_work.py allows 1 MiB of source text per reply). The copied bytes
+# and pictures live in child records recall never reads; only this summary must fit.
+ARCHIVE_BYTES = 256 * 1024
 CHARACTER_RULES = """
 本轮若有“主人指定的初始角色”，采用其中的名字、虚构形象、性格和表达习惯，作为相处的起点；
 它不是从互动推断出的稳定人格，仍可在后续相处中变化。没有该资料时，从没有预设角色开始。
@@ -273,14 +277,24 @@ def apply(runtime, request, raw, request_sha256, images=None):
             if not row or row["redacted"]:
                 raise CoreError("IMPORT_PREVIOUSLY_FORGOTTEN", 409)
             return {**receipt, "created": False}
-        _event(runtime, archive, SOURCE, request.source_sha256, "history.archived", {
+        summary = {
             "text": "", "source_label": request.source_label,
             "source_sha256": request.source_sha256, "original_timestamps": None,
-            "raw_base64": base64.b64encode(raw).decode("ascii"),
             "segments": [item.model_dump() for item in request.segments],
-            "images": [{**item.model_dump(), "raw_base64": base64.b64encode(
-                images[item.sha256]).decode("ascii")} for item in request.images],
-        }, actor="system")
+            "images": [item.model_dump() for item in request.images],
+        }
+        if len(encode(summary).encode()) > ARCHIVE_BYTES:
+            raise CoreError("IMPORT_ARCHIVE_TOO_LARGE", 400)
+        _event(runtime, archive, SOURCE, request.source_sha256, "history.archived", summary,
+               actor="system")
+        # Children of the archive: forgetting it removes them, recall never walks to them.
+        for suffix, data in [("raw", raw), *(("image:" + item.sha256, images[item.sha256])
+                                             for item in request.images)]:
+            _event(runtime, event_id(request.source_sha256 + ":" + suffix), SOURCE,
+                   request.source_sha256 + ":" + suffix, "history.bytes",
+                   {"text": "", "source_sha256": digest(data),
+                    "raw_base64": base64.b64encode(data).decode("ascii")},
+                   actor="system", parents=[archive])
         memory = Memory(runtime.store, runtime.settings, runtime.ledger)
         ids = []
         for index, fact in enumerate(request.memories):
@@ -431,14 +445,24 @@ def export(runtime, archive_event_id, image_sha256=None):
                                      row, "history"):
         raise CoreError("IMPORT_ARCHIVE_UNAVAILABLE", 404)
     body = json.loads(row["body_json"])
-    if image_sha256 is not None:
-        image = next((item for item in body.get("images", []) if item["sha256"] == image_sha256),
-                     None)
-        if image is None:
-            raise CoreError("IMPORT_IMAGE_UNAVAILABLE", 404)
-        body = {"raw_base64": image["raw_base64"], "source_sha256": image["sha256"]}
+    if image_sha256 is not None and not any(
+            item["sha256"] == image_sha256 for item in body.get("images", [])):
+        raise CoreError("IMPORT_IMAGE_UNAVAILABLE", 404)
+    expected = image_sha256 or body["source_sha256"]
+    if "raw_base64" not in body:
+        suffix = "image:" + image_sha256 if image_sha256 else "raw"
+        child = runtime.store.one(
+            "SELECT body_json FROM events WHERE event_id=%s AND redacted=0 AND source=%s "
+            "AND event_type='history.bytes'",
+            (event_id(body["source_sha256"] + ":" + suffix), SOURCE))
+        if not child:
+            raise CoreError("IMPORT_ARCHIVE_UNAVAILABLE", 404)
+        body = json.loads(child["body_json"])
+    elif image_sha256 is not None:
+        # An archive written before the bytes moved to child records.
+        body = next(item for item in body["images"] if item["sha256"] == image_sha256)
     raw = base64.b64decode(body["raw_base64"], validate=True)
-    if digest(raw) != body["source_sha256"]:
+    if digest(raw) != expected:
         raise CoreError("IMPORT_SOURCE_CHANGED", 409)
     return raw
 
