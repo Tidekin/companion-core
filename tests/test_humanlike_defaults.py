@@ -161,3 +161,8 @@ def test_time_hint_uses_local_time_and_gap(previous, expected):
 def test_time_hint_without_a_valid_current_time_is_empty():
     assert conversation_policy.time_hint(None, None, "Asia/Shanghai") == ""
     assert conversation_policy.time_hint("bad", None, "Asia/Shanghai") == ""
+
+
+def test_shares_get_a_reaction_rather_than_a_recap():
+    assert "不按顺序复述或介绍内容" in PRINCIPLES
+    assert "主人要你讲讲内容时再讲" in PRINCIPLES
