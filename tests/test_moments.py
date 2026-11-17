@@ -11,7 +11,7 @@ from companion.store import after
 from tests.support.life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
-from tests.support.moments import moment_ready
+from tests.support.moments import moment_ready, seed_moment
 from tests.support.owner_console import client as client
 from tests.support.owner_console import login
 
@@ -41,6 +41,21 @@ def test_quiet_hours_and_daily_limit_hold_the_moment_back(core, tmp_path, fence)
         core.settings.moments_daily_limit = 0
     assert not core.life_topics.consume_due(diary=core.diary)
     assert core.store.rows("SELECT * FROM moments") == []
+
+
+@pytest.mark.parametrize(("previous", "can_publish"), [
+    ("2026-10-18T15:59:59.999999+00:00", True),
+    ("2026-10-18T16:00:00.000000+00:00", False),
+    ("2026-10-18T18:00:00.000000+00:00", False),
+])
+def test_daily_limit_uses_the_owner_local_midnight(core, tmp_path, previous, can_publish):
+    moment_ready(core, tmp_path)
+    core.settings.moments_daily_limit = 1
+    assert core.settings.timezone == "Asia/Shanghai"
+    prior = seed_moment(core, TEXT)
+    core.store.execute("UPDATE moments SET created_at=%s WHERE moment_id=%s", (previous, prior))
+    assert bool(core.life_topics.consume_due(diary=core.diary)) is can_publish
+    assert len(moments.items(core.store)) == 1 + int(can_publish)
 
 
 def test_hide_forget_and_source_erasure(core, tmp_path):
