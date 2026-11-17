@@ -187,7 +187,8 @@ def _owner(store, settings, item, clock, *, job_id=None, request_id=None):
     if (
         not owner
         or owner["redacted"]
-        or owner["source"] != "qq.onebot"
+        # QQ and the native app are both signed owner input; see content.owner_source.
+        or owner["source"] not in ("qq.onebot", "native.chat")
         or owner["actor_id"] != "owner"
         or owner["scope"] != "private"
         or owner["owner_actor_id"] != "owner"
@@ -249,7 +250,7 @@ def _owner(store, settings, item, clock, *, job_id=None, request_id=None):
         current = store.one(
             "SELECT e.event_id FROM events AS e JOIN conversations AS c USING (conversation_id) "
             "WHERE e.conversation_id = %s AND e.reply_revision = c.reply_revision AND e.redacted = "
-            "0 AND e.source = 'qq.onebot' AND e.actor_id = 'owner'",
+            "0 AND e.source IN ('qq.onebot', 'native.chat') AND e.actor_id = 'owner'",
             (owner["conversation_id"],),
         )
         inherited = (
