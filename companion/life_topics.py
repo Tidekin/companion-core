@@ -482,11 +482,7 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
             > view.policy.history.max_utf8_bytes
         ):
             raise CoreError("LIFE_HISTORY_CONTEXT_LIMIT", 409)
-    count = store.one(
-        "SELECT COUNT(*) AS n FROM life_activity_results WHERE authority_sha256 = %s AND (state = "
-        "'SHADOW' OR (state = 'PENDING' AND topic_id <> %s))",
-        (authority_sha256, topic_id or ""),
-    )
+    count = {"n": waiting_drafts(store, authority_sha256, topic_id)}
     if check_limit and count["n"] >= scope.max_items:
         raise CoreError("LIFE_SHADOW_ITEM_LIMIT", 429)
     grants = {g.event_id: g for g in scope.qzone_draft_sources}
@@ -530,6 +526,28 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
             else {}
         ),
     }
+
+
+def waiting_drafts(store, authority_sha256, topic_id=None):
+    """Drafts still holding a slot of the approved Life cap.
+
+    A draft that already went out through its channel, or a decision whose job ended
+    without a result, no longer holds a slot.
+    """
+    return store.one(
+        "SELECT COUNT(*) AS n FROM life_activity_results r JOIN jobs j USING (job_id) "
+        "WHERE r.authority_sha256 = %s AND ((r.state = 'PENDING' AND r.topic_id <> %s "
+        "AND j.state IN ('QUEUED','RUNNING','RETRY_WAIT')) OR (r.state = 'SHADOW' "
+        "AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.origin_event_id = j.event_id "
+        "AND o.action_type IN ('qq.private.proactive','native.private.proactive')) "
+        "AND NOT EXISTS(SELECT 1 FROM social_autonomy_plans p "
+        "WHERE p.idempotency_key = 'life:qzone:' || j.job_id) "
+        "AND NOT EXISTS(SELECT 1 FROM runtime_meta m WHERE m.key = 'diary_life:' || j.job_id) "
+        "AND NOT EXISTS(SELECT 1 FROM jobs saved WHERE saved.kind = 'rem' "
+        "AND saved.idempotency_key = 'life:rem:' || j.job_id) "
+        "AND NOT EXISTS(SELECT 1 FROM moments mo WHERE mo.source_job_id = j.job_id)))",
+        (authority_sha256, topic_id or ""),
+    )["n"]
 
 
 def erase_topics(store, event_ids):
