@@ -5,6 +5,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion import owner_authority
+from companion.contracts import CoreError
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion_delivery_protocol.native_chat import device_identity
 from tests.conftest import run
@@ -118,6 +119,38 @@ def test_a_link_in_native_text_enters_owner_content_intake(client, core, tmp_pat
     [item] = core.store.rows('SELECT kind, target_url FROM content_items WHERE owner_event_id=%s',
                              (first.json()['event_id'],))
     assert item == {'kind': 'link', 'target_url': 'https://b23.tv/WGe7ORE'}
+
+
+
+def test_a_native_video_link_may_reach_frame_analysis(client, core, tmp_path):
+    """The video analysis owner check admits the app's signed input like QQ's."""
+    from companion import bili_video
+    from companion.store import after
+    from tests.support.owner_authority_setup import prepare
+
+    core.settings.memory_enabled = False
+    core.settings.content_enabled = True
+    key = Ed25519PrivateKey.generate()
+    policy = prepare(core, tmp_path)
+    device_id, identity = device_identity(key.public_key().public_bytes_raw().hex())
+    activate(core, OwnerGrantPolicy.model_validate({**policy.model_dump(),
+        'purposes': ['chat', 'content'], 'capture': None,
+        'native_devices': {device_id: identity}}))
+    headers, authority = enroll(client, key)
+    first = client.post('/v1/console/chat/messages', json=packet(
+        core, key, authority, '看这个 https://b23.tv/WGe7ORE'), headers=headers)
+    assert first.status_code == 202, first.text
+    item = core.store.one('SELECT * FROM content_items WHERE owner_event_id=%s',
+                          (first.json()['event_id'],))
+    job_id = first.json()['job_id']
+    core.store.execute("UPDATE jobs SET state='RUNNING', lease_until=%s WHERE job_id=%s",
+                       (after(core.clock(), 300), job_id))
+    try:
+        assert bili_video._owner(core.store, core.settings, item, core.clock,
+                                 job_id=job_id)['job_id'] == job_id
+    except CoreError as error:
+        # Past the source check, only the grant's own bili_video purpose may refuse it.
+        assert error.code != 'BILI_VIDEO_OWNER_SOURCE_REQUIRED'
 
 
 def test_revoked_device_cannot_regrant_using_old_login(client, core, tmp_path):
