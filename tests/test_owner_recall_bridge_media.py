@@ -13,6 +13,7 @@ import pytest
 from companion_onebot_bridge import app, pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame, until
+from tests.support.core_http import use_api_clock
 from tests.support.input_interrupt_bridge import model_response
 from tests.support.live_image_input import options as image_options
 from tests.support.live_image_input import png
@@ -56,12 +57,9 @@ async def media_host(core, tmp_path, source, *, model_reply=None, independent_ap
 @pytest.mark.parametrize("phase", ["download", "upload"])
 @pytest.mark.parametrize("control", ["new_input", "recall"])
 def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypatch, phase, control):
-    from companion import api
-    from companion.core import Core
     from tests.support.owner_image_recovery import run_worker
 
-    monkeypatch.setattr(api, "Core", lambda *args, **kwargs: Core(
-        *args, clock=core.clock, **kwargs))
+    use_api_clock(monkeypatch, core.clock)
     started, release = asyncio.Event(), asyncio.Event()
     downloads, calls = [], []
 

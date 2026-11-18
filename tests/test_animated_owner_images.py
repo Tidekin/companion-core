@@ -21,6 +21,7 @@ from companion_onebot_bridge.pending_media import MediaPump
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, until
 from tests.support.animated_owner_images import animation, policy
+from tests.support.core_http import use_api_clock
 from tests.support.image_connect_recovery import ConnectThenGet
 from tests.support.live_image_input import options as image_options
 from tests.support.onebot_events import config, raw_event
@@ -103,7 +104,7 @@ def test_apng_poster_is_not_an_animation_frame_and_sampling_includes_the_last_fr
 def test_real_api_and_independent_worker_reply_to_animation_then_continue_semantic_chat(
     core, tmp_path, monkeypatch, format, mime, count, subtype,
 ):
-    from companion import __main__, api
+    from companion import __main__
     from companion import core as core_module
 
     original = animation(format, count=count, size=(3, 2))
@@ -159,7 +160,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
             "transport": ConnectThenGet(httpx.MockTransport(cdn), addresses=connection_attempts)})
 
     async def scenario():
-        monkeypatch.setattr(api, "Core", construct)
+        use_api_clock(monkeypatch, core.clock, instances=instances)
         monkeypatch.setattr(core_module, "Core", construct)
         monkeypatch.setattr(images, "fetch_image", mocked_cdn)
         monkeypatch.setattr(__main__, "httpx", SimpleNamespace(AsyncClient=lambda **kwargs:

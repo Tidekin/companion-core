@@ -48,8 +48,8 @@ from companion.contracts import (
     SearchRequest,
     StrictModel,
 )
-from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode, DiaryService
+from companion.domain_runtime import DomainRuntime
 from companion.evaluation import MAX_HTTP_BODY_BYTES
 from companion.exploration import METERED_READS_SQL
 from companion.life_protocol import LifeConsumeRequest, TopicClosure
@@ -217,10 +217,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
             AsyncClient(timeout=settings.timeout_seconds, trust_env=False)
             if image_model else nullcontext()
         ) as client:
-            app.state.core = Core(settings, ModelClient(settings, client) if client else None)
-            app.state.api_store = ApiStore(app.state.core.database, settings.state_directory)
-            app.state.core.store.configuration_worker = "api"
+            model = ModelClient(settings, client) if client else None
+            app.state.core = DomainRuntime(settings, model)
             try:
+                app.state.api_store = ApiStore(app.state.core.database, settings.state_directory)
+                app.state.core.store.configuration_worker = "api"
                 yield
             finally:
                 app.state.core.close()
@@ -761,11 +762,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post(prefix + "/inbox/events", dependencies=auth, status_code=202)
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):
         core = app.state.core
+        content_options = core.content.options
 
         def receive(store):
             store.configuration_worker = "api"
             return inbox.receive(store, core.settings, core.clock, core.ledger, event,
-                                 x_idempotency_key, content_options=core.content.options)
+                                 x_idempotency_key, content_options=content_options)
 
         return await app.state.api_store.run(receive)
 

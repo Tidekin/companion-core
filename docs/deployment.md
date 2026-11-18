@@ -290,7 +290,7 @@ docker compose --profile life up -d companion-api companion-worker companion-lif
 
 聊天 Worker 只处理即时回复；自动记忆提取由 `companion-life-worker` 执行，因此开启记忆时需一并启动 `life` profile。常规提取不依赖夜间整理开关；有排队、执行中或到期重试的聊天时，后台记忆会让位。
 
-初始化会迁移至当前 schema；开启 M1 时还会准备固定版本的中文嵌入模型，首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，后续离线启动可复用；本地默认目录为工作区 `data/embedding-cache`。模型无法加载时会报 `MEMORY_INDEX_UNAVAILABLE`，应修复缓存或下载问题后重启。该缓存只存公开模型权重，个人记忆向量仍在受备份与遗忘机制管理的 SQLite 内。
+开启 M1 时，聊天和 Life worker 在处理任务前加载固定版本的中文嵌入模型。首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，本地默认目录为工作区 `data/embedding-cache`。普通 API 的鉴权与数据库就绪检查可在模型缓存缺失时使用。需要计算向量的查询会尝试加载模型，加载失败返回 HTTP 503 和 `MEMORY_INDEX_UNAVAILABLE`。修复缓存后可重试查询，并重新启动此前启动失败的 worker。个人记忆向量保存在 PostgreSQL，由原有备份与遗忘机制管理。
 
 使用“/记住这个：…”验证新会话的不同问法、冲突提示、确认、纠正和忘记。相似检索返回的是候选，最终回复前还会检查它是否直接对应问题。语义核对调用使用同一个模型适配器并保留原费用记录；金额额度不拒绝核对。来源、授权或调用次数不足时仍明确说明核对暂不可用。
 

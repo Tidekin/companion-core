@@ -6,9 +6,22 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 
+from companion import api
 from companion.api import create_app
 from companion.api_store import ApiStore
+from companion.domain_runtime import DomainRuntime
 from tests.support.native_http import owned_http_protocol
+
+
+def use_api_clock(monkeypatch, clock, *, instances=None):
+    """Run the ordinary API lifespan with the same synthetic clock as its worker."""
+    def construct(settings, model=None):
+        runtime = DomainRuntime(settings, model, clock)
+        if instances is not None:
+            instances.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(api, "DomainRuntime", construct)
 
 
 @asynccontextmanager

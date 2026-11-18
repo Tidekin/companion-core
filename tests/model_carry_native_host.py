@@ -77,7 +77,7 @@ class TimedCore(core_module.Core):
 
 
 core_module.Core = TimedCore
-api_module.Core = TimedCore
+api_module.DomainRuntime = functools.partial(api_module.DomainRuntime, clock=clock)
 api_module.AsyncClient = OfflineClient
 entry = importlib.import_module("companion.__main__")
 if mode == "api":

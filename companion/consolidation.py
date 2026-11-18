@@ -49,11 +49,10 @@ def enabled(store, settings, clock):
     return settings.consolidation_enabled and not (paused and paused["value"] == "1")
 
 
-class NightlyConsolidator:
-    def __init__(self, store, settings, diary, reflections, goals, extract_step, clock):
+class ConsolidationSchedule:
+    def __init__(self, store, settings, diary, reflections, clock):
         self.store, self.settings, self.clock = store, settings, clock
-        self.diary, self.reflections, self.goals = diary, reflections, goals
-        self.extract_step = extract_step
+        self.diary, self.reflections = diary, reflections
 
     def enabled(self):
         return enabled(self.store, self.settings, self.clock)
@@ -168,6 +167,12 @@ class NightlyConsolidator:
             'SELECT local_date, state, steps_json, last_error_code FROM consolidation_runs ORDER '
             'BY local_date DESC NULLS LAST LIMIT 7'
         )
+
+
+class NightlyConsolidator(ConsolidationSchedule):
+    def __init__(self, store, settings, diary, reflections, goals, extract_step, clock):
+        super().__init__(store, settings, diary, reflections, clock)
+        self.goals, self.extract_step = goals, extract_step
 
     def claim(self):
         s, now = self.store, self.clock()

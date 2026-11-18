@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from companion import __main__, api, owner_authority, paid_budget
+from companion import __main__, api, domain_runtime, owner_authority, paid_budget, retrieval
 from companion import core as core_module
 from companion.contracts import CoreError
 from companion.core import Core
@@ -28,6 +28,8 @@ from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
 from tests.native_continuous_support import until
 from tests.support import onebot_window as window_fixtures
+from tests.support.confirmed_memory import remember
+from tests.support.core_http import use_api_clock
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.live_image_input import options, png
 from tests.support.memory_control import grant
@@ -37,6 +39,7 @@ from tests.support.onebot_events import raw_event
 from tests.support.onebot_images import image_segment
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
+from tests.support.retrieval_query_reuse import Encoder
 
 
 def image_settings(core, tmp_path, monkeypatch):
@@ -144,7 +147,7 @@ def native_instances(core, monkeypatch):
         instances.append(instance)
         return instance
 
-    monkeypatch.setattr(api, "Core", construct)
+    use_api_clock(monkeypatch, core.clock, instances=instances)
     monkeypatch.setattr(core_module, "Core", construct)
     return instances
 
@@ -363,7 +366,7 @@ def test_api_image_client_closes_when_core_startup_fails(core, tmp_path, monkeyp
     def fail_core(*args, **kwargs):
         raise CoreError("SYNTHETIC_STARTUP_FAILURE", 503)
 
-    monkeypatch.setattr(api, "Core", fail_core)
+    monkeypatch.setattr(api, "DomainRuntime", fail_core)
     with pytest.raises(CoreError, match="SYNTHETIC_STARTUP_FAILURE"), TestClient(
         api.create_app(core.settings),
     ):
@@ -381,9 +384,38 @@ def test_exclusive_memory_control_opens_no_image_client_even_with_prior_image_se
     def forbid_full_core(*args, **kwargs):
         pytest.fail("Exclusive controls must use only the durable runtime")
 
-    monkeypatch.setattr(api, "Core", forbid_full_core)
+    monkeypatch.setattr(api, "DomainRuntime", forbid_full_core)
     app = api.create_app(core.settings, memory_control_grant=approval)
     with TestClient(app) as client:
         assert client.get("/internal/v1/health/live").status_code == 200
         assert client.get("/internal/v1/health/ready").status_code == 403
     assert clients == []
+
+
+def test_database_routes_stay_ready_when_semantic_index_is_unavailable(core, monkeypatch):
+    mid = remember(core, 1, "synthetic green tea", confirmed=True)
+    use_api_clock(monkeypatch, core.clock)
+
+    def unavailable(cache_dir):
+        raise OSError("synthetic missing model")
+
+    def unused(*args, **kwargs):
+        pytest.fail("database-only routes constructed a domain provider")
+
+    monkeypatch.setattr(retrieval, "encoder", unavailable)
+    for factory in ("ContentService", "MediaService", "Executive"):
+        monkeypatch.setattr(domain_runtime, factory, unused)
+    auth = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
+    body = {"query": "synthetic green tea", "requester_actor_id": "owner"}
+    with TestClient(api.create_app(core.settings)) as client:
+        assert client.get("/internal/v1/health/ready").status_code == 401
+        assert client.get("/internal/v1/health/ready", headers=auth).status_code == 200
+        failed = client.post("/internal/v1/memories/search", json=body, headers=auth)
+        assert failed.status_code == 503 and failed.json()["error"] == "MEMORY_INDEX_UNAVAILABLE"
+        assert client.get("/internal/v1/health/ready", headers=auth).status_code == 200
+        with pytest.raises(CoreError, match="MEMORY_INDEX_UNAVAILABLE"):
+            Core(core.settings, clock=core.clock)
+        monkeypatch.setattr(retrieval, "encoder", lambda cache_dir: Encoder())
+        found = client.post("/internal/v1/memories/search", json=body, headers=auth)
+        assert found.status_code == 200
+        assert mid in [row["memory_id"] for row in found.json()["items"]]

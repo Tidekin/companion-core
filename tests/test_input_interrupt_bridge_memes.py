@@ -17,6 +17,7 @@ from companion_onebot_bridge.owner_memes import MemePump
 from companion_onebot_bridge.profile_probe import ProfilePump
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame, until
+from tests.support.core_http import use_api_clock
 from tests.support.input_interrupt_bridge import model_response
 from tests.support.meme_runtime import RULE
 from tests.support.next_memes_catalog import metadata, png
@@ -46,7 +47,6 @@ async def meme_host(core, tmp_path, source, *, discovery=False, **kwargs):
 def test_selected_catalog_bytes_use_real_api_independent_worker_and_receipts(
     core, tmp_path, monkeypatch, outcome,
 ):
-    from companion import api
 
     calls, invoked, instances = [], [], []
     runtime = candidate = None
@@ -54,11 +54,6 @@ def test_selected_catalog_bytes_use_real_api_independent_worker_and_receipts(
     async def source(ws):
         await ws.send(frame(1, text="太棒了，成功了"))
         await ws.wait_closed()
-
-    def construct(*args, **kwargs):
-        instance = Core(*args, clock=core.clock, **kwargs)
-        instances.append(instance)
-        return instance
 
     def answer(request):
         calls.append(json.loads(request.content)["messages"])
@@ -74,7 +69,7 @@ def test_selected_catalog_bytes_use_real_api_independent_worker_and_receipts(
 
     async def scenario():
         nonlocal runtime, candidate
-        monkeypatch.setattr(api, "Core", construct)
+        use_api_clock(monkeypatch, core.clock, instances=instances)
         async with meme_host(core, tmp_path, source, independent_api=True,
             protocol_reply=protocol_reply) as (window, _, sends, _), httpx.AsyncClient(
             transport=httpx.MockTransport(answer),

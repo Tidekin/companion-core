@@ -37,23 +37,16 @@ from companion import (
     turn_taking,
     watch_ledger,
 )
-from companion.affect import NEUTRAL, AffectEngine
+from companion.affect import NEUTRAL
 from companion.commands import command_parts, is_memory_command
 from companion.config import Settings
 from companion.consolidation import NightlyConsolidator
-from companion.content import CONTEXT_RULES, ContentService
+from companion.content import CONTEXT_RULES
 from companion.contracts import Candidate, CoreError, MemorySelection
-from companion.diary import DiaryService, is_diary_command
-from companion.executive import Executive
-from companion.exploration import ExplorationService
+from companion.diary import is_diary_command
+from companion.domain_runtime import DomainRuntime
 from companion.expression import ExpressionEngine
-from companion.goals import GoalEngine
-from companion.growth import ExpressionLearning
 from companion.life import LifeService
-from companion.media import MediaService
-from companion.meme_core import MemeCaptionService
-from companion.memory import Memory
-from companion.memory_context import MemoryContext
 from companion.model import (
     MEMORY_RULES,
     PRINCIPLES,
@@ -62,14 +55,11 @@ from companion.model import (
     needs_source_rules,
     principles,
 )
-from companion.observation import ObservationService
 from companion.privacy import epoch, redact
 from companion.reading import ReadingService
-from companion.reflection import ReflectionService
 from companion.reply_segments import split_text
 from companion.retrieval import query_scope
-from companion.runtime import Runtime
-from companion.social import SocialPlanner, proactive_allowed
+from companion.social import proactive_allowed
 from companion.store import after, encode, uid, utcnow
 from companion.telemetry import emit, splits
 from companion.transport import (
@@ -81,7 +71,6 @@ from companion.transport import (
     recover_deliveries,
     set_proactive_paused,
 )
-from companion.voice_flow import VoiceFlow
 from companion.wake import WakePlanner
 from companion.worker_schedule import claim_scope
 
@@ -104,30 +93,15 @@ class _ReplyTurn:
         return self.authority is None or purpose in self.authority.policy.purposes
 
 
-class Core(Runtime):
+class Core(DomainRuntime):
     def __init__(self, settings, model=None, clock=utcnow):
-        super().__init__(settings, clock)
+        super().__init__(settings, model, clock)
         self._media_scans = {}
-        self.model = model
+        # Synthetic image provider transport; see image_generation.available.
+        self.image_transport = None
         try:
-            self.memory = Memory(self.store, settings, self.ledger)
-            self.memory_context = MemoryContext(self.memory)
-            from companion.mood import MoodService
-
-            self.mood = MoodService(self.memory, clock)
             if settings.memory_enabled:
                 self.memory.index.warmup()
-            self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
-            self.observations = ObservationService(self.store, settings, clock)
-            self.media = MediaService(self.store, settings, clock, self.observations)
-            # Synthetic image provider transport; see image_generation.available.
-            self.image_transport = None
-            self.affect = AffectEngine(self.store, settings, clock)
-            self.expression_learning = ExpressionLearning(self.store, settings, clock)
-            self.reflections = ReflectionService(
-                self.store, settings, model, self.diary.repo, self.ledger, clock
-            )
-            self.goals = GoalEngine(self.store, settings, self.ledger, clock)
             self.consolidation = NightlyConsolidator(
                 self.store, settings, self.diary, self.reflections, self.goals,
                 self.extract_step, clock,
@@ -136,27 +110,10 @@ class Core(Runtime):
             self.life = LifeService(
                 self.store, settings, self.goals, self.reflections, self.affect, clock,
             )
-            self.social = SocialPlanner(self.store, settings, clock)
-            from companion.life_topics import LifeTopics
-
-            self.life_topics = LifeTopics(self.store, settings, clock)
-            self.exploration = ExplorationService(
-                self.store, settings, self.observations, self.goals, self.social, clock,
-            )
-            from companion.bili_video import BiliVideoService
-
-            self.bili_video = BiliVideoService(self.store, settings, self.exploration, model, clock)
             self.reading = ReadingService(
                 self.store, settings, self.exploration, clock, video=self.bili_video,
             )
-            self.content = ContentService(
-                self.store, settings, self.observations, self.exploration.create, clock,
-                model=lambda: self.model, video=self.bili_video,
-            )
             self.expression = ExpressionEngine(self.store, settings, clock)
-            self.memes = MemeCaptionService(self.store, settings, lambda: self.model, clock)
-            self.voice = VoiceFlow(self.store, settings, clock)
-            self.executive = Executive(self.store, settings, clock)
         except BaseException:
             self.close()
             raise
@@ -1992,9 +1949,3 @@ class Core(Runtime):
         return bool(
             current and current["value"] == lease and json.loads(lease)["until"] > self.clock()
         )
-
-
-    def status(self):
-        from companion.ops_status import runtime_snapshot
-
-        return runtime_snapshot(self.store, self.settings, self.clock)
