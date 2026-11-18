@@ -10,6 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from companion import file_parser, file_parser_client, image_spool, qq_files
+from companion.content_rows import content_item_by_id
 from companion.contracts import CoreError
 from companion.file_evidence import DocumentEvidence
 from companion.file_evidence import PrivateFilesConfig as PrivateFilesConfig
@@ -620,23 +621,7 @@ async def run_file_once(service, *, config=None, parse=None):
     async def check_dispatch():
         # SQLite and authority checks stay on the owning event loop, not parser threads.
         with _transaction(s):
-            current = s.one(
-                "SELECT content_items.item_id AS item_id, content_items.owner_event_id "
-                "AS owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-                "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-                "target_url, content_items.read_request_id AS read_request_id, content_items.state "
-                "AS state, content_items.media_sha256 AS media_sha256, content_items.fingerprint "
-                "AS fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-                "usage_request_id, content_items.output_event_id AS output_event_id, "
-                "content_items.lease_token AS lease_token, content_items.lease_until AS "
-                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
-                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
-                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
-                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
-                "AS content_items WHERE content_items.item_id = %s",
-                (row["item_id"],),
-            )
+            current = content_item_by_id(s, row["item_id"])
             if (
                 cancelled.is_set()
                 or not current
@@ -718,23 +703,7 @@ async def run_file_once(service, *, config=None, parse=None):
     except asyncio.CancelledError:
         cancelled.set()
         with _transaction(s):
-            current = s.one(
-                "SELECT content_items.item_id AS item_id, content_items.owner_event_id "
-                "AS owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-                "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-                "target_url, content_items.read_request_id AS read_request_id, content_items.state "
-                "AS state, content_items.media_sha256 AS media_sha256, content_items.fingerprint "
-                "AS fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-                "usage_request_id, content_items.output_event_id AS output_event_id, "
-                "content_items.lease_token AS lease_token, content_items.lease_until AS "
-                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
-                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
-                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
-                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
-                "AS content_items WHERE content_items.item_id = %s",
-                (row["item_id"],),
-            )
+            current = content_item_by_id(s, row["item_id"])
             if current and current["lease_token"] == token:
                 _failed(service, current, "PRIVATE_FILE_PROCESSOR_CANCELLED", state="UNKNOWN")
         raise
@@ -743,23 +712,7 @@ async def run_file_once(service, *, config=None, parse=None):
     finally:
         cancelled.set()
     with _transaction(s):
-        current = s.one(
-            "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
-            "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-            "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-            "target_url, content_items.read_request_id AS read_request_id, content_items.state AS "
-            "state, content_items.media_sha256 AS media_sha256, content_items.fingerprint AS "
-            "fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-            "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-            "usage_request_id, content_items.output_event_id AS output_event_id, "
-            "content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, "
-            "content_items.deadline AS deadline, content_items.error_code AS error_code, "
-            "content_items.redacted AS redacted, content_items.created_at AS created_at, "
-            "content_items.started_at AS started_at, content_items.updated_at AS updated_at, "
-            "content_items.attachment_json AS attachment_json FROM content_items AS content_items "
-            "WHERE content_items.item_id = %s",
-            (row["item_id"],),
-        )
+        current = content_item_by_id(s, row["item_id"])
         if (
             not current
             or current["state"] != "RUNNING"

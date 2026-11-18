@@ -26,6 +26,7 @@ from companion import (
     qq_rich,
     video_input,
 )
+from companion.content_rows import content_item_by_id
 from companion.contracts import CoreError
 from companion.image_understanding import NARRATIVE_RULES
 from companion.media_config import MediaEndpoint
@@ -1078,23 +1079,7 @@ class ContentService(ContentIntake):
         day, _ = self._periods()
         with s.transaction():
             self._source(row["owner_event_id"], upload=row["kind"] == "qq_image")
-            row = s.one(
-                "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
-                "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-                "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-                "target_url, content_items.read_request_id AS read_request_id, content_items.state "
-                "AS state, content_items.media_sha256 AS media_sha256, content_items.fingerprint "
-                "AS fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-                "usage_request_id, content_items.output_event_id AS output_event_id, "
-                "content_items.lease_token AS lease_token, content_items.lease_until AS "
-                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
-                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
-                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
-                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
-                "AS content_items WHERE content_items.item_id = %s",
-                (row["item_id"],),
-            )
+            row = content_item_by_id(s, row["item_id"])
             if row["redacted"] or row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
             if row["fingerprint"] and row["fingerprint"] != fingerprint:
@@ -1168,23 +1153,7 @@ class ContentService(ContentIntake):
                     row["item_id"],
                 ),
             )
-            return s.one(
-                "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
-                "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-                "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-                "target_url, content_items.read_request_id AS read_request_id, content_items.state "
-                "AS state, content_items.media_sha256 AS media_sha256, content_items.fingerprint "
-                "AS fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-                "usage_request_id, content_items.output_event_id AS output_event_id, "
-                "content_items.lease_token AS lease_token, content_items.lease_until AS "
-                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
-                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
-                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
-                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
-                "AS content_items WHERE content_items.item_id = %s",
-                (row["item_id"],),
-            ), False
+            return content_item_by_id(s, row["item_id"]), False
 
     def _record_image(self, row, text, *, title, model, source_event_ids):
         """Persist validated image evidence inside the caller's write transaction."""
@@ -1377,26 +1346,7 @@ class ContentService(ContentIntake):
                         row["owner_event_id"],
                     ),
                 )
-                row = s.one(
-                    "SELECT content_items.item_id AS item_id, content_items.owner_event_id "
-                    "AS owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-                    "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-                    "target_url, content_items.read_request_id AS read_request_id, "
-                    "content_items.state AS state, content_items.media_sha256 AS media_sha256, "
-                    "content_items.fingerprint AS fingerprint, "
-                    "content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                    "content_items.reserved_bytes AS reserved_bytes, "
-                    "content_items.usage_request_id AS usage_request_id, "
-                    "content_items.output_event_id AS output_event_id, content_items.lease_token "
-                    "AS lease_token, content_items.lease_until AS lease_until, "
-                    "content_items.deadline AS deadline, content_items.error_code AS error_code, "
-                    "content_items.redacted AS redacted, content_items.created_at AS created_at, "
-                    "content_items.started_at AS started_at, content_items.updated_at AS "
-                    "updated_at, content_items.attachment_json AS attachment_json FROM "
-                    "content_items AS content_items WHERE content_items.item_id = "
-                    "%s",
-                    (row["item_id"],),
-                )
+                row = content_item_by_id(s, row["item_id"])
                 qq_images.freeze(s, cfg, approval, clock, row, messages, proofs)
             model = self.model()
             budget.reserve(
@@ -1549,26 +1499,7 @@ class ContentService(ContentIntake):
                 text = text.replace(secret, "[REDACTED]")
             with self.store.transaction():
                 self._source(row["owner_event_id"])
-                current = self.store.one(
-                    "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
-                    "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-                    "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-                    "target_url, content_items.read_request_id AS read_request_id, "
-                    "content_items.state AS state, content_items.media_sha256 AS media_sha256, "
-                    "content_items.fingerprint AS fingerprint, "
-                    "content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                    "content_items.reserved_bytes AS reserved_bytes, "
-                    "content_items.usage_request_id AS usage_request_id, "
-                    "content_items.output_event_id AS output_event_id, content_items.lease_token "
-                    "AS lease_token, content_items.lease_until AS lease_until, "
-                    "content_items.deadline AS deadline, content_items.error_code AS error_code, "
-                    "content_items.redacted AS redacted, content_items.created_at AS created_at, "
-                    "content_items.started_at AS started_at, content_items.updated_at AS "
-                    "updated_at, content_items.attachment_json AS attachment_json FROM "
-                    "content_items AS content_items WHERE content_items.item_id = "
-                    "%s",
-                    (row["item_id"],),
-                )
+                current = content_item_by_id(self.store, row["item_id"])
                 if (
                     current["redacted"]
                     or current["state"] != "RUNNING"
@@ -1714,24 +1645,7 @@ class ContentService(ContentIntake):
                     row["item_id"],
                 ),
             )
-        claimed = self.store.one(
-            "SELECT content_items.item_id AS item_id, "
-            "content_items.owner_event_id AS owner_event_id, content_items.kind AS kind, "
-            "content_items.slot AS slot, content_items.source_event_id AS source_event_id, "
-            "content_items.target_url AS target_url, content_items.read_request_id AS "
-            "read_request_id, content_items.state AS state, content_items.media_sha256 AS "
-            "media_sha256, content_items.fingerprint AS fingerprint, "
-            "content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-            "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-            "usage_request_id, content_items.output_event_id AS output_event_id, "
-            "content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, "
-            "content_items.deadline AS deadline, content_items.error_code AS error_code, "
-            "content_items.redacted AS redacted, content_items.created_at AS created_at, "
-            "content_items.started_at AS started_at, content_items.updated_at AS updated_at, "
-            "content_items.attachment_json AS attachment_json FROM content_items AS content_items "
-            "WHERE content_items.item_id = %s",
-            (row["item_id"],),
-        )
+        claimed = content_item_by_id(self.store, row["item_id"])
         maximum = min(row["reserved_bytes"], self.options.max_image_bytes)
         if qq_images.enabled(self.settings):
             maximum = min(maximum, self.settings.paid_model.image_input.max_bytes_per_image)

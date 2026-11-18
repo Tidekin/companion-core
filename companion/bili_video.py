@@ -38,6 +38,7 @@ from companion.bili_video_protocol import (
     selection_from_wire,
     target_from_wire,
 )
+from companion.content_rows import content_item_by_id
 from companion.contracts import CoreError
 from companion.model_records import usage_by_request_id
 from companion.observation import ObservationEvent, ObservationPayload, expired_sources
@@ -287,23 +288,7 @@ def _current(
     store, settings, clock, row, current_request=None, *, allow_terminal=False, model_job_id=None
 ):
     config, window, view = _policy(store, settings, clock, current_request)
-    item = store.one(
-        "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
-        "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-        "content_items.source_event_id AS source_event_id, content_items.target_url AS target_url, "
-        "content_items.read_request_id AS read_request_id, content_items.state AS state, "
-        "content_items.media_sha256 AS media_sha256, content_items.fingerprint AS fingerprint, "
-        "content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-        "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-        "usage_request_id, content_items.output_event_id AS output_event_id, "
-        "content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, "
-        "content_items.deadline AS deadline, content_items.error_code AS error_code, "
-        "content_items.redacted AS redacted, content_items.created_at AS created_at, "
-        "content_items.started_at AS started_at, content_items.updated_at AS updated_at, "
-        "content_items.attachment_json AS attachment_json FROM content_items AS content_items "
-        "WHERE content_items.item_id = %s",
-        (row["item_id"],),
-    )
+    item = content_item_by_id(store, row["item_id"])
     if (
         not item
         or item["redacted"]
@@ -615,23 +600,7 @@ class BiliVideoService:
                     raise CoreError("IDEMPOTENCY_CONFLICT", 409)
                 return previous["request_id"]
             config, window, view = _policy(s, self.settings, self.clock)
-            item = s.one(
-                "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
-                "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
-                "content_items.source_event_id AS source_event_id, content_items.target_url AS "
-                "target_url, content_items.read_request_id AS read_request_id, content_items.state "
-                "AS state, content_items.media_sha256 AS media_sha256, content_items.fingerprint "
-                "AS fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-                "usage_request_id, content_items.output_event_id AS output_event_id, "
-                "content_items.lease_token AS lease_token, content_items.lease_until AS "
-                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
-                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
-                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
-                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
-                "AS content_items WHERE content_items.item_id = %s",
-                (item_id,),
-            )
+            item = content_item_by_id(s, item_id)
             if (
                 not item
                 or item["redacted"]
@@ -1272,24 +1241,7 @@ class BiliVideoService:
             from companion.runtime_config import video_settings
 
             model_id = uid("model")
-            content_item = s.one(
-                "SELECT content_items.item_id AS item_id, "
-                "content_items.owner_event_id AS owner_event_id, content_items.kind AS kind, "
-                "content_items.slot AS slot, content_items.source_event_id AS source_event_id, "
-                "content_items.target_url AS target_url, content_items.read_request_id AS "
-                "read_request_id, content_items.state AS state, content_items.media_sha256 AS "
-                "media_sha256, content_items.fingerprint AS fingerprint, "
-                "content_items.captured_privacy_epoch AS captured_privacy_epoch, "
-                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
-                "usage_request_id, content_items.output_event_id AS output_event_id, "
-                "content_items.lease_token AS lease_token, content_items.lease_until AS "
-                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
-                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
-                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
-                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
-                "AS content_items WHERE content_items.item_id = %s",
-                (row["item_id"],),
-            )
+            content_item = content_item_by_id(s, row["item_id"])
             model_job_id = _owner(
                 s, self.settings, content_item, self.clock, request_id=request_id
             )["job_id"]
