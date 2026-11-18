@@ -13,6 +13,7 @@ from companion import (
     transport,
 )
 from companion.contracts import CoreError
+from companion.outbox import message_by_id
 from companion.privacy import epoch
 from companion.private_life import event_digest
 from companion.store import encode
@@ -345,21 +346,7 @@ def record_failure_notice(store, settings, clock, job_id, message_id):
         raise RuntimeError("owner delivery recording requires the enqueue transaction")
     job = _job(store, job_id)
     view = _failure_view(store, settings, clock, job)
-    row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
-        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
-        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
-        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
-        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
-        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
-        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
-        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
-        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
-        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
-        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
-        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
-        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
-        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id = '
-        '%s', (message_id,))
+    row = message_by_id(store, message_id)
     if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
         raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
     material = _failure_material(store, row, job, view)
@@ -434,21 +421,7 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
                    for item in envelopes.values())):
             raise CoreError("OWNER_DELIVERY_GROUP_CHANGED", 403)
     for message_id in message_ids:
-        row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
-            'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
-            'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
-            'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
-            'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
-            'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
-            'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
-            'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
-            'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at '
-            'AS next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
-            'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
-            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
-            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
-            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id '
-            '= %s', (message_id,))
+        row = message_by_id(store, message_id)
         if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
             raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
         material = _material(store, row, job, view, requests, context_hashes,
@@ -555,21 +528,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
 
 def asset_lease(store, clock, message_id, body, permission):
     """Check the asset request inside the caller's authorized delivery transaction."""
-    row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
-        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
-        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
-        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
-        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
-        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
-        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
-        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
-        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
-        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
-        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
-        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
-        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
-        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id = '
-        '%s', (message_id,))
+    row = message_by_id(store, message_id)
     if (
         row["state"] not in {"LEASED", "SENDING"}
         or not row["lease_until"]
