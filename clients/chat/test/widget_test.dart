@@ -39,7 +39,10 @@ class UiRepository implements ChatRepository {
   }
 
   @override
-  Future<List<ChatTurn>> turns(String botId) async => [];
+  Future<TurnWindow> readTurnWindow(
+    String botId, {
+    TurnWindow? previous,
+  }) async => TurnWindow.empty(botId);
   @override
   Future<List<PendingMessage>> queue(String botId) async =>
       pending[botId] ?? [];
