@@ -172,6 +172,15 @@ void main() {
         find.byKey(const ValueKey('compose_a')),
         'draft A',
       );
+      final editor = find.byKey(const ValueKey('compose_a'));
+      final controller = tester.widget<TextField>(editor).controller;
+      await tester.tap(find.byKey(const ValueKey('profile_a')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(editor).controller, same(controller));
+      expect(controller!.text, 'draft A');
+      await tester.tap(find.byKey(const ValueKey('profile_a')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(editor).controller, same(controller));
       await tester.tap(find.byKey(const ValueKey('bot_b')));
       await tester.pumpAndSettle();
       expect(find.text('draft A'), findsNothing);

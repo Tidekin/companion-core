@@ -325,3 +325,39 @@ Future<T?> showWarmSheet<T>(BuildContext context, WidgetBuilder builder) =>
             ),
       builder: builder,
     );
+
+/// 120 ms press feedback (scale to 0.97), disabled under reduced motion.
+class Pressable extends StatefulWidget {
+  const Pressable({super.key, required this.child, this.onPressed});
+  final Widget child;
+  final VoidCallback? onPressed;
+  @override
+  State<Pressable> createState() => _PressableState();
+}
+
+class _PressableState extends State<Pressable> {
+  bool down = false;
+  @override
+  Widget build(BuildContext context) {
+    final scale = down && !Motion.reduced(context) ? 0.97 : 1.0;
+    return MouseRegion(
+      cursor: widget.onPressed == null
+          ? SystemMouseCursors.basic
+          : SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: widget.onPressed == null
+            ? null
+            : (_) => setState(() => down = true),
+        onTapCancel: () => setState(() => down = false),
+        onTapUp: (_) => setState(() => down = false),
+        onTap: widget.onPressed,
+        child: AnimatedScale(
+          scale: scale,
+          duration: Motion.press,
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}

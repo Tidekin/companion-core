@@ -13,9 +13,12 @@ import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
 import 'attachments.dart';
-import 'stickers.dart';
+import 'composer.dart';
+
 import 'quote.dart';
 import 'typing.dart';
+
+export 'theme.dart' show Pressable;
 
 const _wideBreakpoint = 860.0;
 
@@ -320,42 +323,6 @@ class _RailItem extends StatelessWidget {
       selected: selected,
       label: tooltip ?? label,
       child: tooltip == null ? item : Tooltip(message: tooltip!, child: item),
-    );
-  }
-}
-
-/// 120 ms press feedback (scale to 0.97), disabled under reduced motion.
-class Pressable extends StatefulWidget {
-  const Pressable({super.key, required this.child, this.onPressed});
-  final Widget child;
-  final VoidCallback? onPressed;
-  @override
-  State<Pressable> createState() => _PressableState();
-}
-
-class _PressableState extends State<Pressable> {
-  bool down = false;
-  @override
-  Widget build(BuildContext context) {
-    final scale = down && !Motion.reduced(context) ? 0.97 : 1.0;
-    return MouseRegion(
-      cursor: widget.onPressed == null
-          ? SystemMouseCursors.basic
-          : SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapDown: widget.onPressed == null
-            ? null
-            : (_) => setState(() => down = true),
-        onTapCancel: () => setState(() => down = false),
-        onTapUp: (_) => setState(() => down = false),
-        onTap: widget.onPressed,
-        child: AnimatedScale(
-          scale: scale,
-          duration: Motion.press,
-          child: widget.child,
-        ),
-      ),
     );
   }
 }
@@ -744,17 +711,10 @@ class ChatPane extends ConsumerStatefulWidget {
 }
 
 class _ChatPaneState extends ConsumerState<ChatPane> {
-  final input = TextEditingController();
+  final composerKey = GlobalKey();
   final scroll = ScrollController(keepScrollOffset: false);
   // Lets a quote jump to its original turn.
   final turnKeys = <String, GlobalKey>{};
-  // Images picked for the next message, in order.
-  final attachments = <OutgoingImage>[];
-  bool stickersOpen = false;
-  Timer? draftTimer;
-  String lastDraft = '';
-  bool sending = false;
-  bool initialized = false;
   bool panelOpen = false;
   // Items present when the conversation first renders, or already shown, never
   // replay their entrance when rebuilt or scrolled back into view.
@@ -765,12 +725,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   void initState() {
     super.initState();
     session = ref.read(registryProvider).session(widget.bot);
-    final active = session;
-    active.loaded.then((_) {
-      if (!mounted) return;
-      input.text = lastDraft = active.draft;
-      initialized = true;
-    });
   }
 
   /// Brings a quoted turn into view, first roughly if it is not built yet.
@@ -802,37 +756,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (mounted) await reveal();
   }
 
-  Future<void> attach() async {
-    try {
-      final picked = await pickChatImages(
-        remaining: maxImagesPerMessage - attachments.length,
-        alreadyBytes: attachments.fold(
-          0,
-          (sum, image) => sum + image.bytes.length,
-        ),
-      );
-      if (picked.isNotEmpty && mounted) {
-        setState(() => attachments.addAll(picked));
-      }
-    } on AttachPickError catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error.message)));
-      }
-    }
-  }
-
-  /// A favorite goes out alone, like tapping a sticker in QQ; the draft stays.
-  Future<void> sendSticker(OutgoingImage sticker) async {
-    if (sending) return;
-    setState(() => sending = true);
-    try {
-      await session.send('', images: [sticker]);
-    } finally {
-      if (mounted) setState(() => sending = false);
-    }
-  }
-
   bool entering(String id) {
     final seen = shown;
     if (seen == null || seen.contains(id)) return false;
@@ -840,47 +763,21 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     return true;
   }
 
-  Future<void> send() async {
-    final text = input.text;
-    if (sending ||
-        text.trim().isEmpty && attachments.isEmpty ||
-        input.value.composing.isValid && !input.value.composing.isCollapsed) {
-      return;
-    }
-    setState(() => sending = true);
-    final active = session;
-    try {
-      await active.send(text, images: List.of(attachments));
-      if (mounted) setState(attachments.clear);
-      if (lastDraft == text) {
-        lastDraft = '';
-        if (mounted) input.clear();
+  void scrollToLatest() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && scroll.hasClients) {
+        final end = scroll.position.minScrollExtent;
+        if (Motion.reduced(context)) {
+          scroll.jumpTo(end);
+        } else {
+          scroll.animateTo(
+            end,
+            duration: Motion.message,
+            curve: Curves.easeOut,
+          );
+        }
       }
-      await active.setDraft(lastDraft);
-      if (mounted) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (scroll.hasClients) {
-            final end = scroll.position.minScrollExtent;
-            if (Motion.reduced(context)) {
-              scroll.jumpTo(end);
-            } else {
-              scroll.animateTo(
-                end,
-                duration: Motion.message,
-                curve: Curves.easeOut,
-              );
-            }
-          }
-        });
-      }
-    } on BackendError catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error.code)));
-      }
-    } finally {
-      if (mounted) setState(() => sending = false);
-    }
+    });
   }
 
   Future<void> connect() async {
@@ -1274,131 +1171,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 MomentPreviewCard(bot: widget.bot),
-                if (attachments.isNotEmpty)
-                  AttachmentStrip(
-                    key: ValueKey('attachments_${widget.bot.id}'),
-                    images: attachments,
-                    onRemove: (index) =>
-                        setState(() => attachments.removeAt(index)),
-                  ),
-                // QQ layout: the input and 发送 on one row, the tool icons below.
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        decoration: BoxDecoration(
-                          color: Warm.composer,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Warm.bubbleBorder),
-                        ),
-                        child: CallbackShortcuts(
-                          bindings: {
-                            const SingleActivator(
-                              LogicalKeyboardKey.enter,
-                              control: true,
-                            ): send,
-                          },
-                          child: TextField(
-                            key: ValueKey('compose_${widget.bot.id}'),
-                            onTap: () {
-                              if (stickersOpen) {
-                                setState(() => stickersOpen = false);
-                              }
-                            },
-                            controller: input,
-                            minLines: 1,
-                            maxLines: 5,
-                            textInputAction: TextInputAction.newline,
-                            style: const TextStyle(
-                              fontSize: 15,
-                              height: 1.5,
-                              color: Color(0xFF51473E),
-                            ),
-                            decoration: const InputDecoration(
-                              hintText: '写点什么…',
-                              filled: false,
-                              border: InputBorder.none,
-                              enabledBorder: InputBorder.none,
-                              focusedBorder: InputBorder.none,
-                              isCollapsed: true,
-                              contentPadding: EdgeInsets.symmetric(
-                                vertical: 12,
-                              ),
-                            ),
-                            onChanged: (text) {
-                              lastDraft = text;
-                              draftTimer?.cancel();
-                              final active = session;
-                              draftTimer = Timer(
-                                const Duration(milliseconds: 250),
-                                () => active.setDraft(text),
-                              );
-                            },
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _SendButton(
-                      key: ValueKey('send_${widget.bot.id}'),
-                      onPressed: !state.ready || sending ? null : send,
-                    ),
-                  ],
+                ChatComposer(
+                  key: composerKey,
+                  session: session,
+                  ready: state.ready,
+                  compact: compact,
+                  onSent: scrollToLatest,
                 ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      IconButton(
-                        key: ValueKey('attach_${widget.bot.id}'),
-                        tooltip: '添加图片',
-                        color: Warm.textSoft,
-                        iconSize: 28,
-                        onPressed:
-                            !state.ready ||
-                                sending ||
-                                attachments.length >= maxImagesPerMessage
-                            ? null
-                            : attach,
-                        icon: const Icon(Icons.image_outlined),
-                      ),
-                      IconButton(
-                        key: ValueKey('stickers_${widget.bot.id}'),
-                        tooltip: stickersOpen ? '收起表情' : '表情',
-                        color: stickersOpen ? Warm.accent : Warm.textSoft,
-                        iconSize: 28,
-                        onPressed: () {
-                          // Like QQ: the panel takes the keyboard's place.
-                          if (!stickersOpen) FocusScope.of(context).unfocus();
-                          setState(() => stickersOpen = !stickersOpen);
-                        },
-                        icon: const Icon(
-                          Icons.sentiment_satisfied_alt_outlined,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (stickersOpen)
-                  StickerPanel(
-                    onEmoji: (emoji) {
-                      insertAtCaret(input, emoji);
-                      lastDraft = input.text;
-                      unawaited(session.setDraft(input.text));
-                    },
-                    onSticker: state.ready && !sending ? sendSticker : null,
-                  ),
-                if (!compact)
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(18, 6, 0, 0),
-                    child: Text(
-                      'Ctrl + Enter 发送 · Enter 换行',
-                      style: TextStyle(fontSize: 10, color: Color(0xFFA39A91)),
-                    ),
-                  ),
               ],
             ),
           ),
@@ -1431,50 +1210,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   @override
   void dispose() {
-    draftTimer?.cancel();
-    if (initialized) unawaited(session.setDraft(lastDraft));
-    input.dispose();
     scroll.dispose();
     super.dispose();
   }
-}
-
-class _SendButton extends StatelessWidget {
-  const _SendButton({super.key, this.onPressed});
-  final VoidCallback? onPressed;
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    enabled: onPressed != null,
-    label: '发送',
-    child: Tooltip(
-      message: '发送',
-      child: Pressable(
-        onPressed: onPressed,
-        child: AnimatedOpacity(
-          opacity: onPressed == null ? 0.5 : 1,
-          duration: Motion.press,
-          child: Container(
-            height: 44,
-            padding: const EdgeInsets.symmetric(horizontal: 18),
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: Warm.accent,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Text(
-              '发送',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
 }
 
 class _Meta extends StatelessWidget {
