@@ -15,6 +15,7 @@ from companion.memory_context import (
     MemoryContext,
     MemorySources,
     check_version,
+    memory_by_id,
     read_version,
 )
 from companion.privacy import (
@@ -884,15 +885,7 @@ class Memory:
             if (not operation or operation["state"] != "STARTED"
                 or operation["request_sha256"] != request_hash):
                 raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
-            before = s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
-                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
-                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
-                'AS importance, memories.privacy_scope AS privacy_scope, '
-                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
-                'memories AS memories WHERE memories.memory_id = %s', (memory_id,))
+            before = memory_by_id(s, memory_id)
             if not before:
                 raise CoreError("MEMORY_NOT_FOUND", 404)
             if decision == "delete":
@@ -907,15 +900,7 @@ class Memory:
             result = self.decide(memory_id, decision, now, corrected)
             if decision == "forget":
                 return result
-            current = s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
-                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
-                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
-                'AS importance, memories.privacy_scope AS privacy_scope, '
-                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
-                'memories AS memories WHERE memories.memory_id = %s', (result["memory_id"],))
+            current = memory_by_id(s, result["memory_id"])
             roots.update(e["event_id"] for e in s.rows(
                 'SELECT event_id FROM memory_evidence WHERE memory_id = %s', (result["memory_id"],),
             ))
@@ -964,15 +949,7 @@ class Memory:
         self.require_owner("owner")
         s = self.store
         with self._write_scope():
-            old = s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
-                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
-                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
-                'AS importance, memories.privacy_scope AS privacy_scope, '
-                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
-                'memories AS memories WHERE memories.memory_id = %s', (memory_id,))
+            old = memory_by_id(s, memory_id)
             if not old:
                 raise CoreError("MEMORY_NOT_FOUND", 404)
             if evidence_event_id is not None:

@@ -26,6 +26,15 @@ EVENT_COLUMNS = (
 )
 
 
+def memory_by_id(store, memory_id):
+    return store.one(
+        "SELECT memory_id, subject, kind, content, status, origin, confidence, importance, "
+        "privacy_scope, supersedes_memory_id, created_at, updated_at, valid_from, valid_to, "
+        "last_reviewed_at, fact_key, needs_review FROM memories WHERE memory_id = %s",
+        (memory_id,),
+    )
+
+
 def read_version(memory, *, source_view=None):
     # Reuse the same Ledger/DB custody check as the real private context boundary.
     from companion.live_text import ERASURE_PROJECTION_SQL, _ledger_custody

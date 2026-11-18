@@ -9,7 +9,7 @@ from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.events import event_by_id
 from companion.memory import Memory
-from companion.memory_context import MEMORY_FIELDS, MemoryContext, MemorySources
+from companion.memory_context import MEMORY_FIELDS, MemoryContext, MemorySources, memory_by_id
 from companion.privacy import ErasureLedger, redact, sensitive
 from companion.store import encode
 
@@ -248,18 +248,7 @@ def material(store, settings, now, memory_ids):
     memory.require_owner("owner")
     result = []
     for memory_id in sorted(memory_ids):
-        row = store.one(
-            "SELECT memories.memory_id AS memory_id, memories.subject AS subject, "
-            "memories.kind AS kind, memories.content AS content, memories.status AS status, "
-            "memories.origin AS origin, memories.confidence AS confidence, memories.importance AS "
-            "importance, memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS "
-            "supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS "
-            "updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, "
-            "memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, "
-            "memories.needs_review AS needs_review FROM memories AS memories WHERE "
-            "memories.memory_id = %s",
-            (memory_id,),
-        )
+        row = memory_by_id(store, memory_id)
         if (
             not row
             or row["status"] != "CONFIRMED"

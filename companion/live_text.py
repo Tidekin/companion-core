@@ -32,6 +32,7 @@ from companion import (
 from companion.contracts import CoreError, StrictModel
 from companion.events import event_by_id
 from companion.expression import MemeOffer
+from companion.memory_context import memory_by_id
 from companion.outbox import message_by_id
 from companion.privacy import ErasureLedger, epoch
 from companion.qq_rich import input_digest as _input_digest
@@ -1600,18 +1601,7 @@ def history_sources(store, settings, clock, job):
 
 def memory_fact(store, settings, clock, memory_id):
     """A native owner fact's approval pins, never a substitute for semantic retrieval."""
-    row = store.one(
-        "SELECT memories.memory_id AS memory_id, memories.subject AS subject, "
-        "memories.kind AS kind, memories.content AS content, memories.status AS status, "
-        "memories.origin AS origin, memories.confidence AS confidence, memories.importance AS "
-        "importance, memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS "
-        "supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS "
-        "updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, "
-        "memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, "
-        "memories.needs_review AS needs_review FROM memories AS memories WHERE memories.memory_id "
-        "= %s",
-        (memory_id,),
-    )
+    row = memory_by_id(store, memory_id)
     evidence = store.rows(
         "SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source AS source, "
         "e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, e.actor_id AS "

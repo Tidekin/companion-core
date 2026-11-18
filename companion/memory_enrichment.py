@@ -5,7 +5,7 @@ import json
 
 from companion import retrieval_work
 from companion.contracts import CoreError
-from companion.memory_context import MemoryContext
+from companion.memory_context import MemoryContext, memory_by_id
 from companion.privacy import redact, sensitive
 from companion.store import encode
 
@@ -225,15 +225,7 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now, *
     for candidate, memory_id in zip(candidates, memory_ids, strict=True):
         if candidate.salience is None:
             continue
-        row = store.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
-            'memories.kind AS kind, memories.content AS content, memories.status AS status, '
-            'memories.origin AS origin, memories.confidence AS confidence, memories.importance AS '
-            'importance, memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS '
-            'supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS '
-            'updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
-            'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, '
-            'memories.needs_review AS needs_review FROM memories AS memories WHERE '
-            'memories.memory_id = %s', (memory_id,))
+        row = memory_by_id(store, memory_id)
         if not store.one('SELECT 1 FROM memory_evidence WHERE memory_id = %s AND event_id = %s AND '
             'polarity = 1', (memory_id, candidate.evidence_event_id)):
             raise CoreError("MEMORY_MATCH_STALE", 409)
