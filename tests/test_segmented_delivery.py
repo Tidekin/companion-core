@@ -282,6 +282,33 @@ def test_core_splits_one_model_reply_but_preserves_default_single_reply(core):
     assert len(rows) == 1 and rows[0]["delivery_key"] == "reply:evt_test_2:v1"
 
 
+def test_failure_after_enqueue_rolls_back_reply_and_job_completion_together(core, monkeypatch):
+    from companion import native_delivery
+
+    core.settings.segmented_reply = SegmentedReplyConfig(min_chars=4)
+    job = ingest(core, text="".join(PARTS))
+    attempted = []
+
+    def fail_publication(store, settings, clock, message_ids):
+        assert store.in_write_transaction
+        assert store.one("SELECT state FROM jobs WHERE job_id=%s", (job["job_id"],)) == {
+            "state": "SUCCEEDED",
+        }
+        attempted.extend(message_ids)
+        raise RuntimeError("synthetic publication failure")
+
+    monkeypatch.setattr(native_delivery, "publish", fail_publication)
+    assert run(core.run_once())
+    assert len(attempted) > 1
+    assert not core.store.rows("SELECT 1 FROM outbox WHERE message_id=ANY(%s)", (attempted,))
+    assert core.store.one("SELECT state FROM jobs WHERE job_id=%s", (job["job_id"],)) == {
+        "state": "FAILED",
+    }
+    assert core.store.rows("SELECT state FROM model_usage WHERE job_id=%s", (job["job_id"],)) == [
+        {"state": "SETTLED"},
+    ]
+
+
 def test_new_input_accepted_during_generation_prevents_stale_segment_group(core):
     core.settings.segmented_reply = SegmentedReplyConfig(min_chars=4)
     ingest(core, text="".join(PARTS))
