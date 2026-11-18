@@ -49,7 +49,7 @@ from companion.contracts import (
     StrictModel,
 )
 from companion.core import Core
-from companion.diary import DiaryCorrection, DiaryMode
+from companion.diary import DiaryCorrection, DiaryMode, DiaryService
 from companion.evaluation import MAX_HTTP_BODY_BYTES
 from companion.exploration import METERED_READS_SQL
 from companion.life_protocol import LifeConsumeRequest, TopicClosure
@@ -255,19 +255,18 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         if not hmac.compare_digest(authorization.encode(), expected.encode()):
             raise HTTPException(401, "UNAUTHORIZED")
 
-    async def diary_admin(authorization: str = Header(default="")):
-        token = settings.diary_admin_token.get_secret_value()
+    def require_admin(authorization, credential):
+        token = credential.get_secret_value()
         if not token or not hmac.compare_digest(
             authorization.encode(), ("Bearer " + token).encode()
         ):
             raise HTTPException(401, "UNAUTHORIZED")
 
+    async def diary_admin(authorization: str = Header(default="")):
+        require_admin(authorization, settings.diary_admin_token)
+
     async def control_admin(authorization: str = Header(default="")):
-        token = settings.control_token.get_secret_value()
-        if not token or not hmac.compare_digest(
-            authorization.encode(), ("Bearer " + token).encode()
-        ):
-            raise HTTPException(401, "UNAUTHORIZED")
+        require_admin(authorization, settings.control_token)
 
     async def observation_adapter(adapter_id: str, authorization: str = Header(default="")):
         adapter = settings.observation_adapters.get(adapter_id)
@@ -674,13 +673,18 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         return {"items": app.state.core.observations.recent()}
 
     @app.post("/internal/v2/observations/{event_id}/forget", dependencies=control_auth)
-    async def forget_observation(event_id: str):
-        core = app.state.core
-        if not core.store.one('SELECT 1 FROM observations WHERE event_id = %s', (event_id,)):
-            raise CoreError("OBSERVATION_NOT_FOUND", 404)
-        with core.store.transaction(control_write=True):
-            core.ledger.expire_events(core.store, [event_id], core.clock())
-        return {"event_id": event_id, "status": "REDACTED"}
+    async def forget_observation(event_id: str, request: Request):
+        clock, authorization = app.state.core.clock, request.headers.get("authorization", "")
+
+        def forget(store):
+            with store.transaction(control_write=True):
+                require_admin(authorization, settings.control_token)
+                if not store.one("SELECT 1 FROM observations WHERE event_id = %s", (event_id,)):
+                    raise CoreError("OBSERVATION_NOT_FOUND", 404)
+                ErasureLedger(settings.erasure_ledger).expire_events(store, [event_id], clock())
+            return {"event_id": event_id, "status": "REDACTED"}
+
+        return await app.state.api_store.run(forget)
 
     @app.post("/internal/v2/consents", dependencies=control_auth)
     async def grant_consent(body: ConsentRequest):
@@ -737,8 +741,18 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         return {"local_date": day.isoformat(), "run_id": run_id, "state": state}
 
     @app.post(prefix + "/diary/{day}/forget", dependencies=diary_auth)
-    async def diary_forget(day: date):
-        return app.state.core.diary.forget(day, settings.owner_qq_id)
+    async def diary_forget(day: date, request: Request):
+        clock, authorization = app.state.core.clock, request.headers.get("authorization", "")
+
+        def forget(store):
+            ledger = ErasureLedger(settings.erasure_ledger)
+            diary = DiaryService(store, settings, None, ledger, clock)
+            return diary.forget(
+                day, settings.owner_qq_id,
+                owner_check=lambda: require_admin(authorization, settings.diary_admin_token),
+            )
+
+        return await app.state.api_store.run(forget)
 
     @app.post(prefix + "/diary/{day}/correction", dependencies=diary_auth)
     async def diary_correct(day: date, body: DiaryCorrection):
