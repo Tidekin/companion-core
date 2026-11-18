@@ -60,6 +60,8 @@ class BotSession {
   bool _connected = false;
   Future<void>? _syncFlight;
   int _generation = 0;
+  int _publication = 0;
+  TurnWindow? _turnWindow;
   StreamSubscription<Map<String, dynamic>>? _events;
   Timer? _reconnect;
   Future<void> _eventTail = Future.value();
@@ -103,6 +105,8 @@ class BotSession {
     unawaited(_stopEvents());
     _connected = false;
     if (error is BackendError && {401, 403}.contains(error.status)) {
+      _generation++;
+      _turnWindow = null;
       _active = false;
       unawaited(
         repository
@@ -132,16 +136,26 @@ class BotSession {
   Stream<ChatState> watch() => _updates.stream;
 
   Future<void> _publish(String status) async {
-    final turns = await repository.turns(bot.id);
+    final publication = ++_publication;
+    final generation = _generation;
+    final window = await repository.readTurnWindow(
+      bot.id,
+      previous: _active ? _turnWindow : null,
+    );
     final pending = await repository.queue(bot.id);
     final viewed = await repository.viewed(bot.id);
     _draft ??= await repository.meta(bot.id, 'draft') as String? ?? '';
-    if (_closed) return;
+    final ready = await backend.canPrepare();
+    if (_closed || publication != _publication || generation != _generation) {
+      return;
+    }
+    _turnWindow = _active ? window : null;
+    final turns = window.turns;
     state = ChatState(
       turns: turns,
       pending: pending,
       connected: _connected,
-      ready: await backend.canPrepare(),
+      ready: ready,
       status: status,
       draft: _draft!,
       review: _review,
@@ -172,6 +186,8 @@ class BotSession {
         if (_closed || generation != _generation) return;
         _connected = false;
         if ({401, 403}.contains(error.status)) {
+          _generation++;
+          _turnWindow = null;
           _active = false;
           await _stopEvents();
           await repository.withdrawPreviews(bot.id);
@@ -194,6 +210,7 @@ class BotSession {
   Future<void> login(String credential) {
     unawaited(_stopEvents());
     final generation = ++_generation;
+    _turnWindow = null;
     _active = _connected = false;
     return _network(() async {
       _review = null;
@@ -343,10 +360,11 @@ class BotSession {
 
   Future<void> disconnect() async {
     final generation = ++_generation;
+    _turnWindow = null;
+    _active = _connected = false;
     await _stopEvents();
     if (_closed || generation != _generation) return;
     _review = null;
-    _active = _connected = false;
     await _publish('正在退出登录，本地消息保留');
     var status = '已退出登录，本地消息保留';
     try {
@@ -362,6 +380,7 @@ class BotSession {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _turnWindow = null;
     _generation++;
     _timer?.cancel();
     await _stopEvents();

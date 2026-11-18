@@ -1,8 +1,17 @@
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 
 import '../chat/models.dart';
 import 'database.dart';
 import 'vault.dart';
+
+class TurnWindow {
+  TurnWindow.empty(this.botId);
+  final String botId;
+  final _rows = <String, ({List<int> payload, ChatTurn turn})>{};
+  List<ChatTurn> get turns =>
+      List.unmodifiable(_rows.values.map((entry) => entry.turn));
+}
 
 class ChatRepository {
   ChatRepository(this.db, this.cipher);
@@ -66,21 +75,37 @@ class ChatRepository {
         );
   }
 
-  Future<List<ChatTurn>> turns(String botId) async {
+  Future<List<ChatTurn>> turns(String botId) async =>
+      (await readTurnWindow(botId)).turns;
+
+  Future<TurnWindow> readTurnWindow(
+    String botId, {
+    TurnWindow? previous,
+  }) async {
     final rows =
         await (db.select(db.turnRows)
               ..where((r) => r.botId.equals(botId))
               ..orderBy([(r) => OrderingTerm.desc(r.sequence)])
               ..limit(200))
             .get();
-    final result = <ChatTurn>[];
+    final result = TurnWindow.empty(botId);
     for (final row in rows.reversed) {
+      final old = previous?.botId == botId
+          ? previous?._rows[row.eventId]
+          : null;
+      if (old != null && listEquals(old.payload, row.payload)) {
+        result._rows[row.eventId] = old;
+        continue;
+      }
       final value = await cipher.open(
         botId,
         'turn/${row.eventId}',
         row.payload,
       );
-      result.add(ChatTurn.fromJson(Map<String, dynamic>.from(value! as Map)));
+      result._rows[row.eventId] = (
+        payload: row.payload,
+        turn: ChatTurn.fromJson(Map<String, dynamic>.from(value! as Map)),
+      );
     }
     return result;
   }

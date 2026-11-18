@@ -8,10 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-if __package__:
-    from .ci_container_artifacts import POSTGRES_IMAGE
-else:
-    from ci_container_artifacts import POSTGRES_IMAGE
+POSTGRES_IMAGE = ("pgvector/pgvector:0.8.7-pg16-trixie@sha256:"
+                  "c28c0b700f3f1b5eec14082b31ad6e7c8a566d14386323609c615315e7c0ffc8")
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = {

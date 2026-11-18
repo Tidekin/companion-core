@@ -201,19 +201,21 @@ class ChatTurn {
     uncertain: value['uncertain'] as bool? ?? false,
     proactive: value['kind'] == 'proactive',
     canReplyNow: value['can_reply_now'] == true,
-    images: [
+    images: List.unmodifiable([
       for (final item in (value['images'] as List? ?? const []))
         if (item is Map && item['slot'] is int) item['slot'] as int,
-    ],
+    ]),
     error: value['error'] as String?,
     preview: value['preview'] is Map
         ? ChatPreview.fromJson(
             Map<String, dynamic>.from(value['preview'] as Map),
           )
         : null,
-    replies: (value['replies'] as List)
-        .map((r) => ChatReply.fromJson(Map<String, dynamic>.from(r as Map)))
-        .toList(),
+    replies: List.unmodifiable(
+      (value['replies'] as List).map(
+        (r) => ChatReply.fromJson(Map<String, dynamic>.from(r as Map)),
+      ),
+    ),
   );
 }
 

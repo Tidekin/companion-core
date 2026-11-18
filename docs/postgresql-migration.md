@@ -6,7 +6,7 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
-当前新建与离线导入目标为 `pg0018_moment_images`。就绪检查与备份恢复共用运行结构校验，涵盖原生流预览、资料、动态及配图所需的列。迁移链先应用既有的
+当前新建与离线导入目标为 `pg0019_memory_vector`。就绪检查与备份恢复共用运行结构校验，涵盖原生流预览、资料、动态及配图所需的列。迁移链先应用既有的
 `pg0002_relationship_standing`、`pg0003_native_chat`、`pg0004_native_stream` 和 `pg0005_companion_profile`，
 再由 `pg0006_fact_key_ascii` 将 fact-key 索引
 对齐查询使用的 ASCII `translate` 表达式；业务表列和值仍按冻结备份逐项核对。
@@ -38,6 +38,10 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 `pg0017_moment_trigger` 把动态触发来源改为 `LIFE`、`MEMORY`（来源里有她刚记下的重要的事）；此前未写过计划中的 `KEEPSAKE`。
 `pg0018_moment_images` 新增 `moment_images`，记录她给动态生成的配图（状态、费用请求、散列），
 图片字节在状态目录 `moment-images/`；随动态遗忘一起删除，离线导入时为空。见[动态配图](plans/2026-11-17-moment-images.md)。
+
+`pg0019_memory_vector` 在同一条 `memory_vectors` 记录中保存可检索的向量。升级和 SQLite 导入会分批转换已有的 512 维有限 float32 向量，保留原始字节以核验历史备份。其他格式可以通过既有后台任务重新编码。语义查询先限定模型版本、主体、指定 ID 和私有事实范围，再按精确内积选出前 48 条。数据库查询计入当前回复的 SQL 时限，每条候选仍需通过实时来源校验。[pgvector 精确检索](https://github.com/pgvector/pgvector/tree/v0.8.7)
+
+在 Core 和备份恢复目标所在的 PostgreSQL 服务上安装 pgvector（验证版本 0.8.7）。由数据库管理员在 Core 数据库、空恢复目标和集群的标准空模板 `template1` 中分别执行 `CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public`。运行和恢复账号沿用已有权限。模板由管理员管理，只包含系统默认对象和获准的扩展，业务表为空。开发 Compose 的新数据库已包含此配置。
 
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 顺序升级到当前修订，
 保留关系候选索引，并允许原生聊天回复的独立投递类型。业务结构对应原 SQLite
@@ -95,7 +99,7 @@ worker 的合成验证及 QQ 验收，仍是生产切换的必要条件。
 离线恢复账户需要目标库的连接及建对象权限、安装可信扩展 `pg_trgm` 所需的数据库
 `CREATE` 权限，以及同集群的 `CREATEDB` 权限。日常 Core 账户无需 `CREATEDB`。
 目标库必须没有用户表。恢复进程在目标库持有会话级咨询锁，同一目标上的并发恢复会
-返回 `RESTORE_TARGET_BUSY`。它从 `template0` 创建随机命名的暂存数据库，仅授予
+返回 `RESTORE_TARGET_BUSY`。它从已预装扩展的空模板 `template1` 创建随机命名的暂存数据库，仅授予
 该库所有者连接权限。先在暂存库恢复表及约束、执行迁移、重放当前删除日志、撤销
 旧授权、保留未知费用与投递状态并校验结构，然后才用一次 `pg_restore --single-transaction`
 发布校验后的数据。重放或校验失败时，目标库保留原状，可修正原因后重试。
@@ -116,8 +120,8 @@ worker 的合成验证及 QQ 验收，仍是生产切换的必要条件。
 - [libpq 原生连接服务文件](https://www.postgresql.org/docs/16/libpq-pgservice.html)
 - [libpq 密码文件及权限](https://www.postgresql.org/docs/16/libpq-pgpass.html)
 
-默认 `public` schema 的恢复使用 `pg_restore --list/--use-list`，仅跳过目标已有的
-`CREATE SCHEMA public`，保留归档的全部表、数据、索引和约束。十八项记忆生命周期
+默认 `public` schema 的恢复使用 `pg_restore --list/--use-list`，跳过目标已有的
+`CREATE SCHEMA public` 和管理员维护的 vector 扩展注释，保留归档的全部表、数据、索引和约束。十八项记忆生命周期
 与恢复后删除重放已经在隔离 PostgreSQL 上验证；完整 Core 业务与生产切换仍待验收。
 
 ## 隔离验证与离线评估

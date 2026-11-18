@@ -2,6 +2,9 @@
 \getenv archive_password DEV_ARCHIVE_PASSWORD
 CREATE ROLE dev_core LOGIN PASSWORD :'core_password';
 CREATE ROLE dev_archive LOGIN CREATEDB PASSWORD :'archive_password';
+\connect template1
+CREATE EXTENSION vector WITH SCHEMA public;
+\connect postgres
 CREATE DATABASE companion OWNER dev_core;
 CREATE DATABASE dev_restore_before OWNER dev_archive;
 CREATE DATABASE dev_restore_after OWNER dev_archive;

@@ -101,7 +101,7 @@ def _staging_database(target, destination):
         hostaddr=target.info.hostaddr or "", port=target.info.port, user=target.info.user,
         password=target.info.password,
     ))
-    target.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0 ALLOW_CONNECTIONS false")
+    target.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template1 ALLOW_CONNECTIONS false")
                    .format(identifier))
     try:
         with target.transaction():
@@ -113,12 +113,13 @@ def _staging_database(target, destination):
 
 
 def _load_archive(snapshot, environment):
-    # template0 already contains public. Keep every other TOC entry in the transaction.
+    # The destination owns public; an administrator owns the preinstalled vector extension.
     listing = _run("pg_restore", ["--list", str(snapshot)], environment)
     selection = snapshot.with_suffix(".list")
     selection.write_bytes(b"\n".join(
         line for line in listing.splitlines()
-        if not re.match(rb"^\d+; \d+ \d+ SCHEMA - public(?:\s|$)", line)
+        if not re.match(rb"^\d+; \d+ \d+ (?:SCHEMA - public|COMMENT - EXTENSION vector)(?:\s|$)",
+                        line)
     ) + b"\n")
     _run("pg_restore", ["--exit-on-error", "--single-transaction", "--no-owner",
                         "--no-privileges", "--use-list=" + str(selection),
@@ -130,7 +131,9 @@ def _seal_archive(staging, snapshot, sealed, ledger):
     service.mkdir()
     with _client(staging, service) as (stage, environment):
         # Schema-filtered source archives omit dependencies outside their schema.
+        _require_empty(stage)
         stage.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
+        stage.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
         _load_archive(snapshot, environment)
         migrate(staging)
         with Database(staging) as database, closing(Store(database, service)) as store:

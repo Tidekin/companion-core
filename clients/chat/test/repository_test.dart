@@ -25,6 +25,37 @@ Map<String, dynamic> turn(String text) => {
 
 void main() {
   test(
+    'display window reuses only unchanged ciphertext from the same bot',
+    () async {
+      final db = ChatDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
+      final repo = ChatRepository(db, CacheCipher(MemoryVault()));
+      for (final id in ['a', 'b']) {
+        await repo.addBot(
+          BotProfile(id: id, name: id, endpoint: Uri.parse('https://$id.test')),
+        );
+        await repo.merge(id, [turn(id)]);
+      }
+      final first = await repo.readTurnWindow('a');
+      final again = await repo.readTurnWindow('a', previous: first);
+      expect(again.turns.single, same(first.turns.single));
+      expect(
+        (await repo.readTurnWindow('b', previous: first)).turns.single.text,
+        'b',
+      );
+      await repo.merge('a', [
+        {...turn(''), 'redacted': true, 'replies': []},
+      ]);
+      final erased = await repo.readTurnWindow('a', previous: first);
+      expect(erased.turns.single.redacted, isTrue);
+      expect(erased.turns.single.replies, isEmpty);
+      expect(erased.turns.single.text, isEmpty);
+      await repo.reconcile('a', {});
+      expect((await repo.readTurnWindow('a', previous: first)).turns, isEmpty);
+    },
+  );
+
+  test(
     'reply erasure overrides an old preview and survives late frames',
     () async {
       final db = ChatDatabase(NativeDatabase.memory());

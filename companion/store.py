@@ -335,7 +335,7 @@ class Store:
                 "segment_interval_ms",
             },
             "memories": {"needs_review", "fact_key"},
-            "memory_vectors": {"model_version", "content_hash", "vector"},
+            "memory_vectors": {"model_version", "content_hash", "vector", "embedding"},
             "runtime_meta": {"key", "value"},
             "model_admissions": {
                 "payload_sha256",
