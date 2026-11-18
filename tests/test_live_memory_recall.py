@@ -582,6 +582,7 @@ def test_candidate_vector_cache_does_not_consume_one_sql_variable_per_memory(cor
             model_version=INDEX_VERSION,
             content_hash=hashlib.sha256(row["content"].encode()).hexdigest(),
             vector=np.asarray([1.0], dtype="<f4").tobytes(),
+            embedding="[1]",
         )
     monkeypatch.setattr(
         core.memory.index,
