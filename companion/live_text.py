@@ -35,6 +35,7 @@ from companion.expression import MemeOffer
 from companion.outbox import message_by_id
 from companion.privacy import ErasureLedger, epoch
 from companion.qq_rich import input_digest as _input_digest
+from companion.reading_rows import exploration_by_request_id
 from companion.store import after, encode, utcnow
 
 BINDING = "live_text_window"
@@ -1779,29 +1780,7 @@ def _link_sources(store, settings, job):
             or item["target_url"] not in urls
         ):
             raise CoreError("LIVE_LINK_SOURCE_CHANGED", 403)
-        read = store.one(
-            "SELECT exploration_requests.request_id AS request_id, "
-            "exploration_requests.request_key AS request_key, exploration_requests.adapter_id AS "
-            "adapter_id, exploration_requests.operation AS operation, exploration_requests.url AS "
-            "url, exploration_requests.goal_step_json AS goal_step_json, "
-            "exploration_requests.state AS state, exploration_requests.lease_token AS lease_token, "
-            "exploration_requests.lease_until AS lease_until, "
-            "exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, "
-            "exploration_requests.reserved_bytes AS reserved_bytes, "
-            "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 AS "
-            "result_sha256, exploration_requests.last_error_code AS last_error_code, "
-            "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
-            "started_at, exploration_requests.updated_at AS updated_at, "
-            "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests AS "
-            "reserved_requests, exploration_requests.used_requests AS used_requests, "
-            "exploration_requests.source_grant_id AS source_grant_id, "
-            "exploration_requests.source_grant_epoch AS source_grant_epoch, "
-            "exploration_requests.authority_json AS authority_json, exploration_requests.query AS "
-            "query, exploration_requests.discovery_mode AS discovery_mode FROM "
-            "exploration_requests AS exploration_requests WHERE exploration_requests.request_id = "
-            "%s",
-            (item["read_request_id"],),
-        )
+        read = exploration_by_request_id(store, item["read_request_id"])
         evidence = store.rows(
             "SELECT o.event_id AS event_id, o.adapter_id AS adapter_id, o.source_kind AS "
             "source_kind, o.result_status AS result_status, o.source_sha256 AS source_sha256, "

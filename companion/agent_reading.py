@@ -13,6 +13,7 @@ from companion import owner_authority, owner_input, reply_revision
 from companion.agent_runtime import check_conversation
 from companion.capabilities import public_source_readiness
 from companion.contracts import CoreError
+from companion.reading_rows import attempt_by_request_id
 from companion.sources import content_target, web_hosts
 from companion.store import after, encode
 from companion.transport import digest
@@ -136,19 +137,7 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
             observations.grants.require(row["adapter_id"], None)
     items = []
     if row["state"] == "DONE":
-        attempt = store.one('SELECT reading_attempts.request_id AS request_id, '
-            'reading_attempts.adapter_id AS adapter_id, reading_attempts.lease_token AS '
-            'lease_token, reading_attempts.lease_until AS lease_until, '
-            'reading_attempts.context_json AS context_json, reading_attempts.allowed_hosts_json AS '
-            'allowed_hosts_json, reading_attempts.original_url_sha256 AS original_url_sha256, '
-            'reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state AS '
-            'state, reading_attempts.result_sha256 AS result_sha256, '
-            'reading_attempts.result_event_ids_json AS result_event_ids_json, '
-            'reading_attempts.observed_requests AS observed_requests, '
-            'reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS '
-            'created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS '
-            'reading_attempts WHERE reading_attempts.request_id = %s',
-                                 (request_id,))
+        attempt = attempt_by_request_id(store, request_id)
         if (not attempt or attempt["state"] != "DONE" or not attempt["result_sha256"]
             or attempt["result_sha256"] != row["result_sha256"]
             or attempt["adapter_id"] != row["adapter_id"]
