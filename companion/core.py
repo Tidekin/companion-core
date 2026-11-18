@@ -5,7 +5,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
-from functools import partial
+from functools import cached_property, partial
 
 import psycopg
 
@@ -43,9 +43,10 @@ from companion.config import Settings
 from companion.consolidation import NightlyConsolidator
 from companion.content import CONTEXT_RULES
 from companion.contracts import Candidate, CoreError, MemorySelection
-from companion.diary import is_diary_command
+from companion.diary import DIARY_COMMANDS, is_diary_command
 from companion.domain_runtime import DomainRuntime
 from companion.expression import ExpressionEngine
+from companion.life import COMMANDS as LIFE_COMMANDS
 from companion.life import LifeService
 from companion.model import (
     MEMORY_RULES,
@@ -97,24 +98,39 @@ class Core(DomainRuntime):
         self._media_scans = {}
         # Synthetic image provider transport; see image_generation.available.
         self.image_transport = None
-        try:
-            if settings.memory_enabled:
+        if settings.memory_enabled:
+            try:
                 self.memory.index.warmup()
-            self.consolidation = NightlyConsolidator(
-                self.store, settings, self.diary, self.reflections, self.goals,
-                self.extract_step, clock,
-            )
-            self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
-            self.life = LifeService(
-                self.store, settings, self.goals, self.reflections, self.affect, clock,
-            )
-            self.reading = ReadingService(
-                self.store, settings, self.exploration, clock, video=self.bili_video,
-            )
-            self.expression = ExpressionEngine(self.store, settings, clock)
-        except BaseException:
-            self.close()
-            raise
+            except BaseException:
+                self.close()
+                raise
+
+    @cached_property
+    def consolidation(self):
+        return NightlyConsolidator(
+            self.store, self.settings, self.diary, self.reflections, self.goals,
+            self.extract_step, self.clock,
+        )
+
+    @cached_property
+    def wake(self):
+        return WakePlanner(self.store, self.settings, self.goals, self.affect, self.clock)
+
+    @cached_property
+    def life(self):
+        return LifeService(
+            self.store, self.settings, self.goals, self.reflections, self.affect, self.clock,
+        )
+
+    @cached_property
+    def reading(self):
+        return ReadingService(
+            self.store, self.settings, self.exploration, self.clock, video=self.bili_video,
+        )
+
+    @cached_property
+    def expression(self):
+        return ExpressionEngine(self.store, self.settings, self.clock)
 
     def ingest(self, event, key):
         return inbox.ingest(
@@ -1262,12 +1278,14 @@ class Core(DomainRuntime):
             # These service responses do not yet expose complete source receipts.
             # Recall treats them conservatively instead of claiming exact lineage.
             job_queue.mark_context_untracked(s, job["job_id"])
-        diary_reply = self.diary.command(text, self.settings.owner_qq_id)
-        if diary_reply is not None:
-            return diary_reply
-        life_reply = self.life.command(text, job["event_id"])
-        if life_reply is not None:
-            return life_reply
+        if command in DIARY_COMMANDS:
+            diary_reply = self.diary.command(text, self.settings.owner_qq_id)
+            if diary_reply is not None:
+                return diary_reply
+        if command in LIFE_COMMANDS:
+            life_reply = self.life.command(text, job["event_id"])
+            if life_reply is not None:
+                return life_reply
         text = command + (" " + arguments if arguments else "")
         if text == "发送状态":
             uncertain = s.rows(
