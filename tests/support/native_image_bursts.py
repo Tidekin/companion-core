@@ -12,10 +12,9 @@ from datetime import UTC, datetime
 import httpx
 from PIL import Image
 
-from companion import api
-from companion.core import Core
 from companion_onebot_bridge import app, metrics
 from tests.native_continuous_support import host, until
+from tests.support.core_http import use_api_clock
 from tests.support.live_image_input import options
 from tests.support.onebot_events import raw_event
 
@@ -69,8 +68,7 @@ async def native_host(
             sender.cancel()
             await asyncio.gather(sender, return_exceptions=True)
 
-    monkeypatch.setattr(api, "Core", lambda *args, **kwargs: Core(
-        *args, clock=core.clock, **kwargs))
+    use_api_clock(monkeypatch, core.clock)
     scope = options()
     scope["core_options"]["content"] = scope["core_options"]["content"].model_copy(
         update={"max_images_per_event": count, "wait_seconds": wait_seconds})

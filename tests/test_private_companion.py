@@ -26,6 +26,7 @@ from tests.conftest import run
 from tests.native_continuous_support import until
 from tests.sdk_reader_fixture import answer as tool_answer
 from tests.sdk_reader_fixture import call as tool_call
+from tests.support.core_http import use_api_clock
 from tests.support.native_companion import companion_host, ingress, raw_event
 from tests.support.private_companion import companion_options
 
@@ -461,7 +462,7 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
 def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
     core, tmp_path, monkeypatch, first_response_delay,
 ):
-    from companion import __main__, api
+    from companion import __main__
     from companion import core as core_module
 
     calls, instances = [], []
@@ -491,7 +492,7 @@ def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
         )
 
     async def scenario():
-        monkeypatch.setattr(api, "Core", construct)
+        use_api_clock(monkeypatch, core.clock, instances=instances)
         monkeypatch.setattr(core_module, "Core", construct)
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
             monkeypatch.setattr(

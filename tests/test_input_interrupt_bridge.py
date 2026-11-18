@@ -10,13 +10,13 @@ from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, until, worker
+from tests.support.core_http import use_api_clock
 from tests.support.input_interrupt_bridge import model_response
 
 
 def test_slow_reply_does_not_block_accepting_new_input_with_independent_api_worker(
     core, tmp_path, monkeypatch,
 ):
-    from companion import api
 
     started, release, new_accepted = asyncio.Event(), asyncio.Event(), asyncio.Event()
     calls, instances = [], []
@@ -29,11 +29,6 @@ def test_slow_reply_does_not_block_accepting_new_input_with_independent_api_work
         await ws.send(second)
         await ws.wait_closed()
 
-    def construct(*args, **kwargs):
-        instance = Core(*args, clock=core.clock, **kwargs)
-        instances.append(instance)
-        return instance
-
     async def answer(request):
         calls.append(json.loads(request.content)["messages"])
         if len(calls) == 1:
@@ -43,7 +38,7 @@ def test_slow_reply_does_not_block_accepting_new_input_with_independent_api_work
         return model_response("第二件事的新回复")
 
     async def scenario():
-        monkeypatch.setattr(api, "Core", construct)
+        use_api_clock(monkeypatch, core.clock, instances=instances)
         async with host(core, tmp_path, source, model_reply=answer, independent_api=True) as (
             window, _, sends, _,
         ), httpx.AsyncClient(transport=httpx.MockTransport(answer)) as model_http:

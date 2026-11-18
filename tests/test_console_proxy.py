@@ -38,6 +38,9 @@ def test_serve_proxy_source_limits_and_untrusted_spoofing(core, tmp_path, proxy)
         COMPANION_OWNER_QQ_ID="10001", COMPANION_BOT_QQ_ID="10002",
         COMPANION_BRIDGE_TOKEN="synthetic-bridge-token-" * 2,
         COMPANION_CONTROL_TOKEN=PASSWORD, COMPANION_PROACTIVE_ENABLED="false",
+        COMPANION_MEMORY_ENABLED="true",
+        COMPANION_EMBEDDING_CACHE_DIR=str(tmp_path / "empty-embedding-cache"),
+        HF_HUB_OFFLINE="1",
         COMPANION_CONSOLE=json.dumps({"enabled": True, "public_origin": ORIGIN}),
         FORWARDED_ALLOW_IPS="*",  # An ambient Uvicorn variable must not enable trust.
     )

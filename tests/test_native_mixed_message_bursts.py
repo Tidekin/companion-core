@@ -7,12 +7,11 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from companion import api
-from companion.core import Core
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.sdk_reader_fixture import answer, call
+from tests.support.core_http import use_api_clock
 from tests.support.live_card_content import TOKEN, URL, result
 from tests.support.live_card_content import options as card_options
 from tests.support.live_image_input import options as image_options
@@ -28,8 +27,7 @@ def test_card_image_and_question_keep_all_sources_through_independent_workers(
 ):
     # The HTTP reader result and child SDK worker must use the same fixture clock;
     # wall-clock completion can otherwise schedule the resume ahead of the child.
-    monkeypatch.setattr(api, "Core", lambda *args, **kwargs: Core(
-        *args, clock=core.clock, **kwargs))
+    use_api_clock(monkeypatch, core.clock)
     text = {"type": "text", "data": {"text": "结合文章和这张图回答我的问题"}}
     attachment = image_segment("https://gchat.qpic.cn/mixed-original")
     shared = card(url=URL)

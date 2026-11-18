@@ -252,7 +252,7 @@ def test_api_registration_reuses_one_lifespan_and_fixed_core_routes(enabled, mon
         return SimpleNamespace(database=object(), store=SimpleNamespace(),
                                close=lambda: lifecycle.append("close"))
 
-    monkeypatch.setattr(api, "Core", make_core)
+    monkeypatch.setattr(api, "DomainRuntime", make_core)
     with TestClient(api.create_app(settings)) as client:
         assert client.get("/internal/v1/health/live").json()["status"] == "alive"
         response = client.post("/internal/v1/owner-authority/inputs/approve", json={})

@@ -5,8 +5,8 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from companion import api
-from companion.core import Core
 from tests.support.confirmed_memory import remember
+from tests.support.core_http import use_api_clock
 from tests.support.next_memory_context import episode
 
 PATH = "/internal/v2/memory/projection"
@@ -15,8 +15,7 @@ PATH = "/internal/v2/memory/projection"
 @pytest.fixture
 def projection_client(core, monkeypatch):
     core.settings.control_token = SecretStr("synthetic-projection-owner-" * 2)
-    monkeypatch.setattr(api, "Core", lambda settings, model=None:
-                        Core(settings, core.model, core.clock))
+    use_api_clock(monkeypatch, core.clock)
     app = api.create_app(core.settings)
     assert any(getattr(route, "path", None) == PATH for route in app.routes)
     with TestClient(app) as client:

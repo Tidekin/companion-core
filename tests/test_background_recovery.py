@@ -15,6 +15,7 @@ from source_reader.network import PublicHTTP
 from source_reader.worker import tick
 from tests.conftest import ingest, run
 from tests.support.consolidation import enable_nightly
+from tests.support.core_http import use_api_clock
 from tests.support.source_reader import ITEM, META, Responses, read, response
 
 
@@ -171,7 +172,7 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
     from datetime import timedelta
     from zoneinfo import ZoneInfo
 
-    from companion import api, life_worker
+    from companion import life_worker
     from companion.config import ObservationAdapterConfig
     from companion.diary import DIARY_RULES
     from companion.model import ModelClient
@@ -217,7 +218,7 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
             exploration_daily_bytes=4_194_304,
             observation_adapters={"bili": ObservationAdapterConfig(
                 source="bilibili", token="synthetic-recovery-reader-token")})
-        monkeypatch.setattr(api, "Core", construct)
+        use_api_clock(monkeypatch, core.clock, instances=instances)
         monkeypatch.setattr(life_worker, "Core", construct)
         async with host(core, tmp_path, source, ticking=False, independent_api=True,
             model_reply=respond, core_options=options,

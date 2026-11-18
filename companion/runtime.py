@@ -60,3 +60,8 @@ class Runtime:
                 self.ledger.expire_events(self.store, [key for key in ids if key not in chosen],
                                           now, retention_cutoff=cutoff, keepsakes=kept)
             return len(rows) + (rem_count if include_rem else 0)
+
+    def status(self):
+        from companion.ops_status import runtime_snapshot
+
+        return runtime_snapshot(self.store, self.settings, self.clock)

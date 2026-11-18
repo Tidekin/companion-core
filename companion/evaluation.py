@@ -272,7 +272,8 @@ def submit(core, request):
                      event_type="evaluation.requested", occurred_at=now, ingested_at=now,
                      privacy_scope="private", body_json=encode({"evaluation_id": evaluation_id}),
                      trace_id=evaluation_id, memory_processed=1)
-        job_id = core.new_job(event_id, "evaluation", evaluation_id, now, max_attempts=1)
+        job_id = job_queue.enqueue(store, event_id, "evaluation", evaluation_id, now,
+                                   max_attempts=1)
         owner_authority.bind_job(store, settings, clock, job_id, purpose="evaluation")
         for source_id in sources:
             store.insert("event_dependencies", event_id=event_id, source_event_id=source_id)
