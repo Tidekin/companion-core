@@ -84,3 +84,27 @@ def test_a_withdrawn_preview_forces_the_full_check_again(client, core, tmp_path,
     assert len(checks) - first >= 1
     row = core.store.one('SELECT preview_json FROM agent_conversations')
     assert row['preview_json'] is None or json.loads(row['preview_json'])['state'] != 'GENERATING'
+
+
+def test_stream_keeps_its_admitted_request_when_conversation_changes(
+    client, core, tmp_path, monkeypatch,
+):
+    original_request = []
+    writes = []
+    write = native_stream.Publisher._write
+
+    def observe(publisher, *args, **kwargs):
+        writes.append(publisher.request_id)
+        return write(publisher, *args, **kwargs)
+
+    def replace_request(core):
+        row = core.store.one("SELECT request_id FROM agent_conversations")
+        original_request.append(row["request_id"])
+        core.store.execute("UPDATE agent_conversations SET request_id=NULL WHERE request_id=%s",
+                           (row["request_id"],))
+
+    monkeypatch.setattr(native_stream.Publisher, "_write", observe)
+    _, _, accepted = stream(client, core, tmp_path, monkeypatch, replace_request)
+    assert len(writes) >= 2 and set(writes) == set(original_request)
+    row = core.store.one("SELECT state FROM jobs WHERE job_id=%s", (accepted["job_id"],))
+    assert row["state"] != "SUCCEEDED"

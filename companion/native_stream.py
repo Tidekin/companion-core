@@ -32,6 +32,14 @@ class Publisher:
         self.last_flush = 0.0
         self.fence = None
 
+    def start_request(self, request_id):
+        # The paid request owns these bytes. Every preview write still compares
+        # its ID with the durable conversation row inside the write transaction.
+        self.request_id = request_id
+        self.text = self.saved = ""
+        self.last_flush = 0.0
+        self.fence = None
+
     async def events(self, context, events):
         async for event in events:
             text = None
@@ -43,15 +51,8 @@ class Publisher:
                 self.flush(force=True)
             if text is None:
                 continue  # Thinking, tools and raw arguments are never public previews.
-            row = self.core.store.one(
-                "SELECT request_id FROM agent_conversations WHERE job_id=%s", (self.job["job_id"],))
-            if row is None or not row["request_id"]:
+            if self.request_id is None:
                 raise CoreError("NATIVE_STREAM_REQUEST_REQUIRED", 409)
-            if row["request_id"] != self.request_id:
-                self.request_id = row["request_id"]
-                self.text = self.saved = ""
-                self.last_flush = 0.0
-                self.fence = None
             self.text += text
             self.flush()
         self.flush(force=True)
