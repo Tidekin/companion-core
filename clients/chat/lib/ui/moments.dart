@@ -43,6 +43,9 @@ class MomentsPanel extends ConsumerStatefulWidget {
 
 class _MomentsPanelState extends ConsumerState<MomentsPanel> {
   List<Moment>? items;
+  String? nextCursor;
+  int feedRevision = 0;
+  bool loadingMore = false;
   List<Moment> memories = const [];
   bool memoriesOpen = true;
   String? error;
@@ -65,21 +68,46 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
   }
 
   Future<void> load() async {
+    final revision = ++feedRevision;
     try {
       final feed = await _backend.moments();
       final past = await _backend.momentMemories();
       final open = {
         for (final id in openThreads) id: await _backend.momentComments(id),
       };
-      if (!mounted) return;
+      if (!mounted || revision != feedRevision) return;
       setState(() {
-        items = feed;
+        feedRevision++;
+        items = feed.items;
+        nextCursor = feed.nextCursor;
         memories = past;
         threads.addAll(open);
         error = null;
       });
     } catch (failure) {
-      if (mounted) setState(() => error = _failure(failure));
+      if (mounted && revision == feedRevision)
+        setState(() => error = _failure(failure));
+    }
+  }
+
+  Future<void> loadMore() async {
+    final before = nextCursor;
+    if (before == null || loadingMore) return;
+    final revision = feedRevision;
+    setState(() => loadingMore = true);
+    try {
+      final page = await _backend.moments(before: before);
+      if (!mounted || revision != feedRevision || nextCursor != before) return;
+      setState(() {
+        items = [...?items, ...page.items];
+        nextCursor = page.nextCursor;
+        error = null;
+      });
+    } catch (failure) {
+      if (mounted && revision == feedRevision)
+        setState(() => error = _failure(failure));
+    } finally {
+      if (mounted) setState(() => loadingMore = false);
     }
   }
 
@@ -277,6 +305,11 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
               )
             else if (feed != null)
               for (final moment in feed) _card(moment, name, now),
+            if (nextCursor != null)
+              TextButton(
+                onPressed: loadingMore ? null : loadMore,
+                child: const Text('加载更早的动态'),
+              ),
           ],
         ),
       ),

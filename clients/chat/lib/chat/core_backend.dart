@@ -10,6 +10,8 @@ import '../persistence/repository.dart';
 import '../persistence/vault.dart';
 import 'models.dart';
 
+typedef MomentPage = ({List<Moment> items, String? nextCursor});
+
 class ConnectionReview {
   const ConnectionReview(this.ready, this.data);
   final bool ready;
@@ -82,8 +84,8 @@ abstract interface class ChatBackend {
   /// Profile snapshots pushed by the event stream while it is connected.
   Stream<CompanionProfile> get profileUpdates;
 
-  /// Owner-only moments, newest first; `before` pages by creation time.
-  Future<List<Moment>> moments({DateTime? before});
+  /// Owner-only moments, newest first. Pass back the cursor from the previous page.
+  Future<MomentPage> moments({String? before});
 
   /// Moments from this calendar day in earlier years.
   Future<List<Moment>> momentMemories();
@@ -161,13 +163,17 @@ class CoreBackend implements ChatBackend {
   ];
 
   @override
-  Future<List<Moment>> moments({DateTime? before}) async => _momentList(
-    await _request(
+  Future<MomentPage> moments({String? before}) async {
+    final value = await _request(
       'GET',
       '/v1/console/chat/moments',
-      query: {if (before != null) 'before': before.toUtc().toIso8601String()},
-    ),
-  );
+      query: {if (before != null) 'before': before},
+    );
+    return (
+      items: _momentList(value),
+      nextCursor: value['next_cursor'] as String?,
+    );
+  }
 
   @override
   Future<List<MomentComment>> momentComments(String momentId) async => [

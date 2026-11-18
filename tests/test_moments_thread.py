@@ -64,6 +64,41 @@ def test_owner_post_and_comment_stay_out_of_the_chat_and_under_their_moment(
                           (comment_id,)) is not None
 
 
+def test_mixed_feed_pages_across_a_shared_timestamp(client, core, tmp_path):
+    from tests.support.owner_console import login
+
+    owner_with_moments(core, tmp_path)
+    key = Ed25519PrivateKey.generate()
+    headers, authority = enroll(client, key)
+    old = seed_moment(core, "更早")
+    core.clock.advance(1)
+    with core.store.transaction():
+        hers = [seed_moment(core, str(index)) for index in range(199)]
+    posted, owner_id = send(client, core, headers, authority, key, "同一时刻", {"kind": "post"})
+    assert posted.status_code == 202
+    timestamp = core.clock()
+    login(client)
+    for route, expected, auth in [
+        ("/v1/console/chat/moments", [*hers, owner_id], headers),
+        ("/v1/console/moments", hers, {}),
+    ]:
+        cursor, seen = None, []
+        while True:
+            params = {"limit": 30, **({"before": cursor} if cursor else {})}
+            response = client.get(route, params=params, headers=auth)
+            assert response.status_code == 200, response.text
+            page = response.json()
+            seen.extend(item["id"] for item in page["items"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+            assert len(seen) <= len(expected)
+        assert seen == [*sorted(expected, reverse=True), old]
+        legacy = client.get(route, params={"before": timestamp}, headers=auth).json()
+        assert [item["id"] for item in legacy["items"]] == [old]
+        assert client.get(route, params={"before": "invalid"}, headers=auth).status_code == 400
+
+
 def test_a_re_targeted_or_unknown_comment_is_refused(client, core, tmp_path):
     owner_with_moments(core, tmp_path)
     key = Ed25519PrivateKey.generate()

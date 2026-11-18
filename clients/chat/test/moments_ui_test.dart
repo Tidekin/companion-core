@@ -104,6 +104,40 @@ void main() {
         ),
       );
 
+  testWidgets('older moments load through the cursor at the end of the feed', (
+    tester,
+  ) async {
+    final (container, backend) = setUp();
+    backend.feed
+      ..clear()
+      ..addAll(
+        List.generate(
+          31,
+          (i) => Moment.fromJson({
+            'id': 'moment_$i',
+            'text': '动态第 $i 条',
+            'trigger': 'LIFE',
+            'created_at': '2026-11-16T12:00:00Z',
+            'liked': false,
+          }),
+        ),
+      );
+    await tester.pumpWidget(host(container, MomentsPanel(bot: bot)));
+    await tester.pumpAndSettle();
+    final more = find.text('加载更早的动态');
+    final list = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(more, 550, scrollable: list);
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('动态第 30 条'),
+      300,
+      scrollable: list,
+    );
+    expect(more, findsNothing);
+    await close(tester, container);
+  });
+
   testWidgets('the owner posts and comments; both stay under the moments', (
     tester,
   ) async {

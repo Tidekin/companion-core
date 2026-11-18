@@ -8,7 +8,7 @@ erasing any of its sources erases it.
 
 import json
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from companion import owner_authority
@@ -82,14 +82,35 @@ def save(store, settings, clock, data, body):
             **({"image": "QUEUED"} if drawing else {})}
 
 
-def rows(store, *, before=None, limit=30, include_hidden=False):
+def page(read, store, before, limit, **kwargs):
+    """Read one lookahead row. A bare timestamp keeps its original exclusive boundary."""
+    timestamp, before_id = None, ""
+    if before is not None:
+        raw, separator, before_id = before.partition("|")
+        try:
+            instant = datetime.fromisoformat(raw)
+            if instant.tzinfo is None or (separator and not before_id):
+                raise ValueError
+            timestamp = instant.astimezone(UTC).isoformat(timespec="microseconds")
+        except (ValueError, OverflowError):
+            raise CoreError("INVALID_PAGE", 400) from None
+    results = read(store, before=timestamp, before_id=before_id, limit=limit + 1, **kwargs)
+    cursor = None
+    if len(results) > limit:
+        last = results[limit - 1]
+        cursor = f"{last['created_at']}|{last['id']}"
+    return {"items": results[:limit], "next_cursor": cursor}
+
+
+def rows(store, *, before=None, before_id="", limit=30, include_hidden=False):
     states = ("PUBLISHED", "HIDDEN") if include_hidden else ("PUBLISHED",)
     return store.rows(
         "SELECT moment_id, text, trigger, state, created_at, liked_at, source_event_ids_json "
         "FROM moments "
-        "WHERE state = ANY(%s::text[]) AND (CAST(%s AS TEXT) IS NULL OR created_at < %s) "
-        "ORDER BY created_at DESC, moment_id DESC LIMIT %s",
-        (list(states), before, before, limit),
+        "WHERE state = ANY(%s::text[]) AND (CAST(%s AS TEXT) IS NULL OR "
+        '(created_at, moment_id COLLATE "C") < (%s, %s)) '
+        'ORDER BY created_at DESC, moment_id COLLATE "C" DESC LIMIT %s',
+        (list(states), before, before, before_id, limit),
     )
 
 
@@ -214,11 +235,13 @@ def _owner_post(row):
             "liked": False, "images": _images(body), "source_event_ids": [row["event_id"]]}
 
 
-def owner_posts(store, *, before=None, limit=30):
+def owner_posts(store, *, before=None, before_id="", limit=30):
     return [_owner_post(row) for row in store.rows(
         _INPUTS + "AND e.redacted = 0 AND e.body_json::jsonb #>> '{moment,kind}' = 'post' "
-        "AND (CAST(%s AS TEXT) IS NULL OR e.occurred_at < %s) "
-        "ORDER BY e.occurred_at DESC LIMIT %s", (before, before, limit))]
+        "AND (CAST(%s AS TEXT) IS NULL OR "
+        '(e.occurred_at, e.event_id COLLATE "C") < (%s, %s)) '
+        'ORDER BY e.occurred_at DESC, e.event_id COLLATE "C" DESC LIMIT %s',
+        (before, before, before_id, limit))]
 
 
 def require_target(store, moment_id):
@@ -288,16 +311,17 @@ def comment_counts(store, moment_ids):
         (sorted(moment_ids),))}
 
 
-def feed(store, *, before=None, limit=30):
+def feed(store, *, before=None, before_id="", limit=30):
     """Her moments and the owner's posts together, newest first, with comment counts."""
     from companion import moment_images
 
-    mine = items(store, before=before, limit=limit)
+    mine = items(store, before=before, before_id=before_id, limit=limit)
     ready, pending = moment_images.slots(store, [item["id"] for item in mine])
     mine = [{**item, "author": "companion", "images": ready.get(item["id"], []),
              **({"image_pending": True} if item["id"] in pending else {})} for item in mine]
-    merged = sorted([*mine, *owner_posts(store, before=before, limit=limit)],
-                    key=lambda item: item["created_at"], reverse=True)[:limit]
+    owner = owner_posts(store, before=before, before_id=before_id, limit=limit)
+    merged = sorted([*mine, *owner], key=lambda item: (item["created_at"], item["id"]),
+                    reverse=True)[:limit]
     counts = comment_counts(store, [item["id"] for item in merged])
     return [{**item, "comment_count": counts.get(item["id"], 0)} for item in merged]
 

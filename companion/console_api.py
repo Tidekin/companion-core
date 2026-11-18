@@ -514,15 +514,22 @@ def register_console_routes(app, settings):
         )
 
     @app.get(prefix + "/moments", dependencies=auth)
-    async def moments_list(before: str | None = None, limit: int = 30):
+    async def moments_list(request: Request, before: str | None = None, limit: int = 30):
         from companion import moments
 
         if not 1 <= limit <= 60:
             raise CoreError("INVALID_PAGE", 400)
-        core = app.state.core
-        items = moments.items(core.store, before=before, limit=limit, include_hidden=True)
-        return {"items": items, "observed_at": core.clock(),
-                "next_cursor": items[-1]["created_at"] if len(items) == limit else None}
+        check = session_check(request)
+
+        def read(store):
+            check(store)
+            result = moments.page(moments.items, store, before, limit, include_hidden=True)
+            for item in result["items"]:
+                item["status"] = item["state"]
+            check(store)
+            return {**result, "observed_at": app.state.core.clock()}
+
+        return await app.state.api_store.run(read)
 
     @app.post(prefix + "/moments/{moment_id}/visibility", dependencies=auth)
     async def moment_visibility(moment_id: str, body: MomentVisibility, request: Request,

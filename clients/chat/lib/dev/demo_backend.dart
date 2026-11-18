@@ -117,10 +117,17 @@ class DemoBackend implements ChatBackend {
   @override
   Stream<void> get momentUpdates => momentChanges.stream;
   @override
-  Future<List<Moment>> moments({DateTime? before}) async => [
-    for (final item in feed)
-      if (before == null || item.createdAt.isBefore(before)) item,
-  ];
+  Future<MomentPage> moments({String? before}) async {
+    final start = before == null
+        ? 0
+        : feed.indexWhere((item) => item.id == before) + 1;
+    final items = feed.skip(start).take(30).toList();
+    return (
+      items: items,
+      nextCursor: start + items.length < feed.length ? items.last.id : null,
+    );
+  }
+
   @override
   Future<List<Moment>> momentMemories() async => const [];
   final threads = <String, List<MomentComment>>{};
