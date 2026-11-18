@@ -22,6 +22,7 @@ from companion import (
 )
 from companion.contracts import Candidate, CoreError, EpisodeSummary, Extraction, MemoryReview
 from companion.diary import day_bounds
+from companion.events import event_by_id
 from companion.memory_authority import source_allowed
 from companion.model import EXTRACT_RULES, REVIEW_RULES
 from companion.privacy import epoch
@@ -951,24 +952,7 @@ async def extraction_step(core, local_day, lease, batch, persist):
             proof=core.memory_context.pin(now, event_ids=set(ids)),
         )
     events = [
-        s.one(
-            (
-                "SELECT events.event_id AS event_id, events.schema_version AS"
-                " schema_version, events.source AS source, "
-                "events.source_event_id AS source_event_id, "
-                "events.conversation_id AS conversation_id, events.actor_id "
-                "AS actor_id, events.event_type AS event_type, "
-                "events.occurred_at AS occurred_at, events.ingested_at AS "
-                "ingested_at, events.privacy_scope AS privacy_scope, "
-                "events.body_json AS body_json, events.trace_id AS trace_id, "
-                "events.idempotency_key AS idempotency_key, "
-                "events.fingerprint AS fingerprint, events.redacted AS "
-                "redacted, events.memory_processed AS memory_processed, "
-                "events.reply_revision AS reply_revision FROM events AS "
-                "events WHERE events.event_id = %s"
-            ),
-            (key,),
-        )
+        event_by_id(s, key)
         for key in batch["event_ids"]
     ]
     request_id = None

@@ -30,6 +30,7 @@ from companion import (
     qq_images,
 )
 from companion.contracts import CoreError, StrictModel
+from companion.events import event_by_id
 from companion.expression import MemeOffer
 from companion.outbox import message_by_id
 from companion.privacy import ErasureLedger, epoch
@@ -1130,18 +1131,7 @@ def cancelled_input(store, settings, clock, reference):
         if approval and approval.handoff:
             allowed.add(approval.handoff.predecessor_plan_sha256)
         receipt = _meta(store, INPUT + reference.event_id)
-        event = store.one(
-            "SELECT events.event_id AS event_id, events.schema_version AS "
-            "schema_version, events.source AS source, events.source_event_id AS source_event_id, "
-            "events.conversation_id AS conversation_id, events.actor_id AS actor_id, "
-            "events.event_type AS event_type, events.occurred_at AS occurred_at, "
-            "events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, "
-            "events.body_json AS body_json, events.trace_id AS trace_id, events.idempotency_key AS "
-            "idempotency_key, events.fingerprint AS fingerprint, events.redacted AS redacted, "
-            "events.memory_processed AS memory_processed, events.reply_revision AS reply_revision "
-            "FROM events AS events WHERE events.event_id = %s",
-            (reference.event_id,),
-        )
+        event = event_by_id(store, reference.event_id)
         job = store.one(
             "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS "
             "kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS "
@@ -1412,18 +1402,7 @@ def _check_job(store, settings, clock, job, approval):
         private_life.check_job(store, settings, approval, job)
         return
     receipt = store.one("SELECT value FROM runtime_meta WHERE key = %s", (INPUT + job["event_id"],))
-    event = store.one(
-        "SELECT events.event_id AS event_id, events.schema_version AS "
-        "schema_version, events.source AS source, events.source_event_id AS source_event_id, "
-        "events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type "
-        "AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, "
-        "events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS "
-        "trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
-        "events.redacted AS redacted, events.memory_processed AS memory_processed, "
-        "events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = "
-        "%s",
-        (job["event_id"],),
-    )
+    event = event_by_id(store, job["event_id"])
     value = json.loads(receipt["value"]) if receipt else {}
     if (
         not event

@@ -7,6 +7,7 @@ import re
 from companion import owner_authority, owner_input, private_life, reply_revision, voice_authority
 from companion.bili_video_protocol import MAX_METADATA_BYTES
 from companion.contracts import CoreError
+from companion.events import event_by_id
 from companion.exploration import METERED_USAGE_SQL, read_periods
 from companion.goals import GoalEngine
 from companion.observation import ObservationService
@@ -194,15 +195,7 @@ def check_source(store, settings, clock, row):
             SourceGrantService(store, settings, clock).require(options.source_adapter_id,
                 SourceGrantSnapshot.model_validate(context["source_grant"])
                 if context["source_grant"] else None)
-    owner = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
-        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
-        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
-        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
-        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
-        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
-        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
-        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
-        '%s', (row["event_id"],))
+    owner = event_by_id(store, row["event_id"])
     if not owner or owner["redacted"]:
         raise CoreError("SINGING_ORIGINAL_SOURCE_CHANGED", 403)
     return owner, recipe

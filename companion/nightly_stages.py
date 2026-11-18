@@ -6,6 +6,7 @@ from datetime import date, datetime
 from companion import budget, owner_authority
 from companion.contracts import CoreError
 from companion.diary import day_bounds
+from companion.events import event_by_id
 from companion.goals import GoalProposal
 from companion.memory import Memory
 from companion.memory_authority import source_allowed
@@ -56,26 +57,10 @@ def _episodes(nightly, run, memory):
     if not pending:
         steps["n2"] = "MATERIAL_READY"
         return _yield(nightly, run)
-    first = nightly.store.one('SELECT events.event_id AS event_id, events.schema_version AS '
-        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
-        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
-        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
-        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
-        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
-        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
-        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
-        '%s', (pending[0],))
+    first = event_by_id(nightly.store, pending[0])
     events = []
     for key in pending:
-        event = nightly.store.one('SELECT events.event_id AS event_id, events.schema_version AS '
-            'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
-            'events.conversation_id AS conversation_id, events.actor_id AS actor_id, '
-            'events.event_type AS event_type, events.occurred_at AS occurred_at, '
-            'events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, '
-            'events.body_json AS body_json, events.trace_id AS trace_id, events.idempotency_key AS '
-            'idempotency_key, events.fingerprint AS fingerprint, events.redacted AS redacted, '
-            'events.memory_processed AS memory_processed, events.reply_revision AS reply_revision '
-            'FROM events AS events WHERE events.event_id = %s', (key,))
+        event = event_by_id(nightly.store, key)
         if event and first and event["conversation_id"] == first["conversation_id"]:
             if not source_allowed(nightly.store, nightly.settings, nightly.clock, key, "memory"):
                 raise CoreError("PRIVACY_CHANGED", 409)
