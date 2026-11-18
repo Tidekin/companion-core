@@ -4,6 +4,7 @@ import asyncio
 import json
 import ssl
 import time
+from contextlib import closing
 from types import SimpleNamespace
 
 import httpx
@@ -15,6 +16,7 @@ from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
 from tests.sdk_reader_fixture import worker_for
 from tests.support.model_stream import chunk
+from tests.support.moments import seed_moment
 from tests.support.native_chat import enroll, packet
 from tests.support.native_chat_tls import serve
 from tests.support.owner_console import client as client
@@ -160,6 +162,32 @@ def test_idle_subscription_skips_unchanged_history(client, core, tmp_path, monke
     assert len(first) == len(seen) == 1 and idle == []
 
 
+def test_feed_signature_reuses_only_an_unchanged_database_snapshot(core, monkeypatch):
+    from companion import moments
+    from companion.native_chat_api import _feed_snapshot
+    from companion.store import Store
+
+    moment_id = seed_moment(core, "原生动态")
+    calls = []
+    signature = moments.signature
+
+    def count(store):
+        calls.append(store.backend_pid)
+        return signature(store)
+
+    monkeypatch.setattr(moments, "signature", count)
+    with closing(Store(core.database, core.settings.state_directory)) as reader:
+        with reader.read_snapshot():
+            first = _feed_snapshot(reader)
+            moments.set_liked(core.store, moment_id, True, core.clock())
+            assert _feed_snapshot(reader, first) == first
+        with reader.read_snapshot():
+            fresh = _feed_snapshot(reader, first)
+            assert fresh[1] != first[1]
+            assert _feed_snapshot(reader, fresh) == fresh
+        assert len(calls) == 2
+
+
 def test_live_sse_subscription_revalidates_revoked_device(client, core, tmp_path):
     captured(core, tmp_path)
     key = Ed25519PrivateKey.generate()
@@ -180,6 +208,12 @@ def test_live_sse_subscription_revalidates_revoked_device(client, core, tmp_path
                             if line.startswith('data:'):
                                 assert accepted['event_id'] in line
                                 break
+                        seed_moment(core, "独立连接发布动态")
+                        async for line in lines:
+                            if line == "event: moment":
+                                break
+                        payload = json.loads((await anext(lines)).removeprefix("data: "))
+                        assert payload["signature"][0] == 1
                         owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                             operation_id='stop-live-subscription', authority=authority))
                         async for line in lines:

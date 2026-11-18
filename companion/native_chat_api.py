@@ -71,6 +71,15 @@ def _decoded(text):
         raise CoreError("AVATAR_IMAGE_INVALID", 400) from error
 
 
+def _feed_snapshot(store, previous=None):
+    # Called inside one repeatable read. Only the public change marker is reusable;
+    # the stream checks the session, device, original sources and active turns each tick.
+    token = store.change_token()
+    if previous is not None and token == previous[0]:
+        return previous
+    return token, moments.signature(store)
+
+
 def _moment_event(signature):
     return "event: moment\ndata: " + json.dumps({"signature": signature}) + "\n\n"
 
@@ -142,7 +151,7 @@ def register_routes(app, settings, prefix, auth, authenticate):
         # Admission before response headers preserves normal HTTP authentication errors.
         initial = await execute(request, lambda ctx, check: (
             native_chat.changes(ctx, {}), companion_profile.view(ctx.store, ctx.settings),
-            moments.signature(ctx.store)), readonly=True)
+            _feed_snapshot(ctx.store)), readonly=True)
 
         async def stream():
             ((items, signatures), profile, feed), heartbeat = initial, time.monotonic()
@@ -169,17 +178,18 @@ def register_routes(app, settings, prefix, auth, authenticate):
                     return
                 try:
                     (items, signatures), latest, current = await execute(request,
-                        lambda ctx, check, prior=signatures: (native_chat.changes(ctx, prior),
+                        lambda ctx, check, prior=signatures, previous=feed: (
+                            native_chat.changes(ctx, prior),
                             companion_profile.view(ctx.store, ctx.settings),
-                            moments.signature(ctx.store)),
+                            _feed_snapshot(ctx.store, previous)),
                         readonly=True)
                     if latest != profile:
                         profile = latest
                         yield _profile_event(profile)
-                    if current != feed:
-                        # Only a change marker; the client re-reads the feed it is showing.
-                        feed = current
-                        yield _moment_event(feed)
+                    changed = current[1] != feed[1]
+                    feed = current
+                    if changed:
+                        yield _moment_event(feed[1])
                 except CoreError as error:
                     # No old text accompanies a revoked/expired subscription.
                     yield "event: session\ndata: " + json.dumps({"error": error.code}) + "\n\n"
