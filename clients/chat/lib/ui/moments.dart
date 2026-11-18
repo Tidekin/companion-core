@@ -45,6 +45,7 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
   List<Moment>? items;
   String? nextCursor;
   int feedRevision = 0;
+  Future<void>? refreshing;
   bool loadingMore = false;
   List<Moment> memories = const [];
   bool memoriesOpen = true;
@@ -67,33 +68,65 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
     load();
   }
 
-  Future<void> load() async {
-    final revision = ++feedRevision;
+  Future<void> load() {
+    feedRevision++;
+    return refreshing ??= refreshFeed();
+  }
+
+  Future<void> refreshFeed() async {
+    // Let synchronous changes join this refresh before requesting the first page.
+    await Future<void>.value();
     try {
-      final feed = await _backend.moments();
-      final past = await _backend.momentMemories();
-      final open = {
-        for (final id in openThreads) id: await _backend.momentComments(id),
-      };
-      if (!mounted || revision != feedRevision) return;
-      setState(() {
-        feedRevision++;
-        items = feed.items;
-        nextCursor = feed.nextCursor;
-        memories = past;
-        threads.addAll(open);
-        error = null;
-      });
-    } catch (failure) {
-      if (mounted && revision == feedRevision) {
-        setState(() => error = _failure(failure));
+      while (mounted) {
+        final revision = feedRevision;
+        try {
+          final depth = items?.length ?? 0;
+          var page = await _backend.moments();
+          final visible = [...page.items];
+          while (mounted &&
+              revision == feedRevision &&
+              visible.length < depth &&
+              page.nextCursor != null) {
+            page = await _backend.moments(before: page.nextCursor);
+            visible.addAll(page.items);
+          }
+          if (!mounted || revision != feedRevision) continue;
+          final past = await _backend.momentMemories();
+          final present = {
+            for (final moment in [...visible, ...past]) moment.id,
+          };
+          final open = <String, List<MomentComment>>{};
+          for (final id in openThreads.toList()) {
+            if (!mounted || revision != feedRevision) break;
+            if (present.contains(id)) {
+              open[id] = await _backend.momentComments(id);
+            }
+          }
+          if (!mounted || revision != feedRevision) continue;
+          setState(() {
+            items = visible;
+            nextCursor = page.nextCursor;
+            memories = past;
+            openThreads.retainAll(present);
+            threads
+              ..clear()
+              ..addAll(open);
+            error = null;
+          });
+        } catch (failure) {
+          if (!mounted || revision != feedRevision) continue;
+          setState(() => error = _failure(failure));
+        }
+        break;
       }
+    } finally {
+      refreshing = null;
     }
   }
 
   Future<void> loadMore() async {
     final before = nextCursor;
-    if (before == null || loadingMore) return;
+    if (before == null || loadingMore || refreshing != null) return;
     final revision = feedRevision;
     setState(() => loadingMore = true);
     try {
@@ -122,7 +155,7 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
             .showSnackBar(SnackBar(content: Text(_failure(failure))));
       }
     }
-    await load();
+    if (mounted) await load();
   }
 
   Future<void> toggleLike(Moment moment) async {
@@ -190,9 +223,8 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
       return;
     }
     openThreads.add(moment.id);
-    await run(() async {
-      threads[moment.id] = await _backend.momentComments(moment.id);
-    });
+    setState(() {});
+    await load();
   }
 
   Future<void> comment(Moment moment) async {
