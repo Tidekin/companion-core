@@ -14,7 +14,7 @@ from time import monotonic
 import psycopg
 import pytest
 
-from companion import __main__, shutdown, worker_loop
+from companion import __main__, domain_runtime, shutdown, worker_loop
 from companion import core as core_module
 from companion import life_worker as life_module
 from companion.autonomous_selector import Selection
@@ -22,7 +22,7 @@ from companion.store import utcnow
 from companion.worker_lock import single_worker
 from companion.worker_schedule import UnitResult
 from companion.worker_wakeup import Wakeup
-from tests.conftest import run
+from tests.conftest import ingest, run
 from tests.support.worker_shutdown import NoNetworkClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +40,32 @@ def chat_worker(core, monkeypatch):
     monkeypatch.setattr(core_module, "Core", lambda *_: core)
     monkeypatch.setattr(__main__.httpx, "AsyncClient", lambda **_: NoNetworkClient())
     return core
+
+
+def test_independent_worker_completes_status_command_without_background_services(core, monkeypatch):
+    job = ingest(core, text="/发送状态")
+
+    def unused(*args, **kwargs):
+        pytest.fail("status command constructed an unrelated worker service")
+
+    for factory in ("NightlyConsolidator", "WakePlanner", "LifeService", "ReadingService"):
+        monkeypatch.setattr(core_module, factory, unused)
+    monkeypatch.setattr(domain_runtime, "DiaryService", unused)
+    monkeypatch.setattr(__main__.httpx, "AsyncClient", lambda **_: NoNetworkClient())
+    completed = worker_loop.Recorder.completed
+
+    def stop_after_unit(self, **kwargs):
+        completed(self, **kwargs)
+        shutdown.request()
+
+    monkeypatch.setattr(worker_loop.Recorder, "completed", stop_after_unit)
+    run(asyncio.wait_for(__main__.worker(core.settings), 10))
+    assert core.store.one("SELECT state FROM jobs WHERE job_id=%s", (job["job_id"],)) == {
+        "state": "SUCCEEDED",
+    }
+    reply, = core.store.rows("SELECT content_json FROM outbox")
+    assert json.loads(reply["content_json"])["text"] == "没有待核对的发送。"
+    assert core.store.rows("SELECT request_id FROM model_usage") == []
 
 
 def test_stop_between_units_exits_without_claiming_another(chat_worker, monkeypatch):
