@@ -15,7 +15,8 @@ runs:
       run: |
         if [[ ! -f "$(pg_config --includedir-server)/postgres.h" ]]; then
           major=$(pg_config --version | awk '{print $2}' | cut -d. -f1)
-          sudo apt-get update -qq
+          # The image can have a PGDG server and only Ubuntu's package sources enabled.
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y --no-install-recommends "postgresql-server-dev-$major"
         fi
         make -j2 OPTFLAGS="" with_llvm=no
