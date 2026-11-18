@@ -89,15 +89,16 @@ class _RevealTextState extends State<RevealText>
   @override
   void initState() {
     super.initState();
-    shown = 0;
+    shown = widget.text.isEmpty ? 0 : 1;
     ticker.start();
   }
 
   @override
   void didUpdateWidget(RevealText old) {
     super.didUpdateWidget(old);
-    if (!widget.text.startsWith(old.text.substring(0, shown.floor()))) {
-      shown = 0; // A different text: start over rather than show a mismatch.
+    final prefix = old.text.characters.take(shown.floor()).toString();
+    if (prefix.isEmpty || !widget.text.startsWith(prefix)) {
+      shown = widget.text.isEmpty ? 0 : 1;
     }
     if (!ticker.isActive) {
       last = Duration.zero;
@@ -134,7 +135,9 @@ class _RevealTextState extends State<RevealText>
 
   @override
   Widget build(BuildContext context) => Text(
-    widget.text.characters.take(shown.floor()).toString(),
+    Motion.reduced(context)
+        ? widget.text
+        : widget.text.characters.take(shown.floor()).toString(),
     style: widget.style,
   );
 }

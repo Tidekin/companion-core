@@ -57,10 +57,21 @@ void main() {
       ),
     );
     expect(find.text('第一行。'), findsOneWidget);
-    // The last, still-growing line starts empty and catches up at reading pace.
+    // The first grapheme paints immediately while the rest catches up.
+    expect(find.text('第'), findsOneWidget);
     expect(find.text('第二行正在生成'), findsNothing);
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('第二行正在生成'), findsOneWidget);
     expect(find.byType(TypingDots), findsNothing);
   });
+
+  testWidgets(
+    'first frame renders a whole grapheme and replacement starts fresh',
+    (tester) async {
+      await tester.pumpWidget(host(const RevealText('👩‍🔬正在输入')));
+      expect(find.text('👩‍🔬'), findsOneWidget);
+      await tester.pumpWidget(host(const RevealText('👩‍🚀更新')));
+      expect(find.text('👩‍🚀'), findsOneWidget);
+    },
+  );
 }
