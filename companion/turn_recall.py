@@ -287,6 +287,37 @@ def _document(source, notes, zone):
     return "\n".join(parts)
 
 
+# A qualification starting with a demonstrative can refer to another conversation topic.
+_REFERENTIAL = re.compile(
+    r"^[“「『\s]*[这那](?:件事|些|个)?(?:都)?(?:只是|仅仅是|不过是|并不是|不是|并非|指的是|说的是)"
+    r"[^。！？!?]*[。！？!?”」』\s]*$"
+)
+
+
+def _nearby_turns(rows):
+    """Nominate context by position among delivered turns, without granting access to it."""
+    return {
+        row["event_id"]: [prior["event_id"] for prior in rows[max(0, index - 2):index]]
+        for index, row in enumerate(rows) if _REFERENTIAL.match(row.get("user_text") or "")
+    }
+
+
+def _grounded(rows, notes, ranked, nearby, query):
+    """A qualification and its independently selected prior context must fit together."""
+    supported = set()
+    for index in sorted(ranked):
+        row = rows[index]
+        text = (row.get("user_text") or "").strip()
+        event_id = row["event_id"]
+        # Restrict this rule to plain text that the current question does not quote directly.
+        if (_REFERENTIAL.match(text) and not notes[index] and not row.get("quoted_text")
+                and text.rstrip("。！？!?") not in query
+                and supported.isdisjoint(nearby.get(event_id, ()))):
+            continue
+        supported.add(event_id)
+    return [index for index in ranked if rows[index]["event_id"] in supported]
+
+
 def enabled(settings, query):
     return (settings.turn_recall_limit > 0 and settings.turn_recall_scan_turns > 0
             and bool(query.strip()))
@@ -350,6 +381,7 @@ async def _prefetch(store, settings, job, query):
     trace_id = job.get("trace_id")
     with phase("turn_recall_candidates", trace_id):
         rows, notes = _candidates(store, settings, job)
+        nearby = _nearby_turns(rows)
         docs = [_document(row, note, settings.timezone)
                 for row, note in zip(rows, notes, strict=True)]
         work = retrieval_work.current()
@@ -368,7 +400,10 @@ async def _prefetch(store, settings, job, query):
     except TimeoutError:
         work.mark("turn_rank_timeout")
         return []  # Not None: context() must not fall back to ranking inline on the loop.
-    return {"first": [rows[index]["event_id"] for index in first],
+    context_ids = {rows[index]["event_id"] for index in (*first, *hop)}
+    nearby = {key: prior for key, prior in nearby.items() if key in context_ids}
+    return {**({"nearby": nearby} if nearby else {}),
+            "first": [rows[index]["event_id"] for index in first],
             "hop": [rows[index]["event_id"] for index in hop],
             "seeds": [{"event_id": rows[index]["event_id"],
                        "document_sha256": hashlib.sha256(docs[index].encode()).hexdigest(),
@@ -440,6 +475,7 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
     if ranked_ids is not None:
         if not isinstance(ranked_ids, dict):
             ranked_ids = {"first": list(ranked_ids), "hop": []}
+        nearby = ranked_ids.get("nearby", {})
         seeds = ranked_ids.get("seeds", [])
         if seeds and ranked_ids["hop"]:
             keys = [seed["event_id"] for seed in seeds]
@@ -468,6 +504,7 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
                            settings.turn_recall_second_hop if ranked_ids["hop"] else 0)
     else:
         rows, notes = _candidates(store, settings, job)
+        nearby = _nearby_turns(rows)
         pairs = [(row, note) for row, note in zip(rows, notes, strict=True)
                  if row["event_id"] not in exclude_ids and allowed([row["event_id"]])]
         rows, notes = [pair[0] for pair in pairs], [pair[1] for pair in pairs]
@@ -482,6 +519,7 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
         return None
     # A recalled turn costs at least what its full history replay would: a turn that
     # the signed byte ceiling crops from history cannot return here in a shorter form.
+    ranked = _grounded(rows, notes, ranked, nearby, query)
     full = {index: sum(len(message["content"].encode())
                        for message in turn_messages(rows[index], store)) for index in ranked}
     while ranked:
@@ -502,7 +540,7 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
                     **({"retrieval_seeds": ranked_ids["seeds"]} if (
                         isinstance(ranked_ids, dict) and ranked_ids.get("seeds")
                         and chosen_ids & set(ranked_ids["hop"])) else {})}
-        ranked = ranked[:-1]
+        ranked = _grounded(rows, notes, ranked[:-1], nearby, query)
     return None
 
 
