@@ -114,12 +114,15 @@ def rows(store, *, before=None, before_id="", limit=30, include_hidden=False):
     )
 
 
+def _item(row):
+    return {"id": row["moment_id"], "text": row["text"], "trigger": row["trigger"],
+            "state": row["state"], "created_at": row["created_at"],
+            "liked": row["liked_at"] is not None,
+            "source_event_ids": json.loads(row["source_event_ids_json"])}
+
+
 def items(store, **kwargs):
-    return [{"id": row["moment_id"], "text": row["text"], "trigger": row["trigger"],
-             "state": row["state"], "created_at": row["created_at"],
-             "liked": row["liked_at"] is not None,
-             "source_event_ids": json.loads(row["source_event_ids_json"])}
-            for row in rows(store, **kwargs)]
+    return [_item(row) for row in rows(store, **kwargs)]
 
 
 def set_liked(store, moment_id, liked, now):
@@ -140,16 +143,16 @@ def memories(store, settings, now):
     """Published moments from this calendar day in earlier years (那年今日); no model call."""
     zone = ZoneInfo(settings.timezone)
     today = datetime.fromisoformat(now).astimezone(zone)
-    found = []
-    for row in rows(store, limit=200, before=_day_bounds(settings, now)[0]):
-        local = datetime.fromisoformat(row["created_at"]).astimezone(zone)
-        if (local.month, local.day) == (today.month, today.day) and local.year < today.year:
-            found.append({"id": row["moment_id"], "text": row["text"], "trigger": row["trigger"],
-                          "state": row["state"], "created_at": row["created_at"],
-                          "liked": row["liked_at"] is not None,
-                          "years_ago": today.year - local.year,
-                          "source_event_ids": json.loads(row["source_event_ids_json"])})
-    return found
+    candidates = store.rows(
+        "SELECT moment_id, text, trigger, state, created_at, liked_at, source_event_ids_json, "
+        "EXTRACT(YEAR FROM local_date)::int AS local_year FROM ("
+        "SELECT *, (created_at::timestamptz AT TIME ZONE %s)::date AS local_date "
+        "FROM moments WHERE state = 'PUBLISHED' AND created_at < %s) AS past "
+        "WHERE EXTRACT(MONTH FROM local_date) = %s AND EXTRACT(DAY FROM local_date) = %s "
+        "ORDER BY created_at DESC, moment_id DESC LIMIT 200",
+        (settings.timezone, day_bounds(today.date(), settings.timezone)[0], today.month, today.day),
+    )
+    return [{**_item(row), "years_ago": today.year - row["local_year"]} for row in candidates]
 
 
 def signature(store):
