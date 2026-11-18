@@ -116,6 +116,7 @@ jobs:
         if: ${{ runner.os == 'Windows' && fromJSON(needs.preflight.outputs.windows).product }}
         timeout-minutes: 2
         run: docker compose version --short
+      - uses: ./.github/actions/install-pgvector
       - name: Initialize isolated native PostgreSQL
         run: uv run --frozen python -B scripts/ci_postgres.py start
       - name: Run a complete, disjoint suite shard
@@ -255,6 +256,7 @@ jobs:
           --tmpfs /scratch:rw,nosuid,nodev,exec,size=768m,uid=10002,gid=10002,mode=0700
           -v "${{ github.workspace }}/scripts/smoke_executor.py:/verify.py:ro"
           --entrypoint python companion-executor:test /verify.py
+      - uses: ./.github/actions/install-pgvector
       - name: Start the disposable PostgreSQL cluster for the packaged Core
         run: python -B scripts/ci_postgres.py start
       - name: Initialize the packaged Core against the runner database
@@ -457,6 +459,7 @@ jobs:
           cache-suffix: python-3.12
       - run: uv sync --frozen --group reader
       - run: uv run --group reader python -m playwright install chromium --only-shell
+      - uses: ./.github/actions/install-pgvector
       - name: Initialize isolated native PostgreSQL
         run: uv run --frozen --group reader python -B scripts/ci_postgres.py start
       - name: Prepare Nginx for console proxy checks

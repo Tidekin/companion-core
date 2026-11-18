@@ -1,4 +1,4 @@
-"""Local Chinese embeddings; SQLite remains the only memory/index store."""
+"""Local Chinese embeddings and exact PostgreSQL memory nomination."""
 
 import asyncio
 import hashlib
@@ -114,57 +114,49 @@ class SemanticIndex:
         except Exception as error:
             raise CoreError("MEMORY_INDEX_UNAVAILABLE", 503) from error
 
-    def _nomination_rows(self, subjects=(), memory_ids=None):
+    def _nearest(self, question, subjects, memory_ids):
         work = retrieval_work.current()
-        ceiling = min(2048, work.remaining("vector_rows"), work.remaining("vector_bytes") // 2048)
-        if not ceiling:
+        limit = min(48, work.remaining("vector_rows"))
+        if not limit:
             work.mark("vector_rows")
             return []
-        filters, params = "", [INDEX_VERSION]
+        filters = ["v.model_version=%s", "v.embedding IS NOT NULL",
+                   "public.vector_dims(v.embedding)=%s", "m.privacy_scope='private'",
+                   "m.status IN ('CONFIRMED','HYPOTHESIS')", "m.confidence>0"]
+        params = [INDEX_VERSION, len(question)]
         if memory_ids is not None:
-            filters += "AND m.memory_id = ANY(%s::text[]) "
+            filters.append("m.memory_id=ANY(%s::text[])")
             params.append(list(memory_ids))
         if subjects:
-            filters += "AND m.subject = ANY(%s::text[]) "
+            filters.append("m.subject=ANY(%s::text[])")
             params.append(list(subjects))
+        # Only IDs cross the database boundary. SQL time is metered over the full scan.
         rows = work.rows(self.store,
-            "SELECT v.memory_id,v.vector FROM memory_vectors v JOIN memories m USING(memory_id) "
-            "WHERE v.model_version=%s AND octet_length(v.vector)<=2048 "
-            "AND m.status IN ('CONFIRMED','HYPOTHESIS') AND m.privacy_scope='private' "
-            "AND m.confidence>0 " + filters + "ORDER BY v.record_sequence LIMIT %s",
-            (*params, ceiling), limit=ceiling)
-        if len(rows) == ceiling:
-            work.mark("vector_pool")
-        for row in rows:
-            work.take("vector_rows")
-            work.take("vector_bytes", len(row["vector"]))
-        return rows
+            "SELECT v.memory_id FROM memory_vectors v JOIN memories m USING(memory_id) WHERE "
+            + " AND ".join(filters)
+            + " ORDER BY v.embedding OPERATOR(public.<#>) %s::real[]::public.vector,"
+              " v.record_sequence,v.memory_id LIMIT %s",
+            (*params, question.tolist(), limit), limit=limit)
+        work.take("vector_rows", len(rows))
+        if len(rows) == limit < 48:
+            work.mark("vector_rows")
+        return [row["memory_id"] for row in rows]
 
-    @staticmethod
-    def _nomination_order(rows, question):
-        import numpy as np
-
-        scores = {}
-        for row in rows:
-            try:
-                vector = np.frombuffer(row["vector"], dtype="<f4")
-                if vector.shape != question.shape or not np.isfinite(vector).all():
-                    raise ValueError()
-                scores[row["memory_id"]] = float(np.dot(vector, question))
-            except ValueError:
-                retrieval_work.current().mark("vector_cache")
-        return sorted(scores, key=lambda mid: -scores[mid])[:48]
+    def _has_vectors(self):
+        return retrieval_work.current().rows(self.store,
+            "SELECT 1 FROM memory_vectors WHERE model_version=%s AND embedding IS NOT NULL LIMIT 1",
+            (INDEX_VERSION,), limit=1)
 
     def nominate(self, query, *, subjects=(), memory_ids=None):
-        rows = self._nomination_rows(subjects, memory_ids)
-        return self._nomination_order(rows, self._infer(query, ())[1]) if rows else []
+        if not self._has_vectors():
+            return []
+        return self._nearest(self._infer(query, ())[1], subjects, memory_ids)
 
     async def nominate_async(self, query, *, subjects=(), memory_ids=None):
-        rows = self._nomination_rows(subjects, memory_ids)
-        if not rows:
+        if not self._has_vectors():
             return []
         _, question = await asyncio.to_thread(self._infer, query, ())
-        return self._nomination_order(rows, question)
+        return self._nearest(question, subjects, memory_ids)
 
     def _prepare(self, rows):
         import numpy as np
@@ -175,7 +167,8 @@ class SemanticIndex:
                 'SELECT memory_vectors.memory_id AS memory_id, memory_vectors.model_version AS '
                 'model_version, memory_vectors.content_hash AS content_hash, memory_vectors.vector '
                 'AS vector FROM memory_vectors AS memory_vectors WHERE '
-                'memory_vectors.model_version = %s AND memory_vectors.memory_id IN (SELECT '
+                'memory_vectors.model_version = %s AND memory_vectors.embedding IS NOT NULL '
+                'AND memory_vectors.memory_id IN (SELECT '
                 'parsed.value COLLATE "C" AS _col_0 FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS '
                 'JSON)) AS parsed(value))',
                 (INDEX_VERSION, encode([row["memory_id"] for row in rows])),
@@ -214,12 +207,16 @@ class SemanticIndex:
                 vectors[row["memory_id"]] = vector
                 # A concurrent forget/correction must not recreate a stale derived index.
                 self.store.execute(
-                    "INSERT INTO memory_vectors (memory_id,model_version,content_hash,vector) "
-                    "SELECT memory_id,%s,%s,%s FROM memories WHERE memory_id=%s AND content=%s "
+                    "INSERT INTO memory_vectors "
+                    "(memory_id,model_version,content_hash,vector,embedding) "
+                    "SELECT memory_id,%s,%s,%s,%s::real[]::public.vector FROM memories "
+                    "WHERE memory_id=%s AND content=%s "
                     "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0 FOR SHARE "
                     "ON CONFLICT (memory_id) DO UPDATE SET model_version=excluded.model_version,"
-                    "content_hash=excluded.content_hash,vector=excluded.vector,record_sequence=DEFAULT",
-                    (INDEX_VERSION, key, vector.tobytes(), row["memory_id"], row["content"]),
+                    "content_hash=excluded.content_hash,vector=excluded.vector,"
+                    "embedding=excluded.embedding,record_sequence=DEFAULT",
+                    (INDEX_VERSION, key, vector.tobytes(), vector.tolist(), row["memory_id"],
+                     row["content"]),
                 )
         # Only the bounded, source-validated candidate set reaches scoring.
         return {key: float(np.dot(value, question)) for key, value in vectors.items()}
