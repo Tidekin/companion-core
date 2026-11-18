@@ -5,6 +5,7 @@ from datetime import datetime
 
 from companion import model_carry, owner_authority, paid_budget
 from companion.contracts import CoreError
+from companion.model_records import admission_by_request_id
 from companion_delivery_protocol import digest, hash_value
 
 
@@ -23,19 +24,7 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
     unknown = {k for k, v in view["model_latest"].items() if v["state"] == "UNKNOWN"}
     retained = {item["request_id"]: item for item in prior["manifest"]["unknowns"]}
     inputs = []
-    fresh = {key: store.one('SELECT model_admissions.request_id AS request_id, '
-        'model_admissions.logical_request_id AS logical_request_id, model_admissions.attempt_id AS '
-        'attempt_id, model_admissions.attempt_number AS attempt_number, model_admissions.window_id '
-        'AS window_id, model_admissions.contract_sha256 AS contract_sha256, '
-        'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
-        'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
-        'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
-        'output_bound, model_admissions.lease_token AS lease_token, model_admissions.lease_until '
-        'AS lease_until, model_admissions.io_started_at AS io_started_at, '
-        'model_admissions.journal_path AS journal_path, model_admissions.journal_id AS journal_id, '
-        'model_admissions.measurement_json AS measurement_json, model_admissions.authority_json AS '
-        'authority_json FROM model_admissions AS model_admissions WHERE '
-        'model_admissions.request_id = %s', (key,))
+    fresh = {key: admission_by_request_id(store, key)
              for key in unknown - retained.keys()}
     revisions = store.rows(
         'SELECT owner_authority_revisions.grant_id AS grant_id, owner_authority_revisions.revision '
@@ -206,23 +195,7 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
         ):
             raise ValueError("model renewal original liability")
         if item["request_id"] in fresh:
-            admission = store.one(
-                'SELECT model_admissions.request_id AS request_id, '
-                'model_admissions.logical_request_id AS logical_request_id, '
-                'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
-                'attempt_number, model_admissions.window_id AS window_id, '
-                'model_admissions.contract_sha256 AS contract_sha256, '
-                'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json '
-                'AS snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
-                'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
-                'output_bound, model_admissions.lease_token AS lease_token, '
-                'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
-                'io_started_at, model_admissions.journal_path AS journal_path, '
-                'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
-                'measurement_json, model_admissions.authority_json AS authority_json FROM '
-                'model_admissions AS model_admissions WHERE model_admissions.request_id = '
-                '%s', (item["request_id"],)
-            )
+            admission = admission_by_request_id(store, item["request_id"])
             if (
                 not admission
                 or item["authority"] not in [owner_authority.reference(r).as_dict()

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from companion import paid_budget
 from companion.contracts import CoreError
+from companion.model_records import admission_by_request_id
 from companion.store import encode
 from companion_delivery_protocol import digest, hash_value, identifier, timestamp
 from companion_delivery_protocol import model_carry as wire
@@ -76,19 +77,7 @@ def _tuple(admission):
 
 
 def _validate_close(store, row, latest):
-    admission = store.one('SELECT model_admissions.request_id AS request_id, '
-        'model_admissions.logical_request_id AS logical_request_id, model_admissions.attempt_id AS '
-        'attempt_id, model_admissions.attempt_number AS attempt_number, model_admissions.window_id '
-        'AS window_id, model_admissions.contract_sha256 AS contract_sha256, '
-        'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
-        'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
-        'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
-        'output_bound, model_admissions.lease_token AS lease_token, model_admissions.lease_until '
-        'AS lease_until, model_admissions.io_started_at AS io_started_at, '
-        'model_admissions.journal_path AS journal_path, model_admissions.journal_id AS journal_id, '
-        'model_admissions.measurement_json AS measurement_json, model_admissions.authority_json AS '
-        'authority_json FROM model_admissions AS model_admissions WHERE '
-        'model_admissions.request_id = %s', (row["request_id"],))
+    admission = admission_by_request_id(store, row["request_id"])
     financial = latest.get(row["request_id"])
     if (
         not admission
@@ -130,21 +119,7 @@ def close_unstarted(store, settings, request_id, now, *, commit):
         head = owner_authority._latest(store)
         if not head or head["state"] != "STOPPED":
             raise CoreError("OWNER_AUTHORITY_STOP_REQUIRED", 409)
-        admission = store.one('SELECT model_admissions.request_id AS request_id, '
-            'model_admissions.logical_request_id AS logical_request_id, '
-            'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
-            'attempt_number, model_admissions.window_id AS window_id, '
-            'model_admissions.contract_sha256 AS contract_sha256, model_admissions.payload_sha256 '
-            'AS payload_sha256, model_admissions.snapshot_json AS snapshot_json, '
-            'model_admissions.reserved_micro_usd AS reserved_micro_usd, '
-            'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
-            'output_bound, model_admissions.lease_token AS lease_token, '
-            'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
-            'io_started_at, model_admissions.journal_path AS journal_path, '
-            'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
-            'measurement_json, model_admissions.authority_json AS authority_json FROM '
-            'model_admissions AS model_admissions WHERE model_admissions.request_id = '
-            '%s', (request_id,))
+        admission = admission_by_request_id(store, request_id)
         usage = store.one('SELECT state FROM model_usage WHERE request_id = %s', (request_id,))
         if not admission or not usage or usage["state"] != "UNKNOWN":
             raise CoreError("MODEL_UNSTARTED_CLOSE_NOT_ELIGIBLE", 409)
@@ -222,22 +197,7 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     ):
         raise ValueError("model carry incomplete inventory")
     for item in items:
-        admission = store.one(
-            'SELECT model_admissions.request_id AS request_id, model_admissions.logical_request_id '
-            'AS logical_request_id, model_admissions.attempt_id AS attempt_id, '
-            'model_admissions.attempt_number AS attempt_number, model_admissions.window_id AS '
-            'window_id, model_admissions.contract_sha256 AS contract_sha256, '
-            'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
-            'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
-            'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
-            'output_bound, model_admissions.lease_token AS lease_token, '
-            'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
-            'io_started_at, model_admissions.journal_path AS journal_path, '
-            'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
-            'measurement_json, model_admissions.authority_json AS authority_json FROM '
-            'model_admissions AS model_admissions WHERE model_admissions.request_id = '
-            '%s', (item["request_id"],)
-        )
+        admission = admission_by_request_id(store, item["request_id"])
         financial = latest[item["request_id"]]
         if (
             not admission
@@ -284,21 +244,7 @@ def close_owned(store, settings, request_id, dispatch, now):
         return
     supported(store, settings)
     with store.transaction():
-        admission = store.one('SELECT model_admissions.request_id AS request_id, '
-            'model_admissions.logical_request_id AS logical_request_id, '
-            'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
-            'attempt_number, model_admissions.window_id AS window_id, '
-            'model_admissions.contract_sha256 AS contract_sha256, model_admissions.payload_sha256 '
-            'AS payload_sha256, model_admissions.snapshot_json AS snapshot_json, '
-            'model_admissions.reserved_micro_usd AS reserved_micro_usd, '
-            'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
-            'output_bound, model_admissions.lease_token AS lease_token, '
-            'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
-            'io_started_at, model_admissions.journal_path AS journal_path, '
-            'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
-            'measurement_json, model_admissions.authority_json AS authority_json FROM '
-            'model_admissions AS model_admissions WHERE model_admissions.request_id = '
-            '%s', (request_id,))
+        admission = admission_by_request_id(store, request_id)
         usage = store.one('SELECT state FROM model_usage WHERE request_id = %s', (request_id,))
         if not admission or not usage or usage["state"] != "UNKNOWN":
             return
