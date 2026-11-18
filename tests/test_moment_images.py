@@ -13,6 +13,8 @@ from tests.support.life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
 from tests.support.moments import moment_ready
+from tests.support.owner_console import client as client
+from tests.support.owner_console import login
 
 PROMPT = "傍晚窗边，一杯热可可和一本摊开的星图"
 
@@ -149,3 +151,101 @@ def test_a_picture_prompt_belongs_only_to_a_moment():
     # Absent stays absent, so earlier decisions keep their exact stored form.
     assert "image_prompt" not in LifeDecision.model_validate(
         {**base, "destination": "PRIVATE_MOMENT"}).model_dump()
+
+def _interrupt_image_worker(settings, now, phase, channel):
+    from contextlib import ExitStack, closing
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from companion.postgres import Database
+    from companion.store import Store
+
+    def pause():
+        channel.send("paused")
+        channel.recv()
+
+    def provider(request):
+        channel.send("called")
+        if phase == "dispatched":
+            pause()
+        return image_reply(png())
+
+    def write_then_pause(*args):
+        write(*args)
+        pause()
+
+    with ExitStack() as stack:
+        database = stack.enter_context(Database(settings.database))
+        store = stack.enter_context(closing(Store(database, settings.state_directory)))
+        core = SimpleNamespace(settings=settings, clock=lambda: now, store=store,
+                               image_transport=httpx.MockTransport(provider))
+        write = moment_images._write
+        if phase == "reserved":
+            stack.enter_context(patch.object(moment_images.cloud_budget, "mark_dispatched",
+                                            lambda *args: pause()))
+        if phase == "written":
+            stack.enter_context(patch.object(moment_images, "_write", write_then_pause))
+        run(moment_images.run_once(core))
+
+
+@pytest.mark.parametrize(("phase", "erased"), [
+    ("reserved", False), ("dispatched", False), ("written", False),
+    ("reserved", True), ("dispatched", True),
+])
+def test_dead_worker_recovery_preserves_fees_files_and_native_feed(
+    client, core, tmp_path, phase, erased,
+):
+    import multiprocessing
+
+    moment_id = drawn(core, tmp_path)
+    headers = login(client)
+    feed = "/v1/console/chat/moments"
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe()
+    worker = ctx.Process(target=_interrupt_image_worker,
+                         args=(core.settings, core.clock(), phase, sender))
+    worker.start()
+    sender.close()
+    path = moment_images._path(core.store, moment_id, 0)
+    try:
+        if phase != "reserved":
+            assert receiver.poll(45) and receiver.recv() == "called"
+        assert receiver.poll(45) and receiver.recv() == "paused"
+        assert client.get(feed, headers=headers).json()["items"][0]["image_pending"]
+        assert path.exists() == (phase == "written")
+        assert not run(moment_images.run_once(core, allow_draw=False))
+    finally:
+        worker.terminate()
+        worker.join(15)
+        receiver.close()
+        assert not worker.is_alive()
+        worker.close()
+
+    if erased:
+        with core.store.transaction(control_write=True):
+            moments.forget(core.store, core.ledger, moment_id, core.clock())
+    assert run(moment_images.run_once(core, allow_draw=False))
+    assert not run(moment_images.run_once(core))
+    entries = client.get(feed, headers=headers).json()["items"]
+    if erased:
+        assert entries == []
+    else:
+        assert "image_pending" not in entries[0] and entries[0]["images"] == []
+    assert not path.exists() and not path.with_suffix(".tmp").exists()
+    row = core.store.one(
+        "SELECT i.state, u.state AS usage_state, u.billed_micro_usd, c.state AS cost_state, "
+        "c.accounted_micro_usd, c.reserved_micro_usd, c.dispatched_at FROM moment_images i "
+        "JOIN model_usage u ON u.request_id=i.usage_request_id JOIN cloud_cost_snapshots c "
+        "ON c.reference_type='model' AND c.reference_id=u.request_id WHERE i.moment_id=%s",
+        (moment_id,))
+    if phase == "reserved":
+        assert row["state"] == ("ERASED" if erased else "EXPIRED")
+        assert row["usage_state"] == row["cost_state"] == "SETTLED"
+        assert row["billed_micro_usd"] == row["accounted_micro_usd"] == 0
+        assert row["dispatched_at"] is None
+    else:
+        assert row["state"] == ("ERASED" if erased else "UNKNOWN")
+        assert row["usage_state"] == row["cost_state"] == "UNKNOWN"
+        assert row["billed_micro_usd"] == row["accounted_micro_usd"]
+        assert row["accounted_micro_usd"] == row["reserved_micro_usd"] > 0
+        assert row["dispatched_at"] is not None
