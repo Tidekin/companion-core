@@ -116,6 +116,39 @@ jobs:
         if: ${{ runner.os == 'Windows' && fromJSON(needs.preflight.outputs.windows).product }}
         timeout-minutes: 2
         run: docker compose version --short
+      - &pgvector_source
+        name: Check out pgvector 0.8.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: pgvector/pgvector
+          ref: f37c13f68b57d2c3472b2214fbcff699d6d34876 # v0.8.7
+          path: .local/ci-pgvector
+          persist-credentials: false
+      - &pgvector_linux
+        name: Build the matching pgvector extension on linux
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: .local/ci-pgvector
+        run: |
+          if [[ ! -f "$(pg_config --includedir-server)/postgres.h" ]]; then
+            major=$(pg_config --version | awk '{print $2}' | cut -d. -f1)
+            # The image can have a PGDG server and only Ubuntu's package sources enabled.
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            sudo apt-get install -y --no-install-recommends "postgresql-server-dev-$major"
+          fi
+          make -j2 OPTFLAGS="" with_llvm=no
+          sudo make install with_llvm=no
+      - &pgvector_windows
+        name: Build the matching pgvector extension on windows
+        if: runner.os == 'Windows'
+        shell: cmd
+        working-directory: .local/ci-pgvector
+        run: |
+          for %%i in ("%PGBIN%\..") do set "PGROOT=%%~fi"
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          nmake /nologo /F Makefile.win install
       - name: Initialize isolated native PostgreSQL
         run: uv run --frozen python -B scripts/ci_postgres.py start
       - name: Run a complete, disjoint suite shard
@@ -255,6 +288,9 @@ jobs:
           --tmpfs /scratch:rw,nosuid,nodev,exec,size=768m,uid=10002,gid=10002,mode=0700
           -v "${{ github.workspace }}/scripts/smoke_executor.py:/verify.py:ro"
           --entrypoint python companion-executor:test /verify.py
+      - *pgvector_source
+      - *pgvector_linux
+      - *pgvector_windows
       - name: Start the disposable PostgreSQL cluster for the packaged Core
         run: python -B scripts/ci_postgres.py start
       - name: Initialize the packaged Core against the runner database
@@ -457,6 +493,9 @@ jobs:
           cache-suffix: python-3.12
       - run: uv sync --frozen --group reader
       - run: uv run --group reader python -m playwright install chromium --only-shell
+      - *pgvector_source
+      - *pgvector_linux
+      - *pgvector_windows
       - name: Initialize isolated native PostgreSQL
         run: uv run --frozen --group reader python -B scripts/ci_postgres.py start
       - name: Prepare Nginx for console proxy checks

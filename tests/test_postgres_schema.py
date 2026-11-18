@@ -52,6 +52,9 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             expected = {row[1]: row[2] for row in legacy.execute(f'PRAGMA table_info("{name}")')}
             actual = column_types[name]
             extra = {"record_sequence"}
+            if name == "memory_vectors":
+                extra.add("embedding")
+                assert actual["embedding"] == "USER-DEFINED"
             if name == "memories":
                 extra.add("event_time_json")
             if name == "agent_conversations":
@@ -88,7 +91,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "('events'::regclass,'jobs'::regclass,'outbox'::regclass)"
         )["n"] == 4
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0018_moment_images"}
+            "version_num": "pg0019_memory_vector"}
 
 
 def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
@@ -114,7 +117,7 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
         with psycopg.connect(info.get_secret_value()) as db:
             assert directions(db) == expected
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0018_moment_images",)
+                "pg0019_memory_vector",)
 
 
 def test_job_event_index_upgrades_existing_fact_key_database_without_changing_jobs():
@@ -148,7 +151,7 @@ def test_fact_key_index_upgrades_from_relationship_revision():
             assert "translate(" in expression
             assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" in expression
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0018_moment_images",)
+                "pg0019_memory_vector",)
 
 
 def audit(session, document):

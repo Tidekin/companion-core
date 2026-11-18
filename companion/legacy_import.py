@@ -14,7 +14,7 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0018_moment_images"
+TARGET_REVISION = "pg0019_memory_vector"
 # Native-only tables start empty; credential rows are seeded after exact legacy comparison.
 NATIVE_ONLY_TABLES = frozenset({"companion_profile", "companion_profile_settings",
                                 "companion_profile_changes", "companion_avatar_assets",
@@ -97,6 +97,10 @@ def import_sqlite_backup(path, conninfo: SecretStr):
             _require_empty(target, [name for name in tables if not counts[name]])
             from companion.native_devices import SEED_LEGACY
 
+            if counts["memory_vectors"]:
+                from companion.vector_migration import backfill
+
+                backfill(target)
             target.execute(SEED_LEGACY)
             return {"source_revision": SOURCE_REVISION, "target_revision": TARGET_REVISION,
                     "tables": counts, "business_rows_compared": sum(counts.values())}
@@ -124,6 +128,8 @@ def _copy_table(source, target, name, actual):
     identifier = sql.Identifier(name)
     quoted, columns = _columns(source, name)
     projection = {"preview_json", "preview_version"} if name == "agent_conversations" else set()
+    if name == "memory_vectors":
+        projection.add("embedding")
     if name == "memories":
         projection.add("event_time_json")
     if actual != set(columns) | {"record_sequence"} | projection:

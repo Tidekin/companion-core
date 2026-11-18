@@ -22,7 +22,8 @@ async def warm_once(memory, clock, guard):
     headers = store.rows(
         'SELECT m.record_sequence AS cursor, m.memory_id, OCTET_LENGTH(m.content) AS text_bytes, '
         'v.memory_id AS indexed FROM memories AS m LEFT JOIN memory_vectors AS v ON v.memory_id = '
-        'm.memory_id AND v.model_version = %s WHERE m.record_sequence > %s ORDER BY '
+        'm.memory_id AND v.model_version = %s AND v.embedding IS NOT NULL '
+        'WHERE m.record_sequence > %s ORDER BY '
         'm.record_sequence NULLS FIRST LIMIT %s', (INDEX_VERSION, cursor, SCAN_ROWS))
     rows, used = [], 0
     sources = MemorySources(memory, clock(), bounded=True)

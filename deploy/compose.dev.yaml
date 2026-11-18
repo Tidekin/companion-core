@@ -55,7 +55,7 @@ x-dev: &dev
 
 services:
   dev-postgres:
-    image: postgres:16.15-trixie@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c
+    image: pgvector/pgvector:0.8.7-pg16-trixie@sha256:c28c0b700f3f1b5eec14082b31ad6e7c8a566d14386323609c615315e7c0ffc8
     user: postgres
     environment:
       POSTGRES_PASSWORD: ${COMPANION_DEV_ADMIN_PASSWORD:?set a dev database admin password}
