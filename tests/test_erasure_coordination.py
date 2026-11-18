@@ -16,6 +16,33 @@ from tests.conftest import ingest
 from tests.support.observation_capture import enable_observations, observation
 
 
+def test_startup_reads_one_locked_ledger_and_independent_replay_reads_again(core, monkeypatch):
+    read = core.ledger.read
+    snapshots = []
+
+    def observe():
+        assert core.store.control_write
+        records = read()
+        snapshots.append(records[0]["ledger_id"])
+        return records
+
+    monkeypatch.setattr(core.ledger, "read", observe)
+    core.ledger.initialize(core.store)
+    assert len(snapshots) == 1
+    core.ledger.replay(core.store)
+    assert snapshots == [snapshots[0]] * 2
+
+
+def test_standalone_replay_refuses_a_valid_ledger_from_another_instance(core, tmp_path):
+    from companion.contracts import CoreError
+    from companion.privacy import ErasureLedger
+
+    other = ErasureLedger(tmp_path / "other.jsonl")
+    other.path.write_text('{"ledger_id":"another-instance"}\n', encoding="utf-8")
+    with pytest.raises(CoreError, match="ERASURE_LEDGER_MISMATCH"):
+        other.replay(core.store)
+
+
 def test_replay_contract_discovery_does_not_hold_database_write_lock(core, monkeypatch):
     from companion import erasure
 
