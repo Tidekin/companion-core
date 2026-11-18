@@ -35,7 +35,7 @@ def test_replay_bounds_each_item_and_turn(core):
 
 
 def test_select_ranks_by_bigram_overlap_without_reranker(core, monkeypatch):
-    monkeypatch.setattr(turn_recall, "semantic", lambda settings, query, docs: [0.0] * len(docs))
+    monkeypatch.setattr(turn_recall, "semantic", lambda _, __, docs, order: [0.0] * len(docs))
     core.settings.reranker_model_dir = ""
     from companion import reranker
 
@@ -48,7 +48,7 @@ def test_select_ranks_by_bigram_overlap_without_reranker(core, monkeypatch):
 def test_select_uses_reranker_order_when_configured(core, monkeypatch):
     core.settings.turn_recall_rerank = True
     core.settings.turn_recall_second_hop = 0
-    monkeypatch.setattr(turn_recall, "semantic", lambda settings, query, docs: [0.0] * len(docs))
+    monkeypatch.setattr(turn_recall, "semantic", lambda _, __, docs, order: [0.0] * len(docs))
     monkeypatch.setattr(turn_recall, "rerank",
                         lambda settings, query, docs: [float("梦" in doc) for doc in docs])
     docs = ["获奖消息", "昨晚梦见获奖", "获奖获奖获奖"]
@@ -275,7 +275,7 @@ def test_update_never_ends_an_owner_confirmed_value(core):
 
 
 def test_second_hop_reaches_the_record_named_by_first_hop_evidence(core, monkeypatch):
-    monkeypatch.setattr(turn_recall, "semantic", lambda settings, query, docs: [0.0] * len(docs))
+    monkeypatch.setattr(turn_recall, "semantic", lambda _, __, docs, order: [0.0] * len(docs))
     docs = ["[1月1日] 主人：喷壶锁在桃源阁的3号柜。",
             "[1月2日] 主人：3号柜的钥匙在顾念手上。",
             "[1月3日] 主人：今天下雨了。",
@@ -302,7 +302,7 @@ def test_docs_without_shared_bigrams_get_no_lexical_vote(core, monkeypatch):
     # All BM25 scores are zero; only the embedding ranks, so input order cannot win.
     docs = [f"闲聊{i}" for i in range(30)] + ["工作日喝绿茶，周末喝红茶。"]
     monkeypatch.setattr(turn_recall, "semantic",
-                        lambda settings, query, docs: [float(i) for i in range(len(docs))])
+                        lambda _, __, docs, order: [float(i) for i in range(len(docs))])
     assert turn_recall._fused(core.settings, "周六下午泡什么", docs)[0] == 30
 
 
