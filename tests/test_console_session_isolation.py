@@ -138,19 +138,22 @@ def test_session_write_rechecks_authority_after_queue(core, monkeypatch, method,
     asyncio.run(scenario())
 
 
-def test_slow_recall_keeps_health_live_and_rechecks_logout(core, monkeypatch):
+@pytest.mark.parametrize(("reader", "path"), [
+    ("recall", "/v1/console/memories/recall"), ("memories", "/v1/console/memories"),
+])
+def test_slow_memory_read_keeps_health_live_and_rechecks_logout(core, monkeypatch, reader, path):
     configure(core)
     core.settings.memory_enabled = True
     entered, release = threading.Event(), threading.Event()
     caller = threading.get_ident()
 
-    def slow_recall(context, query, limit):
+    def slow_read(context, *args):
         assert context.memory.store is not core.store and threading.get_ident() != caller
         entered.set()
         assert release.wait(10)
         return {"items": ["private synthetic result"]}
 
-    monkeypatch.setattr(console_read, "recall", slow_recall)
+    monkeypatch.setattr(console_read, reader, slow_read)
 
     async def scenario():
         async with (
@@ -158,7 +161,7 @@ def test_slow_recall_keeps_health_live_and_rechecks_logout(core, monkeypatch):
             httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client,
         ):
             headers = await login(client)
-            pending = asyncio.create_task(client.get("/v1/console/memories/recall",
+            pending = asyncio.create_task(client.get(path,
                                                      params={"q": "test"}, headers=headers))
             try:
                 assert await asyncio.to_thread(entered.wait, 5)
