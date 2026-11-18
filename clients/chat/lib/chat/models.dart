@@ -171,6 +171,7 @@ class ChatTurn {
     this.error,
     this.preview,
     this.proactive = false,
+    this.canReplyNow = false,
     this.images = const [],
   });
   final String id;
@@ -181,6 +182,7 @@ class ChatTurn {
 
   /// The companion wrote first; there is no owner message in this item.
   final bool proactive;
+  final bool canReplyNow;
   final String text;
   final DateTime createdAt;
   final String state;
@@ -198,6 +200,7 @@ class ChatTurn {
     redacted: value['redacted'] as bool,
     uncertain: value['uncertain'] as bool? ?? false,
     proactive: value['kind'] == 'proactive',
+    canReplyNow: value['can_reply_now'] == true,
     images: [
       for (final item in (value['images'] as List? ?? const []))
         if (item is Map && item['slot'] is int) item['slot'] as int,

@@ -51,7 +51,8 @@ async def serve(core, tmp_path):
             ready.set()
 
     server = Server(uvicorn.Config(app, lifespan='off', log_config=None, access_log=False,
-        ssl_keyfile=str(private_key), ssl_certfile=str(certificate), timeout_keep_alive=60))
+        ssl_keyfile=str(private_key), ssl_certfile=str(certificate), timeout_keep_alive=60,
+        timeout_graceful_shutdown=2))
     task = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         await asyncio.wait_for(ready.wait(), 5)

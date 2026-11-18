@@ -4,7 +4,15 @@ import json
 
 from pydantic import Field
 
-from companion import inbox, native_devices, native_images, owner_authority, owner_input, qq_rich
+from companion import (
+    inbox,
+    native_devices,
+    native_images,
+    owner_authority,
+    owner_input,
+    qq_rich,
+    reply_revision,
+)
 from companion.contracts import CoreError, InboundEvent, MomentRef, StrictModel
 from companion.owner_authority_protocol import (
     OwnerCapture,
@@ -135,7 +143,14 @@ def image(context, event_id, slot):
     return native_images.read_preview(context.store, event_id, slot)
 
 
-def _turn(context, row):
+def _waiting_for_input(row, now):
+    return (row["actor_id"] == "owner" and not row["redacted"] and row["state"] == "QUEUED"
+            and row["attempts"] == 0 and row["last_error_code"] is None
+            and 0 < row["reply_revision"] == row["current_revision"]
+            and row["next_attempt_at"] is not None and row["next_attempt_at"] > now)
+
+
+def _turn(context, row, *, waiting):
     from companion.native_stream import project
 
     erased = bool(row["redacted"])
@@ -147,6 +162,7 @@ def _turn(context, row):
     )
     proactive = row["actor_id"] == "system"
     return {"event_id": row["event_id"], "sequence": row["record_sequence"],
+            **({"can_reply_now": True} if waiting else {}),
             **({"kind": "proactive"} if proactive else {}),
             "source_event_id": row["source_event_id"],
             "text": "" if erased or proactive else json.loads(row["body_json"]).get("text", ""),
@@ -208,7 +224,8 @@ def sticker(context, message_id):
 
 
 _HISTORY = (
-    "SELECT e.*,j.state,j.last_error_code,ac.preview_version AS stream_version,"
+    "SELECT e.*,j.job_id,j.state,j.last_error_code,j.attempts,j.next_attempt_at,"
+    "c.reply_revision AS current_revision,ac.preview_version AS stream_version,"
     "ac.preview_json IS NOT NULL AS stream_active,(SELECT jsonb_agg("
     "jsonb_build_array(o.message_id,o.state,o.content_sha256) ORDER BY o.record_sequence) "
     "FROM outbox o WHERE o.origin_event_id=e.event_id) AS stream_replies,"
@@ -241,13 +258,15 @@ def changes(context, previous):
     scope = (epoch(context.store), view.authority.revision)
     rows = context.store.rows(_HISTORY + 'ORDER BY e.record_sequence DESC LIMIT 100')
     items, signatures = [], {}
+    now = context.clock()
     for row in reversed(rows):
-        signature = encode([scope, *[row[name] for name in (
+        waiting = _waiting_for_input(row, now)
+        signature = encode([scope, waiting, *[row[name] for name in (
             'state', 'redacted', 'last_error_code', 'uncertain', 'stream_version',
             'stream_replies')]])
         signatures[row['event_id']] = signature
         if row['stream_active'] or previous.get(row['event_id']) != signature:
-            items.append(_turn(context, row))
+            items.append(_turn(context, row, waiting=waiting))
     return items, signatures
 
 
@@ -267,5 +286,25 @@ def history(context, *, before=None, limit=50, event_id=None):
                               (*parameters, limit + 1))
     more = len(rows) > limit
     rows = rows[:limit]
-    return {"items": [_turn(context, row) for row in reversed(rows)],
+    now = context.clock()
+    return {"items": [_turn(context, row, waiting=_waiting_for_input(row, now))
+                      for row in reversed(rows)],
             "next_before": rows[-1]["record_sequence"] if rows and more else None}
+
+
+def reply_now(context, event_id, check):
+    """Release only the first-input delay of this still-current native turn."""
+    store = context.store
+    with store.transaction(control_write=True):
+        check()
+        device_view(context)
+        row = store.one(_HISTORY + "AND e.event_id=%s FOR UPDATE OF j", (event_id,))
+        if not row:
+            raise CoreError("NATIVE_MESSAGE_NOT_FOUND", 404)
+        now = context.clock()
+        if _waiting_for_input(row, now):
+            owner_authority.check_job(store, context.settings, context.clock, row, purpose="chat")
+            reply_revision.require_current(store, event_id, row["reply_revision"])
+            store.execute("UPDATE jobs SET next_attempt_at=NULL,updated_at=%s WHERE job_id=%s",
+                          (now, row["job_id"]))
+        return _turn(context, row, waiting=False)

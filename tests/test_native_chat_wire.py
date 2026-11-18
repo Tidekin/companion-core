@@ -18,6 +18,9 @@ from tests.support.owner_input import captured
 @pytest.mark.skipif(os.environ.get('COMPANION_FLUTTER_WIRE') != '1',
     reason='explicit Flutter/Core cross-runtime gate; run scripts/check-flutter.ps1 -Wire')
 def test_flutter_tls_entry_worker_and_restart_without_qq(core, tmp_path):
+    from companion.input_debounce import InputDebounceConfig
+
+    core.settings.input_debounce = InputDebounceConfig()
     captured(core, tmp_path)
     directory = tmp_path / 'flutter-client'
     directory.mkdir()

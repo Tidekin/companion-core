@@ -6,6 +6,7 @@ import 'package:companion_chat/ui/typing.dart';
 
 ChatTurn turn(
   String state, {
+  bool canReplyNow = false,
   ChatPreview? preview,
   List<ChatReply> replies = const [],
 }) => ChatTurn(
@@ -14,6 +15,7 @@ ChatTurn turn(
   text: 'question',
   createdAt: DateTime.utc(2026),
   state: state,
+  canReplyNow: canReplyNow,
   preview: preview,
   replies: replies,
 );
@@ -21,6 +23,23 @@ ChatTurn turn(
 Widget host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void main() {
+  testWidgets(
+    'only a queued turn with an advertised input window offers reply now',
+    (tester) async {
+      var taps = 0;
+      Future<void> show(ChatTurn value) => tester.pumpWidget(
+        host(TurnView(turn: value, onReplyNow: () => taps++)),
+      );
+      await show(turn('QUEUED'));
+      expect(find.text('立即回复'), findsNothing);
+      await show(turn('QUEUED', canReplyNow: true));
+      await tester.tap(find.text('立即回复'));
+      expect(taps, 1);
+      await show(turn('RUNNING', canReplyNow: true));
+      expect(find.text('立即回复'), findsNothing);
+    },
+  );
+
   test('streamed text splits into the same bubbles as the final reply', () {
     expect(bubbleLines('第一句。\n\n第二句？\n'), ['第一句。', '第二句？']);
     expect(bubbleLines('  '), isEmpty);

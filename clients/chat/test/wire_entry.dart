@@ -65,6 +65,10 @@ void main() {
         await session.send('真实 TLS Flutter 客户端验收。');
         await session.sync();
         expect(session.state.pending.single.admitted, isTrue);
+        final turn = session.state.turns.single;
+        expect(turn.canReplyNow, isTrue);
+        await session.replyNow(turn.id);
+        expect(session.state.turns.single.canReplyNow, isFalse);
         await File('$directory/receipt.json').writeAsString(
           jsonEncode({
             'event_id': session.state.pending.single.eventId,
