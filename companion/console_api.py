@@ -461,12 +461,26 @@ def register_console_routes(app, settings):
             raise CoreError("INVALID_PAGE", 400)
         return console_read.activity(app.state.core, before, limit)
 
+    async def read_memory(request, reader, *args):
+        check = session_check(request)
+        clock = app.state.core.clock
+
+        def read(store):
+            check(store)
+            memory = Memory(store, settings, ErasureLedger(settings.erasure_ledger))
+            context = SimpleNamespace(store=store, memory=memory, settings=settings, clock=clock)
+            result = reader(context, *args)
+            check(store)
+            return result
+
+        return await app.state.api_store.run(read)
+
     @app.get(prefix + "/memories", dependencies=auth)
-    async def memories(q: str = "", view: Literal["conflicts", "new", "all"] = "all",
-                       limit: int = 30):
+    async def memories(request: Request, q: str = "",
+                       view: Literal["conflicts", "new", "all"] = "all", limit: int = 30):
         if not 1 <= limit <= 60 or len(q) > 100:
             raise CoreError("INVALID_MEMORY_QUERY", 400)
-        return console_read.memories(app.state.core, q, view, limit)
+        return await read_memory(request, console_read.memories, q, view, limit)
 
     @app.get(prefix + "/memories/recall", dependencies=auth)
     async def memory_recall(request: Request, q: str, limit: int = 10):
@@ -474,18 +488,7 @@ def register_console_routes(app, settings):
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         if not settings.memory_enabled:
             raise CoreError("MEMORY_DISABLED", 409)
-        check = session_check(request)
-        clock = app.state.core.clock
-
-        def read(store):
-            check(store)
-            memory = Memory(store, settings, ErasureLedger(settings.erasure_ledger))
-            result = console_read.recall(SimpleNamespace(memory=memory, settings=settings,
-                                                        clock=clock), q.strip(), limit)
-            check(store)
-            return result
-
-        return await app.state.api_store.run(read)
+        return await read_memory(request, console_read.recall, q.strip(), limit)
 
     @app.post(prefix + "/memories/{memory_id}/decision", dependencies=auth)
     async def memory_decision(
