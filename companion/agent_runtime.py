@@ -195,6 +195,8 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
                     check_payload(core.store, core.settings, core.clock, job, wire)
                     if not registered:
                         context_planner.admitted(core, job, snapshots, request_id)
+                if not registered and publisher is not None:
+                    publisher.start_request(request_id)
                 registered = True
 
         model_started = perf_counter_ns()
