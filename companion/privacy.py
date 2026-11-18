@@ -180,32 +180,30 @@ class ErasureLedger:
         store.ledger_lock(ERASURE_LEDGER)
 
     def initialize(self, store):
-        if not store.in_transaction:
-            from companion.erasure import contract_signature
+        from companion.erasure import contract_signature
 
-            # Cold handler discovery imports the domain modules. Do that before
-            # holding the erasure control row, as replay's own entry point does.
-            contract_signature()
-            with store.transaction(control_write=True):
-                return self.initialize(store)
-        self._write_lock(store)
-        existing = store.one("SELECT value FROM runtime_meta WHERE key = 'ledger_id'")
-        if not self.path.exists():
-            if existing:
-                raise CoreError("ERASURE_LEDGER_MISSING", 503)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("x", encoding="utf-8") as stream:
-                stream.write(encode({"ledger_id": uid("ledger")}) + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-        lines = self.read()
-        ledger_id = lines[0]["ledger_id"]
-        if existing and existing["value"] != ledger_id:
-            raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
-        store.execute(
-            "INSERT INTO runtime_meta VALUES ('ledger_id', %s) ON CONFLICT DO NOTHING", (ledger_id,)
-        )
-        self.replay(store)
+        # Discover handlers before taking the control/ledger locks.
+        signature = contract_signature()
+        with nullcontext() if store.in_transaction else store.transaction(control_write=True):
+            self._write_lock(store)
+            existing = store.one("SELECT value FROM runtime_meta WHERE key = 'ledger_id'")
+            if not self.path.exists():
+                if existing:
+                    raise CoreError("ERASURE_LEDGER_MISSING", 503)
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("x", encoding="utf-8") as stream:
+                    stream.write(encode({"ledger_id": uid("ledger")}) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            lines = self.read()
+            ledger_id = lines[0]["ledger_id"]
+            if existing and existing["value"] != ledger_id:
+                raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
+            store.execute(
+                "INSERT INTO runtime_meta VALUES ('ledger_id', %s) ON CONFLICT DO NOTHING",
+                (ledger_id,),
+            )
+            self._apply_records(store, lines, signature)
 
     def read(self, *, raw=None):
         """Validate one original payload; custody callers already hold its bytes."""
@@ -640,109 +638,117 @@ class ErasureLedger:
         return erase_diary_projections(store, record)
 
     def replay(self, store):
-        from companion.erasure import CONTRACT_KEY, contract_signature
+        from companion.erasure import contract_signature
 
         # Discover the code-only contract before taking the control/ledger locks.
         signature = contract_signature()
         with nullcontext() if store.in_transaction else store.transaction(control_write=True):
             self._write_lock(store)
             lines = self.read()
-            applied = store.one(
-                "SELECT MAX(restore_min_replay_version) AS n FROM privacy_erasure_ledger"
-            )
-            if (applied["n"] or 0) > len(lines) - 1:
-                raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
-            previous = store.one("SELECT value FROM runtime_meta WHERE key = %s", (CONTRACT_KEY,))
-            repair_contracts = not previous or previous["value"] != signature
-            for record in lines[1:]:
-                if record.get("target_type") in {
-                    "affect_reset", "mood_reset", "memory_only", "moment",
-                }:
-                    # Rebuild the durable reset barrier even from an older backup.
-                    self.apply(store, record)
-                    continue
-                # Rebuild this projection even for pre-upgrade COMPLETE records.
-                # A backup may predate the event itself, so UPDATE events is insufficient.
-                for event_id in record["event_ids"]:
-                    store.execute(
-                        "INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                        ("erased_event:" + event_id, record["erasure_id"]),
-                    )
-                applied = store.one(
-                    "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id = %s",
-                    (record["erasure_id"],),
-                )
-                # Older releases marked deletion complete before resolving date aliases.
-                # Recompute remaining copies even in snapshots taken after that deletion.
-                remaining_diary_copies = record.get("target_type") == "diary" and diary_copies(
-                    store, {(record["diary_day"], record["diary_timezone"])}, before=record["at"]
-                )
-                remaining_grant = False
-                if record.get("target_type") == "source_grant":
-                    from companion.source_grants import grant_tombstone
+            identity = store.one("SELECT value FROM runtime_meta WHERE key='ledger_id'")
+            if not identity or identity["value"] != lines[0]["ledger_id"]:
+                raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
+            self._apply_records(store, lines, signature)
 
-                    if (
-                        applied
-                        and record["event_ids"]
-                        and not record["memory_ids"]
-                        and store.one(
+    def _apply_records(self, store, lines, signature):
+        from companion.erasure import CONTRACT_KEY
 
-                                'SELECT 1 FROM memories AS p JOIN memories AS c ON '
-                                'c.supersedes_memory_id = p.memory_id WHERE p.status = '
-                                "'FORGOTTEN' AND (c.status <> 'FORGOTTEN' OR c.content "
-                                "<> '') LIMIT 1"
-
-                        )
-                    ):
-                        # Old COMPLETE records deleted the root-to-memory evidence without
-                        # recording memory IDs. Preserve data for isolated owner review;
-                        # neither restored publication nor inferred grant attribution is safe.
-                        raise CoreError("SOURCE_GRANT_LEGACY_ERASURE_REVIEW_REQUIRED", 503)
-                    remaining_grant = not store.one(
-                        "SELECT 1 FROM runtime_meta WHERE key = %s",
-                        (grant_tombstone(record["source_grant_id"]),),
-                    ) or store.one(
-                        "SELECT 1 FROM source_grant_events AS g JOIN events AS e USING (event_id) "
-                        "WHERE g.grant_id = %s AND e.redacted = 0",
-                        (record["source_grant_id"],),
-                    )
-                    remaining_grant = (
-                        remaining_grant
-                        or store.one(
-                            "SELECT 1 FROM events WHERE redacted = 0 AND event_id IN (SELECT value "
-                            'COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
-                            "parsed(value))",
-                            (encode(record["event_ids"]),),
-                        )
-                        or store.one(
-                            (
-                                'SELECT 1 FROM memories WHERE memory_id IN (SELECT '
-                                'value COLLATE "C" FROM '
-                                'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
-                                "parsed(value)) AND (content <> '' OR status <> "
-                                "'FORGOTTEN')"
-                            ),
-                            (encode(record["memory_ids"]),),
-                        )
-                    )
-                remaining_recall = record.get("target_type") == "input_recall" and (
-                    self.remaining_input_recall(store, record)
-                )
-                if not applied or remaining_diary_copies or remaining_grant or remaining_recall:
-                    if applied and record.get("target_type") == "input_recall":
-                        self.apply_input_recall(store, record, repair=True)
-                        continue
-                    self.apply(store, record)
-                elif repair_contracts:
-                    self.repair_derivatives(store, record)
-            # Publish only after every owner handler succeeded. A failure leaves
-            # the durable Ledger unchanged and the entire replay transaction undone.
-            if repair_contracts:
+        applied = store.one(
+            "SELECT MAX(restore_min_replay_version) AS n FROM privacy_erasure_ledger"
+        )
+        if (applied["n"] or 0) > len(lines) - 1:
+            raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
+        previous = store.one("SELECT value FROM runtime_meta WHERE key = %s", (CONTRACT_KEY,))
+        repair_contracts = not previous or previous["value"] != signature
+        for record in lines[1:]:
+            if record.get("target_type") in {
+                "affect_reset", "mood_reset", "memory_only", "moment",
+            }:
+                # Rebuild the durable reset barrier even from an older backup.
+                self.apply(store, record)
+                continue
+            # Rebuild this projection even for pre-upgrade COMPLETE records.
+            # A backup may predate the event itself, so UPDATE events is insufficient.
+            for event_id in record["event_ids"]:
                 store.execute(
-                    "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON "
-                    "CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT",
-                    (CONTRACT_KEY, signature),
+                    "INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    ("erased_event:" + event_id, record["erasure_id"]),
                 )
+            applied = store.one(
+                "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id = %s",
+                (record["erasure_id"],),
+            )
+            # Older releases marked deletion complete before resolving date aliases.
+            # Recompute remaining copies even in snapshots taken after that deletion.
+            remaining_diary_copies = record.get("target_type") == "diary" and diary_copies(
+                store, {(record["diary_day"], record["diary_timezone"])}, before=record["at"]
+            )
+            remaining_grant = False
+            if record.get("target_type") == "source_grant":
+                from companion.source_grants import grant_tombstone
+
+                if (
+                    applied
+                    and record["event_ids"]
+                    and not record["memory_ids"]
+                    and store.one(
+
+                            'SELECT 1 FROM memories AS p JOIN memories AS c ON '
+                            'c.supersedes_memory_id = p.memory_id WHERE p.status = '
+                            "'FORGOTTEN' AND (c.status <> 'FORGOTTEN' OR c.content "
+                            "<> '') LIMIT 1"
+
+                    )
+                ):
+                    # Old COMPLETE records deleted the root-to-memory evidence without
+                    # recording memory IDs. Preserve data for isolated owner review;
+                    # neither restored publication nor inferred grant attribution is safe.
+                    raise CoreError("SOURCE_GRANT_LEGACY_ERASURE_REVIEW_REQUIRED", 503)
+                remaining_grant = not store.one(
+                    "SELECT 1 FROM runtime_meta WHERE key = %s",
+                    (grant_tombstone(record["source_grant_id"]),),
+                ) or store.one(
+                    "SELECT 1 FROM source_grant_events AS g JOIN events AS e USING (event_id) "
+                    "WHERE g.grant_id = %s AND e.redacted = 0",
+                    (record["source_grant_id"],),
+                )
+                remaining_grant = (
+                    remaining_grant
+                    or store.one(
+                        "SELECT 1 FROM events WHERE redacted = 0 AND event_id IN (SELECT value "
+                        'COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+                        "parsed(value))",
+                        (encode(record["event_ids"]),),
+                    )
+                    or store.one(
+                        (
+                            'SELECT 1 FROM memories WHERE memory_id IN (SELECT '
+                            'value COLLATE "C" FROM '
+                            'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+                            "parsed(value)) AND (content <> '' OR status <> "
+                            "'FORGOTTEN')"
+                        ),
+                        (encode(record["memory_ids"]),),
+                    )
+                )
+            remaining_recall = record.get("target_type") == "input_recall" and (
+                self.remaining_input_recall(store, record)
+            )
+            if not applied or remaining_diary_copies or remaining_grant or remaining_recall:
+                if applied and record.get("target_type") == "input_recall":
+                    self.apply_input_recall(store, record, repair=True)
+                    continue
+                self.apply(store, record)
+            elif repair_contracts:
+                self.repair_derivatives(store, record)
+        # Publish only after every owner handler succeeded. A failure leaves
+        # the durable Ledger unchanged and the entire replay transaction undone.
+        if repair_contracts:
+            store.execute(
+                "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON "
+                "CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT",
+                (CONTRACT_KEY, signature),
+            )
 
     def repair_derivatives(self, store, record):
         """Upgrade COMPLETE projections once, using recorded source identities only."""
