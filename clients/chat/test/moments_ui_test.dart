@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:companion_chat/chat/core_backend.dart';
 import 'package:companion_chat/chat/models.dart';
 import 'package:companion_chat/dev/demo_backend.dart';
 import 'package:companion_chat/persistence/repository.dart';
@@ -46,6 +48,25 @@ class RecordingBackend extends DemoBackend {
   }
 }
 
+class PausedFeedBackend extends DemoBackend {
+  PausedFeedBackend(super.bot);
+  final first = Completer<MomentPage>();
+  int reads = 0;
+  int anniversaries = 0;
+
+  @override
+  Future<MomentPage> moments({String? before}) {
+    reads++;
+    return reads == 1 ? first.future : super.moments(before: before);
+  }
+
+  @override
+  Future<List<Moment>> momentMemories() async {
+    anniversaries++;
+    return super.momentMemories();
+  }
+}
+
 final bot = BotProfile(
   id: 'a',
   name: '鲸鲸',
@@ -76,8 +97,8 @@ void main() {
     expect(moment.withLiked(false).text, moment.text);
   });
 
-  (ProviderContainer, DemoBackend) setUp() {
-    final backend = DemoBackend(bot);
+  (ProviderContainer, DemoBackend) setUp([DemoBackend? supplied]) {
+    final backend = supplied ?? DemoBackend(bot);
     final container = ProviderContainer(
       overrides: [
         repositoryProvider.overrideWithValue(EmptyRepository()),
@@ -137,6 +158,26 @@ void main() {
     expect(more, findsNothing);
     await close(tester, container);
   });
+
+  testWidgets(
+    'a burst of feed changes invalidates the old read and shares one refresh',
+    (tester) async {
+      final backend = PausedFeedBackend(bot);
+      final (container, _) = setUp(backend);
+      await tester.pumpWidget(host(container, MomentsPanel(bot: bot)));
+      await tester.pump();
+      for (var index = 0; index < 12; index++) {
+        backend.momentChanges.add(null);
+      }
+      await tester.pump();
+      expect(backend.reads, 1);
+      backend.first.complete((items: <Moment>[], nextCursor: null));
+      await tester.pumpAndSettle();
+      expect((backend.reads, backend.anniversaries), (2, 1));
+      expect(find.text(backend.feed.single.text), findsOneWidget);
+      await close(tester, container);
+    },
+  );
 
   testWidgets('the owner posts and comments; both stay under the moments', (
     tester,
