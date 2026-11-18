@@ -12,6 +12,31 @@ from tests.conftest import run
 from tests.support.retrieval_query_reuse import Encoder
 
 
+def test_cold_turn_budget_follows_lexical_rank_and_keeps_cached_scores(tmp_path, monkeypatch):
+    import hashlib
+
+    from companion import retrieval_work
+
+    model = Encoder()
+    settings = SimpleNamespace(embedding_cache_dir=str(tmp_path))
+    monkeypatch.setattr(retrieval.SemanticIndex, "warmup", lambda _: model)
+    cache = OrderedDict()
+    monkeypatch.setattr(turn_recall, "_vectors", cache)
+
+    def key(doc):
+        return hashlib.sha256(doc.encode()).hexdigest()
+
+    docs = ["窗边有盆花", "晚饭吃米饭", "橱柜锁扣要找周师傅"]
+    cache[key(docs[0])] = model.vector
+    with retrieval_work.scope() as work:
+        assert work.take("cold_vectors", retrieval_work.LIMITS["cold_vectors"] - 1)
+        ranked = turn_recall._fused(settings, "橱柜锁扣找谁修", docs)
+        assert ranked[0] == 2 and 0 in ranked
+        assert key(docs[2]) in cache and key(docs[1]) not in cache
+        assert work.counts["cold_vectors"] == retrieval_work.LIMITS["cold_vectors"]
+        assert work.counts["query_vectors"] == 1
+
+
 def test_fact_and_turn_search_share_one_query_inference(tmp_path, monkeypatch):
     model = Encoder()
     settings = SimpleNamespace(embedding_cache_dir=str(tmp_path))

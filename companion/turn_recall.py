@@ -81,7 +81,7 @@ def lexical(query, docs, *, bags=None):
     return scores
 
 
-def semantic(settings, query, docs):
+def semantic(settings, query, docs, cold_order=None):
     from pathlib import Path
 
     import numpy as np
@@ -89,10 +89,11 @@ def semantic(settings, query, docs):
     from companion.retrieval import SemanticIndex, _inference_lock, query_vector
 
     keys = [hashlib.sha256(doc.encode()).hexdigest() for doc in docs]
-    with _lock:
-        missing = list(dict((key, doc) for key, doc in zip(keys, docs, strict=True)
-                            if key not in _vectors).items())
     work = retrieval_work.current()
+    # Spend scarce cold encodings on likely matches. Cached scores still cover every document.
+    order = cold_order if work is not None and cold_order is not None else range(len(docs))
+    with _lock:
+        missing = list({keys[i]: docs[i] for i in order if keys[i] not in _vectors}.items())
     if work is not None:
         missing = [(key, doc) for key, doc in missing if work.take("cold_vectors")]
     index = SemanticIndex(None, settings)
@@ -130,9 +131,10 @@ def _fused(settings, query, docs, *, bags=None):
     lexical vote: ranking them by input order would favour the oldest small talk."""
     fused = Counter()
     scores = lexical(expand(query), docs, bags=bags)
-    hits = [index for index in _ranked(scores) if scores[index] > 0]
+    order = _ranked(scores)
+    hits = [index for index in order if scores[index] > 0]
     try:
-        similarities = semantic(settings, query, docs)
+        similarities = semantic(settings, query, docs, order)
         semantic_ranks = sorted((i for i, score in enumerate(similarities) if score is not None),
                                 key=lambda i: -similarities[i])
     except retrieval_work.WorkLimit as error:
