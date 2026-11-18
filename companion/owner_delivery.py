@@ -13,6 +13,7 @@ from companion import (
     transport,
 )
 from companion.contracts import CoreError
+from companion.events import event_by_id
 from companion.outbox import message_by_id
 from companion.privacy import epoch
 from companion.private_life import event_digest
@@ -234,15 +235,7 @@ def _preview_request(store, job, group, proof):
 def _material(store, row, job, view, requests, context_hashes, *, meme_binding=None):
     from companion.agent_output import reply_format, song_choice
 
-    event = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
-        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
-        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
-        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
-        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
-        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
-        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
-        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
-        '%s', (row["origin_event_id"],))
+    event = event_by_id(store, row["origin_event_id"])
     actions = ({"qq.private.reply", "qq.private.poke"} if job["kind"] == "poke"
                else {"qq.private.reply", "qq.private.proactive"})
     native = store.one("SELECT 1 FROM conversations WHERE conversation_id = %s AND "
@@ -305,15 +298,7 @@ def _failure_view(store, settings, clock, job):
 
 
 def _failure_material(store, row, job, view):
-    event = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
-        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
-        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
-        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
-        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
-        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
-        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
-        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
-        '%s', (row["origin_event_id"],))
+    event = event_by_id(store, row["origin_event_id"])
     content = {"text": failure_text(job["last_error_code"])}
     if (not event or row["origin_event_id"] != job["event_id"]
             or row["conversation_id"] != job["conversation_id"]

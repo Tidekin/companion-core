@@ -7,6 +7,7 @@ from contextlib import nullcontext
 
 from companion import job_queue, owner_authority, owner_channel
 from companion.contracts import CoreError
+from companion.events import event_by_id
 from companion.observation import expired_sources
 from companion.outbox import message_by_id
 from companion.paid_budget import sha
@@ -57,18 +58,7 @@ def _key(store, kind, ref):
 
 
 def _source(store, event_id):
-    row = store.one(
-        "SELECT events.event_id AS event_id, events.schema_version AS schema_version, "
-        "events.source AS source, events.source_event_id AS source_event_id, "
-        "events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type "
-        "AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, "
-        "events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS "
-        "trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
-        "events.redacted AS redacted, events.memory_processed AS memory_processed, "
-        "events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = "
-        "%s",
-        (event_id,),
-    )
+    row = event_by_id(store, event_id)
     if not row or row["redacted"] or row["privacy_scope"] != "private":
         raise CoreError("NOTICE_SOURCE_UNAVAILABLE", 409)
     return sha(

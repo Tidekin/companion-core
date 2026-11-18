@@ -9,6 +9,7 @@ from datetime import datetime
 
 from companion import paid_budget, qq_source
 from companion.contracts import CoreError
+from companion.events import event_by_id
 from companion.outbox import message_by_id
 from companion.privacy import epoch
 from companion.store import encode
@@ -197,18 +198,7 @@ def check_job(store, settings, approval, job):
         from companion import poke
 
         poke.check_job(store, settings, approval, job)
-        return store.one(
-            "SELECT events.event_id AS event_id, events.schema_version AS "
-            "schema_version, events.source AS source, events.source_event_id AS source_event_id, "
-            "events.conversation_id AS conversation_id, events.actor_id AS actor_id, "
-            "events.event_type AS event_type, events.occurred_at AS occurred_at, "
-            "events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, "
-            "events.body_json AS body_json, events.trace_id AS trace_id, events.idempotency_key AS "
-            "idempotency_key, events.fingerprint AS fingerprint, events.redacted AS redacted, "
-            "events.memory_processed AS memory_processed, events.reply_revision AS reply_revision "
-            "FROM events AS events WHERE events.event_id = %s",
-            (job["event_id"],),
-        )
+        return event_by_id(store, job["event_id"])
     event = store.one(
         "SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source AS source, "
         "e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, e.actor_id AS "
@@ -528,18 +518,7 @@ def record_replies(store, settings, clock, job, message_ids):
 def delivery_material(store, settings, row):
     from companion import notices
 
-    event = store.one(
-        "SELECT events.event_id AS event_id, events.schema_version AS "
-        "schema_version, events.source AS source, events.source_event_id AS source_event_id, "
-        "events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type "
-        "AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, "
-        "events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS "
-        "trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
-        "events.redacted AS redacted, events.memory_processed AS memory_processed, "
-        "events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = "
-        "%s",
-        (row["origin_event_id"],),
-    )
+    event = event_by_id(store, row["origin_event_id"])
     notice = notices.delivery_job(store, row["message_id"])
     return {
         "plan_sha256": settings.live_text_window.plan_sha256,

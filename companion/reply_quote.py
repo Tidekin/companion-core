@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 
 from companion import input_recall, reply_revision
+from companion.events import event_by_id
 from companion.outbox import message_by_id
 
 CHOICE = re.compile(r"【引用\s*(m[0-9a-f]{4})】")
@@ -174,15 +175,7 @@ def _choose(store, settings, clock, job, chosen):
 
     if settings.quote_policy == "never" or job["kind"] != "chat":
         return None
-    current = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
-        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
-        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
-        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
-        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
-        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
-        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
-        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
-        '%s', (job["event_id"],))
+    current = event_by_id(store, job["event_id"])
     if not current:
         return None
     sources = owner_input.history_sources(store, settings, clock, job)

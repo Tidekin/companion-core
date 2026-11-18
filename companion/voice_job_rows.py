@@ -1,0 +1,43 @@
+"""Persisted voice job fields shared by delivery and reconciliation."""
+
+
+def voice_job_by_id(store, job_id):
+    return store.one(
+        "SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS "
+        "operation, voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id AS "
+        "native_source_event_id, voice_jobs.conversation_id AS conversation_id, "
+        "voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS "
+        "source_segment_index, voice_jobs.source_sha256 AS source_sha256, "
+        "voice_jobs.source_input_sha256 AS source_input_sha256, voice_jobs.source_proof_sha256 "
+        "AS source_proof_sha256, voice_jobs.identity_sha256 AS identity_sha256, "
+        "voice_jobs.window_sha256 AS window_sha256, voice_jobs.captured_privacy_epoch AS "
+        "captured_privacy_epoch, voice_jobs.captured_reply_revision AS "
+        "captured_reply_revision, voice_jobs.outbox_content_sha256 AS outbox_content_sha256, "
+        "voice_jobs.outbox_delivery_key AS outbox_delivery_key, voice_jobs.node_id AS node_id, "
+        "voice_jobs.manifest_sha256 AS manifest_sha256, voice_jobs.config_sha256 AS "
+        "config_sha256, voice_jobs.config_json AS config_json, voice_jobs.generation AS "
+        "generation, voice_jobs.state AS state, voice_jobs.input_mime AS input_mime, "
+        "voice_jobs.input_sha256 AS input_sha256, voice_jobs.input_bytes AS input_bytes, "
+        "voice_jobs.input_duration_seconds AS input_duration_seconds, "
+        "voice_jobs.source_partial AS source_partial, voice_jobs.input_blob AS input_blob, "
+        "voice_jobs.result_blob AS result_blob, voice_jobs.result_sha256 AS result_sha256, "
+        "voice_jobs.result_bytes AS result_bytes, voice_jobs.lease_token_sha256 AS "
+        "lease_token_sha256, voice_jobs.lease_json AS lease_json, voice_jobs.lease_issued_at "
+        "AS lease_issued_at, voice_jobs.lease_until AS lease_until, voice_jobs.started_at AS "
+        "started_at, voice_jobs.completed_at AS completed_at, voice_jobs.created_at AS "
+        "created_at, voice_jobs.updated_at AS updated_at, voice_jobs.deadline_at AS "
+        "deadline_at, voice_jobs.result_expires_at AS result_expires_at, "
+        "voice_jobs.last_error_code AS last_error_code, voice_jobs.stop_token_sha256 AS "
+        "stop_token_sha256, voice_jobs.incarnation AS incarnation, voice_jobs.content_retired "
+        "AS content_retired, voice_jobs.cleanup_state AS cleanup_state, "
+        "voice_jobs.cleanup_epoch AS cleanup_epoch, voice_jobs.cleanup_confirmed_at AS "
+        "cleanup_confirmed_at, voice_jobs.authority_json AS authority_json, "
+        "voice_jobs.singing_context_json AS singing_context_json, "
+        "voice_jobs.reserved_output_bytes AS reserved_output_bytes, "
+        "voice_jobs.source_budget_at AS source_budget_at, voice_jobs.source_reserved_requests "
+        "AS source_reserved_requests, voice_jobs.source_reserved_bytes AS "
+        "source_reserved_bytes, voice_jobs.source_used_requests AS source_used_requests, "
+        "voice_jobs.source_used_bytes AS source_used_bytes FROM voice_jobs AS voice_jobs WHERE "
+        "voice_jobs.job_id = %s",
+        (job_id,),
+    )

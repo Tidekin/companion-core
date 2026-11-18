@@ -20,6 +20,7 @@ from companion import (
     transport,
 )
 from companion.contracts import CoreError
+from companion.events import event_by_id
 from companion.poke_protocol import (
     ACTION,
     OwnerPokeCapture,
@@ -241,18 +242,7 @@ def receive(store, settings, clock, capture):
     native = isinstance(value, dict) and "authority" in value
     capture = (OwnerPokeCapture if native else PokeCapture).model_validate(value)
     with _transaction(store):
-        existing = store.one(
-            "SELECT events.event_id AS event_id, events.schema_version AS "
-            "schema_version, events.source AS source, events.source_event_id AS source_event_id, "
-            "events.conversation_id AS conversation_id, events.actor_id AS actor_id, "
-            "events.event_type AS event_type, events.occurred_at AS occurred_at, "
-            "events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, "
-            "events.body_json AS body_json, events.trace_id AS trace_id, events.idempotency_key AS "
-            "idempotency_key, events.fingerprint AS fingerprint, events.redacted AS redacted, "
-            "events.memory_processed AS memory_processed, events.reply_revision AS reply_revision "
-            "FROM events AS events WHERE events.event_id = %s",
-            (capture.event_id,),
-        )
+        existing = event_by_id(store, capture.event_id)
         erased = store.one(
             "SELECT 1 FROM runtime_meta WHERE key = %s", ("erased_event:" + capture.event_id,)
         )
