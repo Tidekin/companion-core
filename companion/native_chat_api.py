@@ -354,3 +354,8 @@ def register_routes(app, settings, prefix, auth, authenticate):
     async def status(event_id: str, request: Request):
         return await execute(request, lambda ctx, check: native_chat.history(
             ctx, event_id=event_id), readonly=True)
+
+    @app.post(prefix + "/messages/{event_id}/reply-now", dependencies=auth)
+    async def reply_now(event_id: str, request: Request):
+        return await execute(request, lambda ctx, check: native_chat.reply_now(
+            ctx, event_id, check))

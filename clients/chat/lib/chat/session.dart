@@ -293,6 +293,17 @@ class BotSession {
     await _publish('已移除被拒绝且尚未接受的本地消息');
   }
 
+  Future<void> replyNow(String eventId) {
+    final generation = _generation;
+    return _network(() async {
+      if (!_active) return;
+      final item = await backend.replyNow(eventId);
+      _guard(generation);
+      await repository.merge(bot.id, [item]);
+      await _publish(state.status);
+    });
+  }
+
   Future<void> sync({bool full = false}) {
     if (!_active || _closed) return Future.value();
     if (_syncFlight != null) return _syncFlight!;

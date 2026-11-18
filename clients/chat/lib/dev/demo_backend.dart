@@ -386,6 +386,10 @@ class DemoBackend implements ChatBackend {
   Future<List<Map<String, dynamic>>> status(String eventId) async =>
       records.where((r) => r['event_id'] == eventId).toList();
   @override
+  Future<Map<String, dynamic>> replyNow(String eventId) async =>
+      records.firstWhere((r) => r['event_id'] == eventId)
+        ..remove('can_reply_now');
+  @override
   Future<String> publicIdentity() async => 'synthetic-${bot.id}';
   @override
   void close() {

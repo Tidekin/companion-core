@@ -151,9 +151,9 @@ def test_idle_subscription_skips_unchanged_history(client, core, tmp_path, monke
         session={'native_device_id': device_identity(key.public_key().public_bytes_raw().hex())[0]})
     seen = []
     original = native_chat._turn
-    def project(*args):
+    def project(*args, **kwargs):
         seen.append(1)
-        return original(*args)
+        return original(*args, **kwargs)
     monkeypatch.setattr(native_chat, '_turn', project)
     with core.store.read_snapshot():
         first, signatures = native_chat.changes(context, {})

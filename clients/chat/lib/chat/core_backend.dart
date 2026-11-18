@@ -42,6 +42,7 @@ abstract interface class ChatBackend {
   Future<void> refresh();
   Future<Map<String, dynamic>> history({int? before});
   Future<List<Map<String, dynamic>>> status(String eventId);
+  Future<Map<String, dynamic>> replyNow(String eventId);
   Stream<Map<String, dynamic>> watchTurns();
   void stopWatching();
   Future<String> publicIdentity();
@@ -683,6 +684,10 @@ class CoreBackend implements ChatBackend {
               as List)
           .map((item) => Map<String, dynamic>.from(item as Map))
           .toList();
+
+  @override
+  Future<Map<String, dynamic>> replyNow(String eventId) =>
+      _request('POST', '/v1/console/chat/messages/$eventId/reply-now');
 
   @override
   Stream<Map<String, dynamic>> watchTurns() async* {

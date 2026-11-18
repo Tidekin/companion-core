@@ -1220,6 +1220,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                       loadImage: (slot) =>
                           session.backend.messageImage(turn.id, slot),
                       loadSticker: session.backend.replySticker,
+                      onReplyNow: state.connected
+                          ? () => session.replyNow(turn.id)
+                          : null,
                     ),
                   );
                 }
@@ -1614,8 +1617,10 @@ class TurnView extends StatelessWidget {
     this.onQuoteTap,
     this.loadImage,
     this.loadSticker,
+    this.onReplyNow,
   });
   final ChatTurn turn;
+  final VoidCallback? onReplyNow;
 
   /// Fetches the meme a reply carries; null shows none.
   final Future<Uint8List> Function(String messageId)? loadSticker;
@@ -1740,6 +1745,11 @@ class TurnView extends StatelessWidget {
                   child: TypingDots(),
                 ),
               ),
+            if (turn.canReplyNow &&
+                turn.state == 'QUEUED' &&
+                !turn.redacted &&
+                onReplyNow != null)
+              TextButton(onPressed: onReplyNow, child: const Text('立即回复')),
             if (preview != null && quiet)
               if (switch (preview.state) {
                     'INTERRUPTED' => '回复中断了，可以再发一次',
