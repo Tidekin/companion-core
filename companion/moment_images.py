@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -26,7 +27,8 @@ import httpx
 from companion import cloud_budget, image_generation, owner_authority
 from companion.contracts import CoreError
 from companion.media_provider import HTTPImageGenerator
-from companion.store import uid
+from companion.postgres import BUDGET_LEDGER
+from companion.store import Store, uid
 from companion_meme_protocol import validate_bytes
 
 SCENARIO = "moment_image"
@@ -157,16 +159,78 @@ def _expire(store, moment_id, now, code):
                   "WHERE moment_id=%s AND slot=0 AND state='QUEUED'", (code, now, moment_id))
 
 
-async def run_once(core):
-    """Run at most one queued picture; True when a row changed."""
-    store, settings = core.store, core.settings
-    now = core.clock()
-    row = store.one("SELECT moment_id, created_at FROM moment_images WHERE state = 'QUEUED' "
-                    "ORDER BY created_at, moment_id LIMIT 1")
-    if row is None:
+def _recover(store, moment_id, now):
+    """Use the original charge evidence, including when erasure overtook dispatch."""
+    with store.transaction():
+        store.ledger_lock(BUDGET_LEDGER)
+        row = store.one(
+            "SELECT i.state, i.usage_request_id, u.state AS usage_state, "
+            "c.state AS cost_state, c.legacy, c.dispatched_at FROM moment_images i "
+            "LEFT JOIN model_usage u ON u.request_id=i.usage_request_id AND u.scenario=%s "
+            "LEFT JOIN cloud_cost_snapshots c ON c.reference_type='model' "
+            "AND c.reference_id=u.request_id WHERE i.moment_id=%s AND i.slot=0 FOR UPDATE OF i",
+            (SCENARIO, moment_id))
+        if not row or row["state"] not in {"RESERVED", "DISPATCHED", "ERASED"}:
+            return False
+        if row["state"] == "ERASED" and row["usage_state"] != "RESERVED":
+            return False
+        unstarted = (row["state"] != "DISPATCHED" and row["usage_state"] == "RESERVED"
+                     and row["cost_state"] == "RESERVED" and row["legacy"] == 0
+                     and row["dispatched_at"] is None)
+        usage_id = row["usage_request_id"]
+        if row["usage_state"] == "RESERVED":
+            if unstarted:
+                store.execute("UPDATE model_usage SET state='SETTLED', billed_micro_usd=0, "
+                              "is_estimate=0 WHERE request_id=%s", (usage_id,))
+            else:
+                store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=%s",
+                              (usage_id,))
+            cloud_budget.sync_reference(store, "model", usage_id)
+        _remove(store, moment_id, 0)
+        if row["state"] != "ERASED":
+            store.execute("UPDATE moment_images SET state=%s,error_code=%s,updated_at=%s "
+                          "WHERE moment_id=%s AND slot=0", (
+                              "EXPIRED" if unstarted else "UNKNOWN",
+                              "IMAGE_NOT_DISPATCHED" if unstarted else "IMAGE_PROVIDER_UNCERTAIN",
+                              now, moment_id))
+        store.audit("moment.image_recovered", moment_id, usage_id, now,
+                    outcome="not_dispatched" if unstarted else "unconfirmed")
+        return True
+
+
+async def run_once(core, *, allow_draw=True):
+    """Hold one session lock across reservation, provider I/O, and publication."""
+    candidates = core.store.rows(
+        "SELECT i.moment_id FROM moment_images i WHERE (i.state='QUEUED' AND %s) "
+        "OR i.state IN ('RESERVED','DISPATCHED') OR (i.state='ERASED' AND EXISTS ("
+        "SELECT 1 FROM model_usage u WHERE u.request_id=i.usage_request_id AND u.scenario=%s "
+        "AND u.state='RESERVED')) ORDER BY (i.state='QUEUED'), i.created_at, i.moment_id LIMIT 32",
+        (allow_draw, SCENARIO))
+    if not candidates:
         return False
-    moment_id = row["moment_id"]
-    stale = datetime.fromisoformat(row["created_at"]) + timedelta(seconds=QUEUE_SECONDS) \
+    # A distinct checked-out connection prevents reentrant acquisition by another coroutine.
+    with closing(Store(core.store.database, core.store.state_directory)) as store:
+        for candidate in candidates:
+            moment_id = candidate["moment_id"]
+            lock = ("companion.moment_image:" + moment_id,)
+            if not store.one("SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS held",
+                             lock)["held"]:
+                continue
+            try:
+                row = store.one("SELECT state, created_at FROM moment_images "
+                                "WHERE moment_id=%s AND slot=0", (moment_id,))
+                if row and row["state"] == "QUEUED" and allow_draw:
+                    return await _draw(core, store, moment_id, row["created_at"])
+                if row and row["state"] in {"RESERVED", "DISPATCHED", "ERASED"}:
+                    return _recover(store, moment_id, core.clock())
+            finally:
+                store.one("SELECT pg_advisory_unlock(hashtextextended(%s,0))", lock)
+    return False
+
+
+async def _draw(core, store, moment_id, created_at):
+    settings, now = core.settings, core.clock()
+    stale = datetime.fromisoformat(created_at) + timedelta(seconds=QUEUE_SECONDS) \
         <= datetime.fromisoformat(now)
     if not available(core):
         if not stale:
@@ -218,10 +282,19 @@ async def run_once(core):
             _expire(store, moment_id, core.clock(), error.code)
         return True
     with store.transaction():
-        cloud_budget.mark_dispatched(store, "model", usage_id, core.clock())
-        store.execute("UPDATE moment_images SET state='DISPATCHED', updated_at=%s "
-                      "WHERE moment_id=%s AND slot=0 AND state='RESERVED'",
-                      (core.clock(), moment_id))
+        try:
+            owner_authority.current(store, settings, core.clock, purpose="moments")
+            owner_authority.current(store, settings, core.clock, purpose="expression")
+            permitted = True
+        except CoreError:
+            permitted = False
+        updated = permitted and store.execute(
+            "UPDATE moment_images SET state='DISPATCHED', updated_at=%s "
+            "WHERE moment_id=%s AND slot=0 AND state='RESERVED'", (core.clock(), moment_id))
+        if updated:
+            cloud_budget.mark_dispatched(store, "model", usage_id, core.clock())
+    if not updated:
+        return _recover(store, moment_id, core.clock())
     generator = HTTPImageGenerator(cfg, core.image_transport)
     try:
         async with asyncio.timeout(cfg.provider_timeout_seconds + 2):
@@ -241,7 +314,6 @@ async def run_once(core):
         _close(store, moment_id, usage_id, "FAILED", "SETTLED", core.clock(),
                "INVALID_IMAGE_PROVIDER_RESPONSE")
         return True
-    _write(store, moment_id, 0, data)
     finished = core.clock()
     with store.transaction():
         updated = store.execute(
@@ -249,12 +321,11 @@ async def run_once(core):
             "updated_at=%s WHERE moment_id=%s AND slot=0 AND state='DISPATCHED' "
             "AND EXISTS(SELECT 1 FROM moments WHERE moment_id=%s AND state <> 'ERASED')",
             (prepared.mime_type, prepared.sha256, len(data), finished, moment_id, moment_id))
+        if updated:
+            _write(store, moment_id, 0, data)
         store.execute("UPDATE model_usage SET state = 'SETTLED' WHERE request_id = %s",
                       (usage_id,))
         cloud_budget.sync_reference(store, "model", usage_id)
-    if not updated:
-        # Forgotten while drawing: the answer is charged, the bytes are not kept.
-        _remove(store, moment_id, 0)
     return True
 
 
@@ -296,7 +367,8 @@ def erase(store, moment_ids):
     if not moment_ids or not store.has_table("moment_images"):
         return
     for row in store.rows("SELECT moment_id, slot FROM moment_images "
-                          "WHERE moment_id = ANY(%s::text[])", (sorted(moment_ids),)):
+                          "WHERE moment_id = ANY(%s::text[]) ORDER BY moment_id, slot FOR UPDATE",
+                          (sorted(moment_ids),)):
         _remove(store, row["moment_id"], row["slot"])
     store.execute("UPDATE moment_images SET state='ERASED', mime=NULL, sha256=NULL, "
                   "byte_length=NULL WHERE moment_id = ANY(%s::text[])", (sorted(moment_ids),))
