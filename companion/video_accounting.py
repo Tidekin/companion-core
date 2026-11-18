@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from companion import budget, cumulative, live_text, paid_budget
 from companion.contracts import CoreError
+from companion.model_records import admission_by_request_id, usage_by_request_id
 from companion.store import utcnow
 
 KIND = "video_rate_correction"
@@ -26,27 +27,8 @@ FIELDS = {
 
 def evidence(store, request_id, prior):
     """Reconstruct the frozen evidence without interpreting estimates as observations."""
-    admission = store.one('SELECT model_admissions.request_id AS request_id, '
-        'model_admissions.logical_request_id AS logical_request_id, model_admissions.attempt_id AS '
-        'attempt_id, model_admissions.attempt_number AS attempt_number, model_admissions.window_id '
-        'AS window_id, model_admissions.contract_sha256 AS contract_sha256, '
-        'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
-        'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
-        'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
-        'output_bound, model_admissions.lease_token AS lease_token, model_admissions.lease_until '
-        'AS lease_until, model_admissions.io_started_at AS io_started_at, '
-        'model_admissions.journal_path AS journal_path, model_admissions.journal_id AS journal_id, '
-        'model_admissions.measurement_json AS measurement_json, model_admissions.authority_json AS '
-        'authority_json FROM model_admissions AS model_admissions WHERE '
-        'model_admissions.request_id = %s', (request_id,))
-    usage = store.one('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
-        'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
-        'model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS '
-        'input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, '
-        'model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS '
-        'billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS '
-        'occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM '
-        'model_usage AS model_usage WHERE model_usage.request_id = %s', (request_id,))
+    admission = admission_by_request_id(store, request_id)
+    usage = usage_by_request_id(store, request_id)
     diagnostics = store.rows('SELECT safe_detail_json FROM audit_log WHERE action = '
         "'model.usage_diagnostic' AND entity_id = %s ORDER BY audit_id NULLS FIRST", (request_id,))
     if not admission or not usage or len(diagnostics) != 1:

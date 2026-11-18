@@ -25,6 +25,7 @@ from companion.gateway_admission import (
 )
 from companion.gateway_contract import ChatRequest, ClientGrant, RequestContext, route_intent
 from companion.model import GenerationOptions, ModelClient
+from companion.model_records import usage_by_request_id
 from companion.postgres import BUDGET_LEDGER
 from companion.store import after, encode, uid, utcnow
 
@@ -272,14 +273,7 @@ def _receipt_locked(store, settings, client_id, request_id, now):
     if row is None:
         raise CoreError("GATEWAY_REQUEST_NOT_FOUND", 404)
     completion, accounting = None, None
-    usage = store.one('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
-        'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
-        'model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS '
-        'input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, '
-        'model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS '
-        'billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS '
-        'occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM '
-        'model_usage AS model_usage WHERE model_usage.request_id = %s', (row["model_request_id"],))
+    usage = usage_by_request_id(store, row["model_request_id"])
     if usage:
         admission = store.one('SELECT journal_path FROM model_admissions WHERE request_id = %s',
                               (row["model_request_id"],))
@@ -348,16 +342,7 @@ async def run_once(store, settings, model, clock=utcnow):
         error = failure.code if isinstance(failure, CoreError) else "GATEWAY_REQUEST_INVALID"
         error_status = failure.status if isinstance(failure, CoreError) else 400
     with store.transaction():
-        usage = store.one('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
-            'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
-            'model_usage.provider AS provider, model_usage.model AS model, '
-            'model_usage.input_tokens AS input_tokens, model_usage.cached_input_tokens AS '
-            'cached_input_tokens, model_usage.output_tokens AS output_tokens, '
-            'model_usage.billed_micro_usd AS billed_micro_usd, model_usage.is_estimate AS '
-            'is_estimate, model_usage.occurred_at AS occurred_at, model_usage.state AS state, '
-            'model_usage.pricing_known AS pricing_known FROM model_usage AS model_usage WHERE '
-            'model_usage.request_id = %s',
-                          (row["model_request_id"],))
+        usage = usage_by_request_id(store, row["model_request_id"])
         state, encrypted = "FAILED", None
         if usage and (usage["state"] == "RESERVED"
                       or usage["state"] == "UNKNOWN" and response is None):

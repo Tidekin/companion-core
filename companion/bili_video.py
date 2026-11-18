@@ -39,6 +39,7 @@ from companion.bili_video_protocol import (
     target_from_wire,
 )
 from companion.contracts import CoreError
+from companion.model_records import usage_by_request_id
 from companion.observation import ObservationEvent, ObservationPayload, expired_sources
 from companion.privacy import epoch, redact
 from companion.reading import followup_item
@@ -563,17 +564,7 @@ def model_binding(
 
 def validate_model(store, settings, clock, request_id):
     binding = model_binding(store, settings, clock, request_id)
-    usage = store.one(
-        "SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS "
-        "request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, "
-        "model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS "
-        "input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, "
-        "model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS "
-        "billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS "
-        "occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM "
-        "model_usage AS model_usage WHERE model_usage.request_id = %s",
-        (request_id,),
-    )
+    usage = usage_by_request_id(store, request_id)
     if (
         not binding
         or not usage
