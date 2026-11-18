@@ -273,11 +273,17 @@ def register_console_routes(app, settings):
         if not settings.control_token.get_secret_value():
             raise CoreError("CONSOLE_OWNER_CREDENTIAL_REQUIRED", 503)
 
-    def check_owner(request: Request):
-        return _check_owner(app.state.core, request)
+    def session_check(request: Request):
+        captured, clock = _request_fields(request), app.state.core.clock
+        return lambda store: _check_owner(
+            SimpleNamespace(store=store, settings=settings, clock=clock), captured
+        )
 
     async def owner(request: Request):
-        return check_owner(request)
+        if not request.cookies.get(COOKIE):
+            # The existing disabled / missing-credential / missing-token responses need no DB.
+            return _check_owner(app.state.core, request)
+        return await app.state.api_store.run(session_check(request))
 
     app.add_middleware(_PrivateHeaders, prefix=prefix)
 
@@ -404,19 +410,13 @@ def register_console_routes(app, settings):
 
     from companion.qzone_publication_api import register_routes as register_publication_routes
 
-    def publication_check(request):
-        captured, clock = _request_fields(request), app.state.core.clock
-        return lambda store: _check_owner(
-            SimpleNamespace(store=store, settings=settings, clock=clock), captured
-        )
-
     register_publication_routes(
-        app, settings, prefix + "/qzone/publications", auth, publication_check
+        app, settings, prefix + "/qzone/publications", auth, session_check
     )
 
     from companion.native_chat_api import register_routes as register_native_chat_routes
 
-    register_native_chat_routes(app, settings, prefix + "/chat", auth, publication_check)
+    register_native_chat_routes(app, settings, prefix + "/chat", auth, session_check)
 
     async def write(request, key, body, apply, *, rejected_errors=frozenset()):
         clock, captured = app.state.core.clock, _request_fields(request)
@@ -469,12 +469,23 @@ def register_console_routes(app, settings):
         return console_read.memories(app.state.core, q, view, limit)
 
     @app.get(prefix + "/memories/recall", dependencies=auth)
-    async def memory_recall(q: str, limit: int = 10):
+    async def memory_recall(request: Request, q: str, limit: int = 10):
         if not q.strip() or len(q) > 100 or not 1 <= limit <= 20:
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         if not settings.memory_enabled:
             raise CoreError("MEMORY_DISABLED", 409)
-        return console_read.recall(app.state.core, q.strip(), limit)
+        check = session_check(request)
+        clock = app.state.core.clock
+
+        def read(store):
+            check(store)
+            memory = Memory(store, settings, ErasureLedger(settings.erasure_ledger))
+            result = console_read.recall(SimpleNamespace(memory=memory, settings=settings,
+                                                        clock=clock), q.strip(), limit)
+            check(store)
+            return result
+
+        return await app.state.api_store.run(read)
 
     @app.post(prefix + "/memories/{memory_id}/decision", dependencies=auth)
     async def memory_decision(

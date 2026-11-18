@@ -114,7 +114,7 @@ def test_source_grant_write_wait_keeps_health_and_original_semantics(
                     await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())
-    assert len(opened) == len(closed) == 2 and opened == closed
+    assert len(opened) == len(closed) == (4 if channel == "console" else 2) and opened == closed
     assert all(store is not core.store and thread != threading.get_ident()
                for store, thread in opened)
     if pending:
