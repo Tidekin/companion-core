@@ -57,7 +57,6 @@ from companion.model import (
 )
 from companion.privacy import epoch, redact
 from companion.reading import ReadingService
-from companion.reply_segments import split_text
 from companion.retrieval import query_scope
 from companion.social import proactive_allowed
 from companion.store import after, encode, uid, utcnow
@@ -66,7 +65,6 @@ from companion.transport import (
     cancel_proactive_work,
     digest,
     enqueue,
-    enqueue_reply_parts,
     reconcile_delivery,
     recover_deliveries,
     set_proactive_paused,
@@ -1584,198 +1582,15 @@ class Core(DomainRuntime):
                 request_id = None
                 reply = redact(response.text, self.settings)
                 generated_reply = True
-            from companion.agent_output import reply_format, song_choice
+            from companion.reply_delivery import prepare
 
-            voice_reply = (self.settings.voice.enabled and self.settings.voice.reply.mode == "model"
-                           and generated_reply and job["kind"] == "chat"
-                           and reply_format(self.store, job["event_id"]) == "voice")
-            singing_reply = (generated_reply and job["kind"] == "chat"
-                             and reply_format(self.store, job["event_id"]) == "singing")
-            mixed_reply = (generated_reply and job["kind"] == "chat"
-                           and reply_format(self.store, job["event_id"]) == "mixed")
-            preview_only = any(s["kind"] == "video_preview_reply" for s in context_snapshots)
-            quote_choice = None
-            if (authority and generated_reply and not preview_only and job["kind"] == "chat"
-                    and self.settings.quote_policy != "never"):
-                if text_only:
-                    quote_choice = reply_quote.choice(reply)
-                    reply = reply_quote.strip_markers(reply)
-                else:
-                    quote_choice, reply = reply_quote.extract(reply)
-            elif generated_reply:
-                # Quote aliases are never visible text, even when copied from older history.
-                reply = reply_quote.strip_markers(reply)
-            with self.store.transaction():
-                task_settings = self._check_context_snapshots(job, context_snapshots)
-                if bounded_text:
-                    live_text.check_job(self.store, self.settings, self.clock, job)
-                current = self.store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, '
-                    'jobs.kind AS kind, jobs.state AS state, jobs.idempotency_key AS '
-                    'idempotency_key, jobs.attempts AS attempts, jobs.max_attempts AS '
-                    'max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
-                    'lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS '
-                    'last_error_code, jobs.created_at AS created_at, jobs.updated_at AS '
-                    'updated_at, jobs.lease_token AS lease_token, jobs.context_tracked AS '
-                    'context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs '
-                    'WHERE jobs.job_id = %s', (job["job_id"],))
-                if current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
-                    return True
-                if current["lease_until"] <= self.clock():
-                    return True
-                self._check_reply_epoch(job, captured_epoch)
-                now = self.clock()
-                message_ids = []
-                reply_is_current = not reply_revision.owner_input(
-                    self.store, job["event_id"],
-                ) or reply_revision.current(self.store, job["event_id"])
-                should_send = reply.strip() not in {"[SKIP]", ""} and proactive_allowed(
-                    self.store, self.settings, now
-                )
-                notice_parts = notices.parts(self.store, self.settings, job, reply, now)
-                if notices.shadow(job):
-                    self.life_topics.submit_goal(job, self.goals)
-                if notice_parts == []:
-                    notices.record(self.store, self.settings, job, [], now)
-                silent = (reply_is_current and generated_reply and job["kind"] == "chat"
-                          and turn_taking.skipped(self.store, task_settings, job, reply))
-                if reply_is_current and not silent and (
-                    job["kind"] != "activity" or should_send
-                    or notices.required(self.store, job["job_id"])
-                ):
-                    policy = self.settings.segmented_reply
-                    intent = (
-                        self.expression.intent(job["event_id"], reply, now)
-                        if policy and generated_reply and job["kind"] == "chat" and not preview_only
-                        and not voice_reply and not singing_reply and not mixed_reply
-                        and self.settings.expression_enabled
-                        and (authority is None or "expression" in authority.policy.purposes)
-                        else None
-                    )
-                    if preview_only:
-                        parts = split_text(reply, policy) if policy else [reply]
-                        message_ids = enqueue_reply_parts(
-                            self.store, job, parts, policy.interval_ms if policy else 0, now)
-                    elif mixed_reply:
-                        from companion import reply_composition
-
-                        newer = self.store.one((
-                            'SELECT 1 FROM events WHERE conversation_id = %s AND '
-                            "actor_id = 'owner' AND source IN ('qq.onebot','native.chat') AND "
-                            "event_type IN ('message.received', "
-                            "'message.media_received') AND record_sequence > "
-                            '(SELECT record_sequence AS rowid FROM events WHERE '
-                            'event_id = %s) LIMIT 1'
-                        ),
-                            (job["conversation_id"], job["event_id"]))
-                        message_ids = [] if newer else reply_composition.enqueue(self, job, now)
-                    elif singing_reply:
-                        from companion.agent_singing import selected
-
-                        song_id = song_choice(self.store, job["event_id"])
-                        selected(self.store, self.settings, self.clock, job, song_id)
-                        song = self.voice.jobs.result(song_id)
-                        parts = [reply if index == 0 else f"歌曲（{index + 1}/{len(song.audio)}）"
-                                 for index in range(len(song.audio))]
-                        message_ids = enqueue_reply_parts(self.store, job, parts, 0, now)
-                        for index, message_id in enumerate(message_ids):
-                            self.voice.freeze_song(message_id, song_id, song, index)
-                    elif voice_reply:
-                        message_ids = enqueue_reply_parts(self.store, job, [reply], 0, now)
-                    elif notice_parts is not None:
-                        action = ("qq.private.reply" if notices.required(self.store, job["job_id"])
-                                  else "qq.private.proactive")
-                        message_ids = enqueue_reply_parts(
-                            self.store, job, notice_parts, policy.interval_ms if policy else 0,
-                            now, action=action,
-                        ) if notice_parts else []
-                        notices.record(self.store, self.settings, job, message_ids, now)
-                    elif policy and generated_reply and job["kind"] == "chat" and (
-                        intent is None or intent.image is None or authority is not None
-                        and not self.store.one(
-                            'SELECT 1 FROM generated_images WHERE job_id = %s AND state = '
-                            "'SUCCEEDED' AND message_id IS NULL", (job["job_id"],),
-                        )
-                    ):
-                        parts = split_text(intent.text if intent else reply, policy)
-                        image = (intent.image.model_dump(exclude_none=True)
-                                 if intent is not None and intent.image is not None else None)
-                        if image is not None and policy.max_segments != "unlimited":
-                            # The picture occupies one of the existing visible-message slots.
-                            text_slots = policy.max_segments - 1
-                            if len(parts) > text_slots:
-                                parts = parts[:text_slots - 1] + ["".join(parts[text_slots - 1:])]
-                        if bounded_text:
-                            approval, _ = live_text.check_job(
-                                self.store, self.settings, self.clock, job,
-                            )
-                            if len(reply) > approval.max_reply_chars:
-                                raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
-                            available = live_text.remaining_send_slots(self.store, approval)
-                            if available <= 0:
-                                raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 403)
-                            if len(parts) > available:
-                                parts = [reply]
-                        if (len(parts) > 1 or image is not None) and self.store.one(
-                            (
-                                'SELECT 1 FROM events WHERE conversation_id = %s AND '
-                                "actor_id = 'owner' AND event_type IN "
-                                "('message.received', 'message.media_received') AND "
-                                "source IN ('qq.onebot','native.chat') AND "
-                                "record_sequence > (SELECT "
-                                'record_sequence AS rowid FROM events WHERE event_id = '
-                                '%s) LIMIT 1'
-                            ), (job["conversation_id"], job["event_id"]),
-                        ):
-                            parts = []  # The owner already moved on while the model was answering.
-                        quote_to = reply_quote.target(
-                            self.store, self.settings, self.clock, job, quote_choice,
-                        ) if authority and parts and not text_only else None
-                        native_quote = reply_quote.native_target(
-                            self.store, self.settings, self.clock, job, quote_choice,
-                        ) if authority and parts and text_only and image is None else None
-                        message_ids = enqueue_reply_parts(
-                            self.store, job, parts, policy.interval_ms, now, reply_to=quote_to,
-                            image=image, quote=native_quote,
-                        ) if parts else []
-                    else:
-                        create_reply = self.expression.enqueue if (
-                            authority is None or "expression" in authority.policy.purposes
-                        ) else lambda *args, **kwargs: enqueue(self.store, *args, **kwargs)
-                        native_quote = reply_quote.native_target(
-                            self.store, self.settings, self.clock, job, quote_choice,
-                        ) if authority and text_only and job["kind"] == "chat" else None
-                        message_ids = [create_reply(
-                            job["event_id"], job["conversation_id"], reply, now,
-                            action="qq.private.proactive" if job["kind"] == "activity"
-                            else "qq.private.reply",
-                            **({"quote": native_quote} if native_quote else {}),
-                        )]
-                    if (authority and message_ids and generated_reply and not text_only
-                            and not voice_reply and not singing_reply and not mixed_reply
-                            and job["kind"] == "chat"):
-                        from companion import image_generation
-
-                        image_generation.attach(self.store, job, message_ids, now)
-                    if authority and message_ids:
-                        owner_delivery.record_replies(
-                            self.store, self.settings, self.clock, job, message_ids)
-                    elif bounded_text and message_ids:
-                        live_text.record_replies(
-                            self.store, self.settings, self.clock, job, message_ids,
-                        )
-                if conversation_store is not None:
-                    conversation_store.complete()
-                job_queue.release(self.store, job["job_id"], "SUCCEEDED", now)
-                from companion.native_stream import finish
-
-                finish(self.store, job)
-                if message_ids:
-                    from companion.native_delivery import publish
-
-                    publish(self.store, self.settings, self.clock, message_ids)
-                self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
-                                 **({"reply_suppressed": True} if not reply_is_current else {}),
-                                 **({"reply_skipped": True} if silent else {}))
+            prepared = prepare(
+                self.store, self.settings, job, reply, generated=generated_reply,
+                authority=authority, text_only=text_only, snapshots=context_snapshots,
+            )
+            if not self._commit_reply(job, prepared, context_snapshots, captured_epoch,
+                                      authority, bounded_text, conversation_store):
+                return True
             emit(
                 "t_job_done",
                 job["trace_id"],
@@ -1802,6 +1617,67 @@ class Core(DomainRuntime):
         finally:
             if qq_images.enabled(self.settings):
                 self.content.discard_images(job["event_id"])
+        return True
+
+    def _commit_reply(self, job, prepared, context_snapshots, captured_epoch,
+                      authority, bounded_text, conversation_store):
+        """Fence and publish the completed turn in the same durable transaction."""
+        with self.store.transaction():
+            task_settings = self._check_context_snapshots(job, context_snapshots)
+            if bounded_text:
+                live_text.check_job(self.store, self.settings, self.clock, job)
+            current = self.store.one(
+                "SELECT state, lease_token, lease_until FROM jobs WHERE job_id=%s",
+                (job["job_id"],),
+            )
+            if current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
+                return False
+            if current["lease_until"] <= self.clock():
+                return False
+            self._check_reply_epoch(job, captured_epoch)
+            now = self.clock()
+            message_ids = []
+            reply_is_current = not reply_revision.owner_input(
+                self.store, job["event_id"],
+            ) or reply_revision.current(self.store, job["event_id"])
+            should_send = prepared.text.strip() not in {"[SKIP]", ""} and proactive_allowed(
+                self.store, self.settings, now
+            )
+            notice_parts = notices.parts(self.store, self.settings, job, prepared.text, now)
+            if notices.shadow(job):
+                self.life_topics.submit_goal(job, self.goals)
+            if notice_parts == []:
+                notices.record(self.store, self.settings, job, [], now)
+            silent = (reply_is_current and prepared.model_chat
+                      and turn_taking.skipped(self.store, task_settings, job, prepared.text))
+            if reply_is_current and not silent and (
+                job["kind"] != "activity" or should_send
+                or notices.required(self.store, job["job_id"])
+            ):
+                message_ids = prepared.enqueue(
+                    self, job, now, authority=authority, bounded_text=bounded_text,
+                    notice_parts=notice_parts,
+                )
+                if authority and message_ids:
+                    owner_delivery.record_replies(
+                        self.store, self.settings, self.clock, job, message_ids)
+                elif bounded_text and message_ids:
+                    live_text.record_replies(
+                        self.store, self.settings, self.clock, job, message_ids,
+                    )
+            if conversation_store is not None:
+                conversation_store.complete()
+            job_queue.release(self.store, job["job_id"], "SUCCEEDED", now)
+            from companion.native_stream import finish
+
+            finish(self.store, job)
+            if message_ids:
+                from companion.native_delivery import publish
+
+                publish(self.store, self.settings, self.clock, message_ids)
+            self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
+                             **({"reply_suppressed": True} if not reply_is_current else {}),
+                             **({"reply_skipped": True} if silent else {}))
         return True
 
     def fail_job(self, job, code):
