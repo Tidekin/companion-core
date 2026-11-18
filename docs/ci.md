@@ -174,6 +174,34 @@ tested tree, the latest successful run/attempt and unexpired authenticated origi
 Run timestamps do not authorize or expire proof: upstream record timestamps can disagree
 with actual step/log times, as exposed by the [native job API](https://docs.github.com/en/rest/actions/workflow-jobs).
 
+### Recover the image receipt after a partial rerun
+
+If a failed test shard passes on retry, check the artifacts of the latest successful
+full PR run before merging. The `ci-full-N` receipt must reference the actual
+`ci-container-images-N` artifact from that same attempt. A test-only rerun can retain
+the previous container job's artifact ID while writing the new attempt number into
+the receipt. In that case, rerun the `container` job on the same run and commit.
+GitHub also reruns its dependent `ci` job and carries forward the successful test shards.
+
+```sh
+gh run view RUN_ID --json jobs --jq '.jobs[] | select(.name == "container") | .databaseId'
+gh run rerun --job CONTAINER_JOB_ID
+gh run watch RUN_ID --exit-status
+```
+
+Confirm the new attempt is green and its receipt names the matching image artifact
+ID and digest. Download the receipt and compare its `container_images` fields with
+the artifact listing for the same run and attempt.
+
+```sh
+gh run download RUN_ID --name ci-full-N --dir .local/ci-review/RUN_ID-N
+gh api 'repos/{owner}/{repo}/actions/runs/RUN_ID/artifacts' --paginate \
+  --jq '.artifacts[] | select(.name | startswith("ci-container-images-")) | {id,name,digest,expired}'
+```
+
+After merge, the main workflow verifies the tree and image evidence before selecting
+reuse. If that verification fails, let main run its full checks.
+
 The default `load` command always performs Docker load, including in producer CI where the
 images already exist, so native archive codec validation remains exercised. A deployment resume
 may explicitly use `load container-images.json --reuse-existing`. It first authenticates the
