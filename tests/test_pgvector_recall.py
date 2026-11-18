@@ -105,4 +105,6 @@ def test_native_first_request_finds_late_memory_and_erasure_removes_it(
         core.ledger.expire_events(core.store, [event], core.clock())
     with retrieval_work.scope():
         assert not core.memory.index.nominate(query, memory_ids=[mid])
+        assert not core.memory.index.nominate(query, subjects=("project",))
+        assert retrieval_work.current().counts["query_vectors"] == 0
     assert not core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=%s", (mid,))

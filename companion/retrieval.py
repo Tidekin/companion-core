@@ -114,49 +114,54 @@ class SemanticIndex:
         except Exception as error:
             raise CoreError("MEMORY_INDEX_UNAVAILABLE", 503) from error
 
-    def _nearest(self, question, subjects, memory_ids):
+    def _eligible_vectors(self, subjects, memory_ids):
         work = retrieval_work.current()
         limit = min(48, work.remaining("vector_rows"))
         if not limit:
             work.mark("vector_rows")
-            return []
+            return None
         filters = ["v.model_version=%s", "v.embedding IS NOT NULL",
-                   "public.vector_dims(v.embedding)=%s", "m.privacy_scope='private'",
+                   "m.privacy_scope='private'",
                    "m.status IN ('CONFIRMED','HYPOTHESIS')", "m.confidence>0"]
-        params = [INDEX_VERSION, len(question)]
+        params = [INDEX_VERSION]
         if memory_ids is not None:
             filters.append("m.memory_id=ANY(%s::text[])")
             params.append(list(memory_ids))
         if subjects:
             filters.append("m.subject=ANY(%s::text[])")
             params.append(list(subjects))
+        source = " FROM memory_vectors v JOIN memories m USING(memory_id) WHERE " + (
+            " AND ".join(filters))
+        if not work.rows(self.store, "SELECT 1" + source + " LIMIT 1", params, limit=1):
+            return None
+        return source, params, limit
+
+    def _nearest(self, question, eligible):
+        source, params, limit = eligible
+        work = retrieval_work.current()
         # Only IDs cross the database boundary. SQL time is metered over the full scan.
         rows = work.rows(self.store,
-            "SELECT v.memory_id FROM memory_vectors v JOIN memories m USING(memory_id) WHERE "
-            + " AND ".join(filters)
+            "SELECT v.memory_id" + source + " AND public.vector_dims(v.embedding)=%s"
             + " ORDER BY v.embedding OPERATOR(public.<#>) %s::real[]::public.vector,"
               " v.record_sequence,v.memory_id LIMIT %s",
-            (*params, question.tolist(), limit), limit=limit)
+            (*params, len(question), question.tolist(), limit), limit=limit)
         work.take("vector_rows", len(rows))
         if len(rows) == limit < 48:
             work.mark("vector_rows")
         return [row["memory_id"] for row in rows]
 
-    def _has_vectors(self):
-        return retrieval_work.current().rows(self.store,
-            "SELECT 1 FROM memory_vectors WHERE model_version=%s AND embedding IS NOT NULL LIMIT 1",
-            (INDEX_VERSION,), limit=1)
-
     def nominate(self, query, *, subjects=(), memory_ids=None):
-        if not self._has_vectors():
+        eligible = self._eligible_vectors(subjects, memory_ids)
+        if eligible is None:
             return []
-        return self._nearest(self._infer(query, ())[1], subjects, memory_ids)
+        return self._nearest(self._infer(query, ())[1], eligible)
 
     async def nominate_async(self, query, *, subjects=(), memory_ids=None):
-        if not self._has_vectors():
+        eligible = self._eligible_vectors(subjects, memory_ids)
+        if eligible is None:
             return []
         _, question = await asyncio.to_thread(self._infer, query, ())
-        return self._nearest(question, subjects, memory_ids)
+        return self._nearest(question, eligible)
 
     def _prepare(self, rows):
         import numpy as np
