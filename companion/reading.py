@@ -10,6 +10,7 @@ from companion.exploration import ReadItem, ReadResult
 from companion.observation import ArticleEvidence, ReadingEvidence
 from companion.privacy import epoch
 from companion.reading_protocol import ReadingContext
+from companion.reading_rows import exploration_by_request_id
 from companion.source_grants import ReaderReadValidation
 from companion.sources import content_target
 from companion.store import after, encode, utcnow
@@ -314,29 +315,7 @@ class ReadingService:
             )
             if item is None:
                 return None
-            row = s.one(
-                "SELECT exploration_requests.request_id AS request_id, "
-                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
-                "AS adapter_id, exploration_requests.operation AS operation, "
-                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
-                "goal_step_json, exploration_requests.state AS state, "
-                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
-                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
-                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
-                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
-                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
-                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
-                "started_at, exploration_requests.updated_at AS updated_at, "
-                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
-                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
-                "exploration_requests.source_grant_id AS source_grant_id, "
-                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
-                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
-                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
-                "exploration_requests AS exploration_requests WHERE "
-                "exploration_requests.request_id = %s",
-                (item["request_id"],),
-            )
+            row = exploration_by_request_id(s, item["request_id"])
             context = self._context(row, policy.source)
             _validate_sources(self.store, self.settings, self.clock, self.exploration, row, context)
             hosts = list(self.settings.web_reading_hosts) if policy.source == "web" else []
@@ -466,32 +445,7 @@ class ReadingService:
                     s, self.settings, self.clock, self.exploration, attempt, validation)
             except CoreError as error:
                 # Identity still authenticates metering, never expired/revoked content.
-                row = s.one(
-                    "SELECT exploration_requests.request_id AS request_id, "
-                    "exploration_requests.request_key AS request_key, "
-                    "exploration_requests.adapter_id AS adapter_id, exploration_requests.operation "
-                    "AS operation, exploration_requests.url AS url, "
-                    "exploration_requests.goal_step_json AS goal_step_json, "
-                    "exploration_requests.state AS state, exploration_requests.lease_token AS "
-                    "lease_token, exploration_requests.lease_until AS lease_until, "
-                    "exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, "
-                    "exploration_requests.reserved_bytes AS reserved_bytes, "
-                    "exploration_requests.used_bytes AS used_bytes, "
-                    "exploration_requests.result_sha256 AS result_sha256, "
-                    "exploration_requests.last_error_code AS last_error_code, "
-                    "exploration_requests.created_at AS created_at, "
-                    "exploration_requests.started_at AS started_at, "
-                    "exploration_requests.updated_at AS updated_at, exploration_requests.redacted "
-                    "AS redacted, exploration_requests.reserved_requests AS reserved_requests, "
-                    "exploration_requests.used_requests AS used_requests, "
-                    "exploration_requests.source_grant_id AS source_grant_id, "
-                    "exploration_requests.source_grant_epoch AS source_grant_epoch, "
-                    "exploration_requests.authority_json AS authority_json, "
-                    "exploration_requests.query AS query, exploration_requests.discovery_mode AS "
-                    "discovery_mode FROM exploration_requests AS exploration_requests WHERE "
-                    "exploration_requests.request_id = %s",
-                    (request_id,),
-                )
+                row = exploration_by_request_id(s, request_id)
                 outcome = {
                     "state": "CANCELLED"
                     if result.used_requests is not None and result.used_bytes is not None

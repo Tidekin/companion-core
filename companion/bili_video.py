@@ -45,6 +45,7 @@ from companion.observation import ObservationEvent, ObservationPayload, expired_
 from companion.privacy import epoch, redact
 from companion.reading import followup_item
 from companion.reading_protocol import ObservationEvidence
+from companion.reading_rows import attempt_by_request_id, exploration_by_request_id
 from companion.source_grants import ReaderReadValidation, SourceGrantService, SourceGrantSnapshot
 from companion.store import after, encode, uid, utcnow
 from companion.video_evidence import prepare_sampling_input, validate_media_result
@@ -449,40 +450,8 @@ def model_binding(
         and logical_request_id != phase["model_job_id"]
     ):
         raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
-    attempt = store.one(
-        "SELECT reading_attempts.request_id AS request_id, "
-        "reading_attempts.adapter_id AS adapter_id, reading_attempts.lease_token AS lease_token, "
-        "reading_attempts.lease_until AS lease_until, reading_attempts.context_json AS "
-        "context_json, reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
-        "reading_attempts.original_url_sha256 AS original_url_sha256, "
-        "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state AS state, "
-        "reading_attempts.result_sha256 AS result_sha256, reading_attempts.result_event_ids_json "
-        "AS result_event_ids_json, reading_attempts.observed_requests AS observed_requests, "
-        "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
-        "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
-        "reading_attempts WHERE reading_attempts.request_id = %s",
-        (row["request_id"],),
-    )
-    native = store.one(
-        "SELECT exploration_requests.request_id AS request_id, exploration_requests.request_key AS "
-        "request_key, exploration_requests.adapter_id AS adapter_id, "
-        "exploration_requests.operation AS operation, exploration_requests.url AS url, "
-        "exploration_requests.goal_step_json AS goal_step_json, exploration_requests.state AS "
-        "state, exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
-        "AS lease_until, exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, "
-        "exploration_requests.reserved_bytes AS reserved_bytes, exploration_requests.used_bytes AS "
-        "used_bytes, exploration_requests.result_sha256 AS result_sha256, "
-        "exploration_requests.last_error_code AS last_error_code, exploration_requests.created_at "
-        "AS created_at, exploration_requests.started_at AS started_at, "
-        "exploration_requests.updated_at AS updated_at, exploration_requests.redacted AS redacted, "
-        "exploration_requests.reserved_requests AS reserved_requests, "
-        "exploration_requests.used_requests AS used_requests, exploration_requests.source_grant_id "
-        "AS source_grant_id, exploration_requests.source_grant_epoch AS source_grant_epoch, "
-        "exploration_requests.authority_json AS authority_json, exploration_requests.query AS "
-        "query, exploration_requests.discovery_mode AS discovery_mode FROM exploration_requests AS "
-        "exploration_requests WHERE exploration_requests.request_id = %s",
-        (row["request_id"],),
-    )
+    attempt = attempt_by_request_id(store, row["request_id"])
+    native = exploration_by_request_id(store, row["request_id"])
     if (
         not attempt
         or not native
@@ -610,22 +579,7 @@ class BiliVideoService:
                 raise CoreError("BILI_VIDEO_CONTENT_REQUIRED", 403)
             job = _owner(s, self.settings, item, self.clock, job_id=job_id)
             source, observed = _source(s, self.settings, source_event_id, now)
-            original = s.one(
-                "SELECT reading_attempts.request_id AS request_id, reading_attempts.adapter_id AS "
-                "adapter_id, reading_attempts.lease_token AS lease_token, "
-                "reading_attempts.lease_until AS lease_until, reading_attempts.context_json AS "
-                "context_json, reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
-                "reading_attempts.original_url_sha256 AS original_url_sha256, "
-                "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state "
-                "AS state, reading_attempts.result_sha256 AS result_sha256, "
-                "reading_attempts.result_event_ids_json AS result_event_ids_json, "
-                "reading_attempts.observed_requests AS observed_requests, "
-                "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
-                "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
-                "reading_attempts WHERE reading_attempts.request_id = "
-                "%s",
-                (item["read_request_id"],),
-            )
+            original = attempt_by_request_id(s, item["read_request_id"])
             if (
                 not original
                 or original["state"] != "DONE"
@@ -764,44 +718,8 @@ class BiliVideoService:
             if not row:
                 return item
             limits = self.lease_limits(row["request_id"], item.get("source_grant"))
-            native = s.one(
-                "SELECT exploration_requests.request_id AS request_id, "
-                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
-                "AS adapter_id, exploration_requests.operation AS operation, "
-                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
-                "goal_step_json, exploration_requests.state AS state, "
-                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
-                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
-                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
-                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
-                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
-                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
-                "started_at, exploration_requests.updated_at AS updated_at, "
-                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
-                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
-                "exploration_requests.source_grant_id AS source_grant_id, "
-                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
-                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
-                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
-                "exploration_requests AS exploration_requests WHERE "
-                "exploration_requests.request_id = %s",
-                (row["request_id"],),
-            )
-            attempt = s.one(
-                "SELECT reading_attempts.request_id AS request_id, reading_attempts.adapter_id AS "
-                "adapter_id, reading_attempts.lease_token AS lease_token, "
-                "reading_attempts.lease_until AS lease_until, reading_attempts.context_json AS "
-                "context_json, reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
-                "reading_attempts.original_url_sha256 AS original_url_sha256, "
-                "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state "
-                "AS state, reading_attempts.result_sha256 AS result_sha256, "
-                "reading_attempts.result_event_ids_json AS result_event_ids_json, "
-                "reading_attempts.observed_requests AS observed_requests, "
-                "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
-                "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
-                "reading_attempts WHERE reading_attempts.request_id = %s",
-                (row["request_id"],),
-            )
+            native = exploration_by_request_id(s, row["request_id"])
+            attempt = attempt_by_request_id(s, row["request_id"])
             if (
                 item["max_bytes"] != limits["max_bytes"]
                 or item["max_requests"] != limits["max_requests"]
@@ -1600,45 +1518,8 @@ class BiliVideoService:
         s = self.store
         with _tx(s):
             row = self._bound(adapter_id, request_id, body, readonly=True)
-            native = s.one(
-                "SELECT exploration_requests.request_id AS request_id, "
-                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
-                "AS adapter_id, exploration_requests.operation AS operation, "
-                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
-                "goal_step_json, exploration_requests.state AS state, "
-                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
-                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
-                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
-                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
-                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
-                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
-                "started_at, exploration_requests.updated_at AS updated_at, "
-                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
-                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
-                "exploration_requests.source_grant_id AS source_grant_id, "
-                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
-                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
-                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
-                "exploration_requests AS exploration_requests WHERE "
-                "exploration_requests.request_id = %s",
-                (request_id,),
-            )
-            attempt = s.one(
-                "SELECT reading_attempts.request_id AS request_id, "
-                "reading_attempts.adapter_id AS adapter_id, reading_attempts.lease_token AS "
-                "lease_token, reading_attempts.lease_until AS lease_until, "
-                "reading_attempts.context_json AS context_json, "
-                "reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
-                "reading_attempts.original_url_sha256 AS original_url_sha256, "
-                "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state "
-                "AS state, reading_attempts.result_sha256 AS result_sha256, "
-                "reading_attempts.result_event_ids_json AS result_event_ids_json, "
-                "reading_attempts.observed_requests AS observed_requests, "
-                "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
-                "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
-                "reading_attempts WHERE reading_attempts.request_id = %s",
-                (request_id,),
-            )
+            native = exploration_by_request_id(s, request_id)
+            attempt = attempt_by_request_id(s, request_id)
             try:
                 exact(
                     body,

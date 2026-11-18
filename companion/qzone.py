@@ -9,6 +9,7 @@ from companion.observation import expired_sources
 from companion.paid_budget import sha
 from companion.privacy import redact, sensitive
 from companion.qzone_protocol import QZoneEvidence
+from companion.reading_rows import exploration_by_request_id
 from companion.source_grants import SourceGrantService
 from companion.store import after
 
@@ -107,26 +108,7 @@ def select_target(reading, body):
         s.execute('UPDATE exploration_requests SET source_grant_id = %s, source_grant_epoch = %s '
             'WHERE request_id = %s', (body.source_grant.grant_id, body.source_grant.epoch,
                                         request_id))
-        row = s.one('SELECT exploration_requests.request_id AS request_id, '
-            'exploration_requests.request_key AS request_key, exploration_requests.adapter_id AS '
-            'adapter_id, exploration_requests.operation AS operation, exploration_requests.url AS '
-            'url, exploration_requests.goal_step_json AS goal_step_json, '
-            'exploration_requests.state AS state, exploration_requests.lease_token AS lease_token, '
-            'exploration_requests.lease_until AS lease_until, '
-            'exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, '
-            'exploration_requests.reserved_bytes AS reserved_bytes, '
-            'exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 AS '
-            'result_sha256, exploration_requests.last_error_code AS last_error_code, '
-            'exploration_requests.created_at AS created_at, exploration_requests.started_at AS '
-            'started_at, exploration_requests.updated_at AS updated_at, '
-            'exploration_requests.redacted AS redacted, exploration_requests.reserved_requests AS '
-            'reserved_requests, exploration_requests.used_requests AS used_requests, '
-            'exploration_requests.source_grant_id AS source_grant_id, '
-            'exploration_requests.source_grant_epoch AS source_grant_epoch, '
-            'exploration_requests.authority_json AS authority_json, exploration_requests.query AS '
-            'query, exploration_requests.discovery_mode AS discovery_mode FROM '
-            'exploration_requests AS exploration_requests WHERE exploration_requests.request_id = '
-            '%s', (request_id,))
+        row = exploration_by_request_id(s, request_id)
         s.audit("qzone.target_selected", request_id, body.operation_id, clock(),
                 selection_sha256=_selection(s, row, body.source_grant.snapshot()))
         return {"request_id": request_id, "duplicate": False}
