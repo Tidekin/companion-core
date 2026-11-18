@@ -19,7 +19,10 @@ class EmptyRepository implements ChatRepository {
   @override
   Stream<List<BotProfile>> watchBots() => Stream.value([]);
   @override
-  Future<List<ChatTurn>> turns(String botId) async => [];
+  Future<TurnWindow> readTurnWindow(
+    String botId, {
+    TurnWindow? previous,
+  }) async => TurnWindow.empty(botId);
   @override
   Future<List<PendingMessage>> queue(String botId) async => [];
   @override
