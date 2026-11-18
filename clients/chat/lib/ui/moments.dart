@@ -85,8 +85,9 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
         error = null;
       });
     } catch (failure) {
-      if (mounted && revision == feedRevision)
+      if (mounted && revision == feedRevision) {
         setState(() => error = _failure(failure));
+      }
     }
   }
 
@@ -104,8 +105,9 @@ class _MomentsPanelState extends ConsumerState<MomentsPanel> {
         error = null;
       });
     } catch (failure) {
-      if (mounted && revision == feedRevision)
+      if (mounted && revision == feedRevision) {
         setState(() => error = _failure(failure));
+      }
     } finally {
       if (mounted) setState(() => loadingMore = false);
     }

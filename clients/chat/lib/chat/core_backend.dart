@@ -167,7 +167,7 @@ class CoreBackend implements ChatBackend {
     final value = await _request(
       'GET',
       '/v1/console/chat/moments',
-      query: {if (before != null) 'before': before},
+      query: {'before': ?before},
     );
     return (
       items: _momentList(value),
