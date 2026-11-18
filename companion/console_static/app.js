@@ -441,7 +441,7 @@ const LOADERS = {
     }
     return { ...page, items };
   },
-  memories: signal => state.memTab === "moments" ? api.get("/moments?limit=60", signal) : state.memTab === "jargon" ? api.get("/jargon", signal) : state.memTab === "recall"
+  memories: (signal, before) => state.memTab === "moments" ? api.get("/moments?limit=60" + (before ? "&before=" + encodeURIComponent(before) : ""), signal) : state.memTab === "jargon" ? api.get("/jargon", signal) : state.memTab === "recall"
     ? (state.memQ.trim() ? api.get("/memories/recall?q=" + encodeURIComponent(state.memQ.trim()), signal) : Promise.resolve({ items: [], query: "" }))
     : api.get("/memories?limit=60&view=" + state.memTab + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: async signal => {
@@ -893,7 +893,8 @@ function momentsView(data) {
       el("span", {}, fmtDate(m.created_at)))),
     el("div", { class: "acts" },
       btn(m.state === "HIDDEN" ? "取消隐藏" : "隐藏", () => momentVisibility(m, m.state !== "HIDDEN"), { cls: "sm", symbol: "close" }),
-      btn("忘记", () => momentForget(m), { cls: "sm danger", symbol: "trash" })))));
+      btn("忘记", () => momentForget(m), { cls: "sm danger", symbol: "trash" })))),
+    data.next_cursor ? btn("加载更早的动态", () => loadRoute({ more: true })) : null);
 }
 function momentVisibility(item, hidden) {
   api.write("/moments/" + encodeURIComponent(item.id) + "/visibility", { hidden }, "POST",

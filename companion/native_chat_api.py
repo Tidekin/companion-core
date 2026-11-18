@@ -202,8 +202,8 @@ def register_routes(app, settings, prefix, auth, authenticate):
     async def moments_feed(request: Request, before: str | None = None, limit: int = 30):
         if not 1 <= limit <= 60:
             raise CoreError("INVALID_PAGE", 400)
-        return await execute(request, lambda ctx, check: {"items": moments.feed(
-            ctx.store, before=before, limit=limit)}, readonly=True)
+        return await execute(request, lambda ctx, check: moments.page(
+            moments.feed, ctx.store, before, limit), readonly=True)
 
     @app.get(prefix + "/moments/latest", dependencies=auth)
     async def moments_latest(request: Request, after: str | None = None):

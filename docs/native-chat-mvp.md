@@ -116,7 +116,7 @@ Set-Location clients/chat
 
 对话页顶栏的“她的动态”打开动态面板：她用第一人称发的、只给主人看的说说，最新在前，可以点赞、
 隐藏或忘记；那年今日在顶部列出往年同一天的动态。接口都在 `/v1/console/chat/moments` 下：列表
-（`GET moments?before=`）、那年今日（`GET moments/memories`）、点赞（`POST moments/{id}/like`）、
+（`GET moments?before=`，下一页原样传回 `next_cursor`，为空时已读完；同一时刻按动态 ID 倒序）、那年今日（`GET moments/memories`）、点赞（`POST moments/{id}/like`）、
 隐藏（`POST moments/{id}/visibility`）和忘记（`POST moments/{id}/forget`，经原遗忘日志）。
 事件流在动态有变化时推送 `event: moment`（只含变化标记），客户端据此重新读取当前列表。
 
