@@ -46,6 +46,30 @@ def test_memories_show_the_same_day_from_earlier_years_only(core, tmp_path):
     assert moments.memories(core.store, core.settings, after(year_ago, 365 * 86400)) == []
 
 
+def test_memories_filter_full_history_in_the_owner_timezone(core):
+    # Midnight in Shanghai starts February 29 while the UTC calendar still says February 28.
+    core.settings.timezone = "Asia/Shanghai"
+
+    def publish_at(timestamp, text, state="PUBLISHED"):
+        moment_id = seed_moment(core, text)
+        core.store.execute("UPDATE moments SET created_at=%s, state=%s WHERE moment_id=%s",
+                           (timestamp, state, moment_id))
+        return moment_id
+
+    with core.store.transaction(control_write=True):
+        old = publish_at("2020-02-28T16:00:00.000000+00:00", "四年前")
+        publish_at("2020-02-28T15:59:59.999999+00:00", "差一微秒")
+        publish_at("2020-02-29T16:00:00.000000+00:00", "三月一日")
+        publish_at("2020-02-28T16:01:00.000000+00:00", "已隐藏", "HIDDEN")
+        erased = publish_at("2016-02-28T16:01:00.000000+00:00", "已擦除")
+        moments.erase_ids(core.store, [erased])
+        for index in range(200):
+            publish_at("2023-08-01T00:00:00.000000+00:00", str(index))
+        publish_at("2024-02-28T16:00:00.000000+00:00", "今年")
+    shown = moments.memories(core.store, core.settings, "2024-02-28T16:05:00.000000+00:00")
+    assert [(item["id"], item["years_ago"]) for item in shown] == [(old, 4)]
+
+
 def test_native_routes_read_like_hide_and_forget(client, core, tmp_path):
     captured(core, tmp_path)
     headers, _ = enroll(client, Ed25519PrivateKey.generate())
