@@ -1696,14 +1696,16 @@ class LifeTopics:
                 "life_activity_results r WHERE r.topic_id=t.topic_id AND "
                 "r.topic_revision=t.revision)"
             )
-            order = " ORDER BY due_at DESC, topic_id DESC LIMIT %s"
+            order = " ORDER BY due_at DESC, topic_id ASC LIMIT %s"
             if cursor:
-                position = json.loads(cursor["value"])
-                candidates = s.rows(eligible + " AND (due_at,topic_id)<(%s,%s)" + order,
+                due_at, topic_id = json.loads(cursor["value"])
+                after_cursor = "(due_at < %s OR (due_at = %s AND topic_id > %s))"
+                position = (due_at, due_at, topic_id)
+                candidates = s.rows(eligible + " AND " + after_cursor + order,
                                     (*position, SCAN_LIMIT))
                 remaining = SCAN_LIMIT - len(candidates)
                 if remaining:
-                    candidates += s.rows(eligible + " AND (due_at,topic_id)>=(%s,%s)" + order,
+                    candidates += s.rows(eligible + " AND NOT " + after_cursor + order,
                                          (*position, remaining))
             else:
                 candidates = s.rows(eligible + order, (SCAN_LIMIT,))

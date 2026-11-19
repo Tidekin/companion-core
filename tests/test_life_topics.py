@@ -424,7 +424,7 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
     core.clock.advance(86400)
     core.life_topics.synchronize()
     assert core.store.one("SELECT state FROM life_topics")["state"] == "DUE"
-    # Twenty more recently due candidates whose material is unavailable this round.
+    # Twenty candidates tied on due time sort before the available topic by ID.
     for index in range(20):
         core.store.execute(
             (
@@ -432,7 +432,7 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
                 "g','DUE',%s,expires_at,reason_code,revision,0,NULL,created_a"
                 't,updated_at FROM life_topics WHERE topic_id=%s'
             ),
-            (f"unavailable_{index:02d}", f"blocked:{index}", core.clock(),
+            (f"blocked_{index:02d}", f"blocked:{index}", core.clock(),
              topic["topic_id"]))
     monkeypatch.setattr(core.life_topics, "synchronize", lambda: None)
     material = core.life_topics.material
@@ -440,13 +440,13 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
 
     def blocked(topic_id, **options):
         checked.append(topic_id)
-        if topic_id.startswith("unavailable_"):
+        if topic_id.startswith("blocked_"):
             raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409)
         return material(topic_id, **options)
 
     monkeypatch.setattr(core.life_topics, "material", blocked)
     assert core.life_topics.schedule() is None
-    assert len(checked) == 20 and all(item.startswith("unavailable_") for item in checked)
+    assert len(checked) == 20 and all(item.startswith("blocked_") for item in checked)
     job = core.life_topics.schedule()
     assert job and checked[-1] == topic["topic_id"]
     assert core.store.one('SELECT topic_id FROM life_activity_results WHERE job_id=%s',
