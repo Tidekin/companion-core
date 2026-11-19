@@ -5,7 +5,7 @@ import json
 import re
 import unicodedata
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
@@ -30,7 +30,8 @@ from companion.turn_taking import excerpt
 RULES = """依据真实来源作一次有界生活判断，只输出JSON，不执行工具或发送。
 action只能是SKIP/CONTINUE/EXPLORE/FOLLOW_UP/SHARE/DEFER。
 destination只能选给定allowed_destinations；不表达时为NONE。
-输出source_event_ids、reason(160字内)、text(500字内)。
+输出source_event_ids（从sources的event_id中选择）、reason(160字内)、text(500字内)。
+没有值得表达的内容可以输出 {"action":"SKIP","source_event_ids":[],"reason":"没有新进展"}。
 CONTINUE必须提供给定的goal_id；DEFER提供60到86400秒的defer_seconds；其他可选字段省略。
 EXPLORE可提供goal，使用原生目标结构：topic、source_event_ids、scope和priority。
 scope只能是{operation:read_content,url:HTTPS地址}、{operation:investigate,url:""}，
@@ -1349,13 +1350,17 @@ class LifeTopics:
             return
 
         def project():
-            # A known supersession retires only the old wording attempt. Recheck
-            # the same item once under the new conversation revision and daily cap.
+            # Reconsider superseded wording or a settled, rejected proposal once.
+            # Keep the original attempt and its charge attached to the old revision.
             for interrupted in s.rows(
                 "SELECT t.topic_id, t.decision_count, r.job_id FROM life_topics AS t JOIN "
                 "life_activity_results AS r ON r.topic_id = t.topic_id AND r.topic_revision = "
                 "t.revision JOIN jobs AS j USING (job_id) WHERE t.state = 'DUE' AND r.state = "
-                "'PENDING' AND j.state = 'CANCELLED' AND j.last_error_code = %s AND NOT "
+                "'PENDING' AND ((j.state = 'CANCELLED' AND j.last_error_code = %s) OR "
+                "(j.state = 'FAILED' AND j.last_error_code = 'LIFE_INVALID_PROPOSAL' "
+                "AND EXISTS (SELECT 1 FROM model_usage u WHERE u.job_id=j.job_id "
+                "AND u.scenario='activity' AND u.state='SETTLED') AND NOT EXISTS "
+                "(SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id))) AND NOT "
                 "EXISTS(SELECT 1 FROM model_usage AS u WHERE u.job_id = j.job_id AND u.state <> "
                 "'SETTLED') LIMIT 20",
                 (reply_revision.SUPERSEDED,),
@@ -1628,6 +1633,36 @@ class LifeTopics:
         # authoritative write boundary, with all source and permission checks.
         return s.read_or_write(project)
 
+    def _newer_topic_due_today(self, conversation, sources, local):
+        """Hold only the final decision for a newer, already known private topic."""
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = midnight + timedelta(days=1)
+        quiet_start = self.settings.quiet_start
+        if quiet_start != self.settings.quiet_end and local.hour < quiet_start:
+            end = midnight.replace(hour=quiet_start)
+        now = local.astimezone(UTC).isoformat(timespec="microseconds")
+        cutoff = end.astimezone(UTC).isoformat(timespec="microseconds")
+        newest_source = max(source["occurred_at"] for source in sources)
+        for row in self.store.rows(
+            "SELECT t.topic_id,t.due_at FROM life_topics t WHERE t.conversation_id=%s "
+            "AND t.kind='conversation' AND t.state='WAITING' AND t.reason_code='REAL_OWNER_INPUT' "
+            "AND t.decision_count<2 AND t.due_at>%s AND t.due_at<%s AND t.expires_at>t.due_at "
+            "AND EXISTS (SELECT 1 FROM life_topic_sources ts JOIN events e USING(event_id) "
+            "WHERE ts.topic_id=t.topic_id AND e.redacted=0 AND e.occurred_at>%s) "
+            "ORDER BY t.due_at DESC",
+            (conversation, now, cutoff, newest_source),
+        ):
+            try:
+                future = self.sources(row["topic_id"])
+                if not future or any(source["expires_at"] <= row["due_at"] for source in future):
+                    continue
+                authority(self.store, self.settings, conversation, future, row["due_at"],
+                          topic_id=row["topic_id"])
+            except CoreError:
+                continue
+            return True
+        return False
+
     def schedule(self):
         cfg, s, now = self.settings.life_loop, self.store, self.clock()
         if cfg.mode != "SHADOW" or not self.settings.wake_enabled:
@@ -1649,9 +1684,10 @@ class LifeTopics:
                     timespec="microseconds",
                 )
             )
-            if s.one(
+            used = s.one(
                 "SELECT COUNT(*) AS n FROM life_activity_results WHERE created_at >= %s", (day,)
-            )["n"] >= cfg.max_daily_decisions or s.one(
+            )["n"]
+            if used >= cfg.max_daily_decisions or s.one(
                 "SELECT 1 FROM life_activity_results WHERE created_at > %s",
                 (after(now, -cfg.min_interval_seconds),),
             ):
@@ -1659,23 +1695,25 @@ class LifeTopics:
             # Unavailable candidates must not hide later ones: a scan that schedules
             # nothing resumes after its last checked row, wrapping to the front.
             cursor = s.one("SELECT value FROM runtime_meta WHERE key = %s", (SCAN_CURSOR,))
-            start = json.loads(cursor["value"]) if cursor else ["", ""]
-            query = (
+            eligible = (
                 "SELECT * FROM life_topics t WHERE state='DUE' AND "
                 "decision_count<2 AND NOT EXISTS (SELECT 1 FROM "
-                "life_activity_results r WHERE r.topic_id=t.topic_id AND"
-                " r.topic_revision=t.revision) AND "
-                "(due_at,topic_id)>(%s,%s) ORDER BY due_at,topic_id "
-                "LIMIT %s"
+                "life_activity_results r WHERE r.topic_id=t.topic_id AND "
+                "r.topic_revision=t.revision)"
             )
-            candidates = s.rows(query, (*start, SCAN_LIMIT))
-            if len(candidates) < SCAN_LIMIT and cursor:
-                seen = {row["topic_id"] for row in candidates}
-                candidates += [
-                    row
-                    for row in s.rows(query, ("", "", SCAN_LIMIT - len(candidates)))
-                    if row["topic_id"] not in seen
-                ]
+            order = " ORDER BY due_at DESC, topic_id ASC LIMIT %s"
+            if cursor:
+                due_at, topic_id = json.loads(cursor["value"])
+                after_cursor = "(due_at < %s OR (due_at = %s AND topic_id > %s))"
+                position = (due_at, due_at, topic_id)
+                candidates = s.rows(eligible + " AND " + after_cursor + order,
+                                    (*position, SCAN_LIMIT))
+                remaining = SCAN_LIMIT - len(candidates)
+                if remaining:
+                    candidates += s.rows(eligible + " AND NOT " + after_cursor + order,
+                                         (*position, remaining))
+            else:
+                candidates = s.rows(eligible + order, (SCAN_LIMIT,))
             last_unavailable = None
             for topic in candidates:
                 try:
@@ -1683,7 +1721,12 @@ class LifeTopics:
                 except CoreError:
                     last_unavailable = [topic["due_at"], topic["topic_id"]]
                     continue
-                s.execute("DELETE FROM runtime_meta WHERE key = %s", (SCAN_CURSOR,))
+                if cursor:
+                    s.execute("DELETE FROM runtime_meta WHERE key = %s", (SCAN_CURSOR,))
+                if used + 1 == cfg.max_daily_decisions and self._newer_topic_due_today(
+                    topic["conversation_id"], material["sources"], local
+                ):
+                    return None
                 from companion.notices import schedule
 
                 job_id = schedule(

@@ -113,6 +113,14 @@ class LifeDecision(StrictModel):
         description="A picture she wants with this moment; see companion/moment_images.py",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def skipped_sources(cls, value):
+        if (isinstance(value, dict) and value.get("action") == "SKIP"
+                and "source_event_ids" not in value):
+            return {**value, "source_event_ids": []}
+        return value
+
     @model_validator(mode="after")
     def coherent(self):
         if self.interest_shift is not None and (
