@@ -229,6 +229,38 @@ def test_bounded_choices_do_not_dispatch_and_defer_cannot_loop_forever(core, act
     assert_no_delivery(core)
 
 
+@pytest.mark.parametrize("second_invalid", [False, True])
+def test_settled_invalid_proposal_reconsiders_one_revision_after_restart(core, second_invalid):
+    topic = bug(core)
+    core.model.activity = encode({"action": "SHARE", "destination": "PRIVATE_MESSAGE_DRAFT",
+                                  "reason": "有新内容", "text": "问问进展"})
+    job = due(core)
+    assert run(core.run_once(job_id=job))
+    assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=%s", (job,)) == {
+        "state": "FAILED", "last_error_code": "LIFE_INVALID_PROPOSAL"}
+    charge = core.store.one("SELECT * FROM model_usage WHERE job_id=%s", (job,))
+    assert charge["state"] == "SETTLED"
+    with Core(core.settings, core.model, core.clock) as restarted:
+        assert restarted.life_topics.schedule() is None
+        core.clock.advance(core.settings.life_loop.min_interval_seconds + 1)
+        second = restarted.life_topics.schedule()
+        assert second and second != job
+        if not second_invalid:
+            core.model.activity = encode({"action": "SKIP", "reason": "没有新进展"})
+        assert run(restarted.run_once(job_id=second))
+        core.clock.advance(core.settings.life_loop.min_interval_seconds + 1)
+        assert restarted.life_topics.schedule() is None
+    results = core.store.rows("SELECT state,topic_revision FROM life_activity_results "
+                              "WHERE topic_id=%s ORDER BY topic_revision", (topic["topic_id"],))
+    assert results == [
+        {"state": "INVALIDATED", "topic_revision": 1},
+        {"state": "INVALIDATED" if second_invalid else "SKIPPED", "topic_revision": 2},
+    ]
+    assert core.store.one("SELECT * FROM model_usage WHERE job_id=%s", (job,)) == charge
+    assert len(core.model.calls) == 2
+    assert_no_delivery(core)
+
+
 def test_unknown_model_outcome_and_crashed_lease_never_restart_same_attempt(core):
     bug(core)
     core.model.error = CoreError("MODEL_RETRYABLE", 503)
