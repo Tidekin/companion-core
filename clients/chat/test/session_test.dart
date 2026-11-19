@@ -9,6 +9,30 @@ import 'package:companion_chat/persistence/repository.dart';
 import 'package:companion_chat/persistence/vault.dart';
 import 'package:companion_chat/dev/demo_backend.dart';
 
+class PagedResume extends DemoBackend {
+  PagedResume(super.bot);
+  final authorization = Completer<void>();
+  final firstPage = Completer<void>();
+  final lastPage = Completer<void>();
+  final reachedLastPage = Completer<void>();
+  @override
+  Future<bool> resume() async {
+    await authorization.future;
+    return true;
+  }
+
+  @override
+  Future<Map<String, dynamic>> history({int? before}) async {
+    if (before == null) {
+      await firstPage.future;
+      return {'items': [], 'next_before': 1};
+    }
+    if (!reachedLastPage.isCompleted) reachedLastPage.complete();
+    await lastPage.future;
+    return {'items': [], 'next_before': null};
+  }
+}
+
 void main() {
   late ChatDatabase db;
   late ChatRepository repo;
@@ -27,6 +51,37 @@ void main() {
     repo = ChatRepository(db, CacheCipher(MemoryVault()));
   });
   tearDown(() => db.close());
+
+  test(
+    'reopen confirms the device and sends while older history is still loading',
+    () async {
+      final backend = PagedResume(bot('returning'));
+      final session = await create('returning', backend);
+      expect(session.state.connected, isFalse);
+      final connected = session.watch().firstWhere((state) => state.connected);
+      backend.authorization.complete();
+      await connected;
+      await session.send('during catch-up');
+      backend.firstPage.complete();
+      await backend.reachedLastPage.future;
+      expect(backend.submissions, 1);
+      final synchronized = session.watch().firstWhere(
+        (state) => state.status == '已连接',
+      );
+      backend.lastPage.complete();
+      expect((await synchronized).turns.single.text, 'during catch-up');
+      await session.sync();
+    },
+  );
+
+  test('returning to an open chat immediately receives its verified state', () async {
+    final backend = DemoBackend(bot('warm'));
+    final session = await create('warm', backend);
+    await session.login('owner');
+    expect((await session.watch().first).connected, isTrue);
+    await session.disconnect();
+    expect((await session.watch().first).connected, isFalse);
+  });
 
   test('independent live previews do not count unread; revoked stream clears only its Bot', () async {
     final ba = DemoBackend(bot('a'));

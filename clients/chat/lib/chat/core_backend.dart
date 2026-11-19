@@ -19,6 +19,7 @@ class ConnectionReview {
 }
 
 abstract interface class ChatBackend {
+  /// Restore a saved session and verify its current device registration.
   Future<bool> resume();
   Future<ConnectionReview> login(String credential);
   Future<void> logout();
@@ -517,12 +518,31 @@ class CoreBackend implements ChatBackend {
       return false;
     }
     try {
-      final session = await _request('GET', '/v1/console/session');
+      try {
+        await refresh();
+      } on BackendError catch (error) {
+        if (error.code != 'CONSOLE_CSRF_REQUIRED') rethrow;
+        _checkSession(generation);
+        final session = await _request('GET', '/v1/console/session');
+        _checkSession(generation);
+        _csrf = session['csrf_token'] as String;
+        await refresh();
+        _checkSession(generation);
+        await _saveSession(
+          jsonEncode({
+            'origin': bot.endpoint.origin,
+            'cookie': _cookie,
+            'csrf': _csrf,
+          }),
+          generation,
+        );
+      }
       _checkSession(generation);
-      _csrf = session['csrf_token'] as String;
       return true;
     } on BackendError catch (error) {
-      if (error.status != 401 && error.status != 403) rethrow;
+      if (error.status != 401 || error.code != 'CONSOLE_LOGIN_REQUIRED') {
+        rethrow;
+      }
       _checkSession(generation);
       _cookie = _csrf = null;
       await _saveSession(null, generation);
@@ -669,11 +689,13 @@ class CoreBackend implements ChatBackend {
 
   @override
   Future<void> refresh() async {
+    final generation = _sessionGeneration;
     final response = await _request(
       'POST',
       '/v1/console/chat/devices/preview',
       body: {'public_key': await publicIdentity()},
     );
+    _checkSession(generation);
     if (response['registered'] != true) {
       throw const BackendError('NATIVE_DEVICE_APPROVAL_REQUIRED', status: 403);
     }
