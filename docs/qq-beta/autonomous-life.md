@@ -129,6 +129,12 @@ while PREVIEW/SHADOW is selected. OFF restores those existing configured paths. 
 commitments, existing delivered/uncertain actions and their accounting retain their original
 meaning; changing mode does not erase or replay them.
 
+A settled Life proposal rejected for invalid output may receive one fresh decision under
+the normal topic, interval and daily limits. Synchronization retires the failed revision,
+including one persisted before an upgrade. The original charge stays with its job. A second
+failure waits for new evidence. A plain SKIP may omit its source list. A private draft
+requires explicit source IDs.
+
 Private notices reuse the configured conversation guidance. Their compact dialogue reference
 admits at most two turns, within the current history/source permission and measured context
 budget. Reading evidence, required commitment wording and the structured Life decision keep
