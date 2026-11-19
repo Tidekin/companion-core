@@ -2,6 +2,7 @@
 
 import base64
 import io
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -167,7 +168,8 @@ def test_a_real_photo_sized_upload_passes_the_api_body_limit(client, core, tmp_p
     assert oversized.status_code == 413
 
 
-def test_native_routes_upload_set_and_serve_the_avatar(client, core, tmp_path):
+@pytest.mark.parametrize("multipart", [False, True])
+def test_native_routes_upload_set_and_serve_the_avatar(client, core, tmp_path, multipart):
     captured(core, tmp_path)
     headers, _ = enroll(client, Ed25519PrivateKey.generate())
     base = "/v1/console/chat/profile"
@@ -180,8 +182,14 @@ def test_native_routes_upload_set_and_serve_the_avatar(client, core, tmp_path):
     assert core.store.rows("SELECT 1 FROM companion_avatar_assets") == []
     root = avatar.directory(core.store)
     assert not root.exists() or list(root.iterdir()) == []
-    response = client.post(base + "/avatars", json={**body, "expected_revision": 0},
-                           headers=headers)
+    if multipart:
+        metadata = {"operation_id": "upload-op-1", "expected_revision": 0}
+        response = client.post(base + "/avatars", headers=headers,
+                               data={"profile": json.dumps(metadata)},
+                               files={"image": ("avatar.jpg", image(), "image/jpeg")})
+    else:
+        response = client.post(base + "/avatars", json={**body, "expected_revision": 0},
+                               headers=headers)
     assert response.status_code == 200, response.text
     asset = response.json()["asset"]["asset_id"]
     assert response.json()["profile"]["avatar_asset_id"] == asset

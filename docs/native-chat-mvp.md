@@ -159,3 +159,10 @@ Set-Location clients/chat
 - 每个 Bot 保留独立连接与状态。AstrBot、DSH 接入和群聊不在本轮。
 
 主人已明确确认上述预览、最终确认与恢复合同，本轮据此实现。
+
+
+### 私聊图片上传
+
+客户端通过原有的 `POST /v1/console/chat/messages` 提交图片。使用标准 `multipart/form-data` 时，`message` 是不含 `images` 的 JSON 消息，文件用重复的 `images` 字段按签名时的顺序传递。文字消息继续使用 JSON。读取本地待发队列时沿用原签名和请求 ID。服务端根据收到的真实字节核对格式、额度和签名中的 SHA-256，旧客户端的 JSON 消息仍可提交。
+
+自研客户端上传头像时，同一表单中的 `profile` 包含原有操作 ID 和预期修订号，`image` 包含一张头像文件；会话、CSRF 和素材保留期限沿用原接口。
