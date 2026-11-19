@@ -113,6 +113,11 @@ no view, change history or option is stored, so none can be restored from a back
   withdraw their current drafts; omission applies to the current conversation. The command itself
   is not a candidate.
 
+The scheduler checks the most recently due topics first. When one decision remains for
+the local day, it waits if the same private conversation already has a newer owner topic
+due before quiet hours or midnight. Sources and authorization are checked again when the
+topic becomes due. With multiple decisions left, the current topic can proceed immediately.
+
 Topic candidacy means there is an actual experience to consider, not that a model has established
 an unresolved fact. Independent items in one conversation keep their own due time and source
 set. An explicit update about the preceding item, or a new turn sharing concrete terms with an
