@@ -74,14 +74,17 @@ void main() {
     },
   );
 
-  test('returning to an open chat immediately receives its verified state', () async {
-    final backend = DemoBackend(bot('warm'));
-    final session = await create('warm', backend);
-    await session.login('owner');
-    expect((await session.watch().first).connected, isTrue);
-    await session.disconnect();
-    expect((await session.watch().first).connected, isFalse);
-  });
+  test(
+    'returning to an open chat immediately receives its verified state',
+    () async {
+      final backend = DemoBackend(bot('warm'));
+      final session = await create('warm', backend);
+      await session.login('owner');
+      expect((await session.watch().first).connected, isTrue);
+      await session.disconnect();
+      expect((await session.watch().first).connected, isFalse);
+    },
+  );
 
   test('independent live previews do not count unread; revoked stream clears only its Bot', () async {
     final ba = DemoBackend(bot('a'));
