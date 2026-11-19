@@ -14,6 +14,7 @@ from companion.source_grants import grant_tombstone
 from tests.conftest import run
 from tests.support.confirmed_memory import remember
 from tests.support.console_browser import console_page, navigate, submit_dialog
+from tests.support.console_instances import exercise_instance_overview
 from tests.support.executive import FakeExecutor
 from tests.support.executive import configured as configure_executive
 from tests.support.executive import proposal as tool_proposal
@@ -27,6 +28,10 @@ from tests.support.source_grants import prepare as prepare_grant
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1", reason="Explicit isolated browser run"
 )
+
+
+def test_instance_overview_uses_each_consoles_own_session(tmp_path):
+    run(exercise_instance_overview(tmp_path))
 
 
 def test_new_memories_need_no_owner_work_and_confirm_in_one_batch(core, tmp_path):

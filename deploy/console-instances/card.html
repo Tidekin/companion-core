@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>实例运行状态</title>
+<link rel="stylesheet" href="/instances/assets/overview.css">
+<script defer src="/instances/assets/card.js"></script>
+<body class="card">
+<p id="status" role="status">正在读取状态…</p>
+<dl id="metrics" hidden>
+  <div><dt>聊天处理进程</dt><dd id="worker"></dd></div>
+  <div><dt>主动私聊</dt><dd id="proactive"></dd></div>
+  <div><dt>待处理任务</dt><dd id="jobs"></dd></div>
+  <div><dt>待投递消息</dt><dd id="deliveries"></dd></div>
+</dl>
+<small id="updated"></small>
+</body></html>
