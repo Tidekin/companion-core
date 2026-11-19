@@ -17,6 +17,7 @@ class Wire implements HttpClientAdapter {
   final requests = <RequestOptions>[];
   bool redirect = false;
   int sessionStatus = 200;
+  bool requireFreshCsrf = false;
   Completer<void>? loginEntered;
   Future<void>? loginBarrier;
   String? eventData;
@@ -34,9 +35,18 @@ class Wire implements HttpClientAdapter {
       loginEntered?.complete();
       await loginBarrier;
     }
-    if (options.path.endsWith('/session') &&
-        options.method == 'GET' &&
-        sessionStatus != 200) {
+    if (options.path.endsWith('/devices/preview') &&
+        requireFreshCsrf &&
+        options.headers['X-CSRF-Token'] != 'csrf-$name') {
+      return ResponseBody.fromString(
+        '{"error":"CONSOLE_CSRF_REQUIRED"}',
+        403,
+        headers: {
+          'content-type': ['application/json'],
+        },
+      );
+    }
+    if (sessionStatus != 200) {
       return ResponseBody.fromString(
         '{"error":"CONSOLE_LOGIN_REQUIRED"}',
         sessionStatus,
@@ -208,13 +218,26 @@ void main() {
       transport: Dio()..httpClientAdapter = wire,
     );
     expect(await restored.resume(), isTrue);
-    await restored.refresh();
-    expect(wire.requests.first.method, 'GET');
+    expect(wire.requests.single.path, '/v1/console/chat/devices/preview');
+    expect(wire.requests.single.method, 'POST');
     expect(
       wire.requests.first.headers['Cookie'],
       'companion_owner_session=session-persist',
     );
+    expect(wire.requests.last.headers['X-CSRF-Token'], 'csrf-persist');
+    wire.requireFreshCsrf = true;
+    wire.requests.clear();
+    expect(await restored.resume(), isTrue);
+    expect(wire.requests.map((r) => r.path), [
+      '/v1/console/chat/devices/preview',
+      '/v1/console/session',
+      '/v1/console/chat/devices/preview',
+    ]);
     expect(wire.requests.last.headers['X-CSRF-Token'], 'csrf-resumed');
+    expect(
+      jsonDecode(vault.values['companion_persist_session']!)['csrf'],
+      'csrf-resumed',
+    );
     expect(
       wire.requests.where(
         (r) => r.path.endsWith('/session') && r.method == 'POST',
