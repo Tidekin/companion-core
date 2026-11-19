@@ -1,4 +1,4 @@
-"""Owner-chosen avatar originals, processed once into a checked 512x512 PNG.
+"""Owner-chosen avatar originals, processed into a static PNG or animated WebP.
 
 Only an image the owner explicitly uploads as avatar material becomes an asset;
 chat photos and attachments never do. Processing checks the real format, size and
@@ -17,12 +17,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from companion.contracts import CoreError
+from companion.image_frames import MAX_DECODED_PIXELS, MAX_FRAMES
 
 SIZE = 512
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_PIXELS = 16_000_000
+ANIMATED_SIZE = 256
+MAX_ASSET_BYTES = 4 * 1024 * 1024
 RETENTION_DAYS = 180
-FORMATS = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}
+FORMATS = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP", "image/gif": "GIF"}
 ASSET_ID = re.compile(r"^avt_[a-f0-9]{32}$")
 
 
@@ -30,21 +33,58 @@ def directory(store):
     return Path(store.state_directory).resolve() / "profile-assets"
 
 
-def _path(store, asset_id):
+def _path(store, asset_id, *, animated=None):
     if not isinstance(asset_id, str) or not ASSET_ID.fullmatch(asset_id):
         raise CoreError("PROFILE_ASSET_UNAVAILABLE", 410)
     root = directory(store)
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise CoreError("PROFILE_ASSET_UNAVAILABLE", 410)
-    target = root / (asset_id + ".png")
+    webp = root / (asset_id + ".webp")
+    if animated is None:
+        animated = webp.exists() or webp.is_symlink()
+    target = webp if animated else root / (asset_id + ".png")
     if target.is_symlink():
         raise CoreError("PROFILE_ASSET_UNAVAILABLE", 410)
     return target
 
 
-def process(data, mime):
-    """Return (png_bytes, width, height) or raise ValueError with a reason code."""
+def _square(frame, size):
     from PIL import Image, ImageOps
+
+    rgba = ImageOps.exif_transpose(frame).convert("RGBA")
+    square = ImageOps.fit(rgba, (size, size), method=Image.Resampling.LANCZOS)
+    square.info.clear()
+    return square
+
+
+def _animation(image):
+    from PIL import ImageSequence
+
+    size = min(ANIMATED_SIZE, *image.size)
+    loop = image.info.get("loop", 1)
+    if image.format == "GIF":
+        # GIF stores repeats after the first play. WebP stores total plays.
+        loop = 1 if "loop" not in image.info else loop + 1 if loop else 0
+    frames, delays = [], []
+    pixels = 0
+    for frame in ImageSequence.Iterator(image):
+        pixels += frame.width * frame.height
+        if (len(frames) >= MAX_FRAMES or max(frame.size) > 4096
+                or pixels > MAX_DECODED_PIXELS):
+            raise ValueError("AVATAR_TOO_LARGE")
+        frames.append(_square(frame, size))
+        delays.append(frame.info.get("duration", 100))
+    out = io.BytesIO()
+    frames[0].save(out, format="WEBP", save_all=True, append_images=frames[1:],
+                   duration=delays, loop=min(loop, 65535), method=3, quality=88)
+    if out.tell() > MAX_ASSET_BYTES:
+        raise ValueError("AVATAR_TOO_LARGE")
+    return out.getvalue(), size, size
+
+
+def process(data, mime):
+    """Validate and re-encode pixels, retaining the timeline of GIF and WebP avatars."""
+    from PIL import Image
 
     if mime not in FORMATS:
         raise ValueError("AVATAR_FORMAT_UNSUPPORTED")
@@ -54,32 +94,29 @@ def process(data, mime):
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(data)) as decoded:
-                if (decoded.format != FORMATS[mime] or getattr(decoded, "n_frames", 1) != 1
-                        or min(decoded.size) < 1 or max(decoded.size) > 4096
-                        or decoded.width * decoded.height > MAX_PIXELS):
+                if (decoded.format != FORMATS[mime] or min(decoded.size) < 1
+                        or max(decoded.size) > 4096 or decoded.width * decoded.height > MAX_PIXELS):
                     raise ValueError("AVATAR_IMAGE_INVALID")
+                if getattr(decoded, "is_animated", False):
+                    if decoded.format not in ("GIF", "WEBP"):
+                        raise ValueError("AVATAR_FORMAT_UNSUPPORTED")
+                    return _animation(decoded)
                 decoded.verify()
             with Image.open(io.BytesIO(data)) as decoded:
-                decoded.load()
-                image = ImageOps.exif_transpose(decoded)
-                image = image.convert("RGBA" if "A" in image.getbands() or
-                                      "transparency" in image.info else "RGB")
-    except ValueError:
-        raise
-    except (OSError, SyntaxError, Warning, Image.DecompressionBombError) as error:
+                square = _square(decoded, SIZE)
+    except (EOFError, OSError, SyntaxError, Warning, Image.DecompressionBombError) as error:
         raise ValueError("AVATAR_IMAGE_INVALID") from error
-    side = min(image.size)
-    left, top = (image.width - side) // 2, (image.height - side) // 2
-    square = image.crop((left, top, left + side, top + side)).resize(
-        (SIZE, SIZE), Image.Resampling.LANCZOS)
     out = io.BytesIO()
-    # A fresh encode carries no EXIF, text, ICC or other source metadata.
     square.save(out, format="PNG", optimize=True)
     return out.getvalue(), SIZE, SIZE
 
 
+def content_type(data):
+    return "image/webp" if data.startswith(b"RIFF") and data[8:12] == b"WEBP" else "image/png"
+
+
 def _write(store, asset_id, data):
-    target = _path(store, asset_id)
+    target = _path(store, asset_id, animated=content_type(data) == "image/webp")
     target.parent.mkdir(mode=0o700, exist_ok=True)
     partial = target.with_suffix(".tmp")
     with open(partial, "xb") as stream:
@@ -98,17 +135,17 @@ def create(store, now, *, data, mime, operation_id):
     if previous:
         return dict(previous)
     try:
-        png, width, height = process(data, mime)
+        encoded, width, height = process(data, mime)
     except ValueError as error:
         raise CoreError(str(error), 400) from error
     asset_id = "avt_" + uuid.uuid4().hex
-    _write(store, asset_id, png)
+    _write(store, asset_id, encoded)
     store.execute(
         "INSERT INTO companion_avatar_assets (asset_id,sha256,original_sha256,source,state,"
         "width,height,byte_length,origin_operation_id,created_at) VALUES "
         "(%s,%s,%s,'owner_upload','READY',%s,%s,%s,%s,%s)",
-        (asset_id, hashlib.sha256(png).hexdigest(), hashlib.sha256(data).hexdigest(),
-         width, height, len(png), operation_id, now))
+        (asset_id, hashlib.sha256(encoded).hexdigest(), hashlib.sha256(data).hexdigest(),
+         width, height, len(encoded), operation_id, now))
     return dict(store.one("SELECT * FROM companion_avatar_assets WHERE asset_id=%s",
                           (asset_id,)))
 

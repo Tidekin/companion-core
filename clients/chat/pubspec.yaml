@@ -19,6 +19,7 @@ dependencies:
   flutter_driver:
     sdk: flutter
   file_selector: 1.1.0
+  image: 4.13.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

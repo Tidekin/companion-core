@@ -25,7 +25,7 @@ String _message(Object error) => error is AvatarPickError
         'AVATAR_TOO_LARGE' => '图片太大，请换一张小一点的。',
         'AVATAR_FORMAT_UNSUPPORTED' ||
         'AVATAR_IMAGE_INVALID' ||
-        'AVATAR_EMPTY' => '这张图片无法用作头像，请换一张 PNG、JPEG 或 WebP。',
+        'AVATAR_EMPTY' => '这张图片无法用作头像，请换一张 PNG、JPEG、GIF 或 WebP。',
         _ => '保存失败（${error.code}），已保留原来的设置。',
       }
     : '保存失败，已保留原来的设置。';

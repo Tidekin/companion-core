@@ -56,10 +56,10 @@ def test_processing_crops_reencodes_and_strips_metadata():
     (b"", "image/png", "AVATAR_EMPTY"),
     (b"x" * (avatar.MAX_UPLOAD_BYTES + 1), "image/png", "AVATAR_TOO_LARGE"),
     (b"not an image at all", "image/png", "AVATAR_IMAGE_INVALID"),
-    (None, "image/gif", "AVATAR_FORMAT_UNSUPPORTED"),
+    (None, "image/tiff", "AVATAR_FORMAT_UNSUPPORTED"),
     # The declared type must be the decoded type.
     (None, "image/png", "AVATAR_IMAGE_INVALID"),
-], ids=["empty", "too-large", "garbage", "gif", "mime-mismatch"])
+], ids=["empty", "too-large", "garbage", "unsupported", "mime-mismatch"])
 def test_processing_fails_closed(data, mime, reason):
     with pytest.raises(ValueError, match=reason):
         avatar.process(image() if data is None else data, mime)
@@ -194,3 +194,41 @@ def test_native_routes_upload_set_and_serve_the_avatar(client, core, tmp_path):
     bad = client.post(base + "/avatars", headers=headers, json={
         **body, "data_base64": "!!!!", "operation_id": "upload-op-2"})
     assert bad.status_code == 400
+
+@pytest.mark.parametrize(("fmt", "plays"), [("GIF", 3), ("WEBP", 2)])
+def test_animation_round_trip_from_native_profile(client, core, tmp_path, fmt, plays):
+    captured(core, tmp_path)
+    headers, _ = enroll(client, Ed25519PrivateKey.generate())
+    frames = [Image.new("RGBA", (32, 16), color) for color in ("red", "blue")]
+    original = io.BytesIO()
+    frames[0].save(original, fmt, save_all=True, append_images=frames[1:],
+                   duration=[80, 180], loop=2, comment=b"private-comment", xmp=b"private-comment")
+    body = {"mime_type": "image/" + fmt.lower(), "data_base64": base64.b64encode(
+        original.getvalue()).decode(), "operation_id": "upload-motion-1", "expected_revision": 0}
+    base = "/v1/console/chat/profile"
+    response = client.post(base + "/avatars", headers=headers, json=body)
+    assert response.status_code == 200, response.text
+    asset = response.json()["profile"]["avatar_asset_id"]
+    denied = client.get(base + "/assets/" + asset,
+                        headers={"Cookie": "companion_owner_session=invalid"})
+    assert denied.status_code in (401, 403)
+    fetched = client.get(base + "/assets/" + asset, headers=headers)
+    assert fetched.status_code == 200 and fetched.headers["content-type"] == "image/webp"
+    assert b"private-comment" not in fetched.content
+    with Image.open(io.BytesIO(fetched.content)) as timeline:
+        assert timeline.n_frames == 2 and timeline.info["loop"] == plays
+        assert timeline.size == (16, 16)
+        for idx, (channel, duration) in enumerate([(0, 80), (2, 180)]):
+            timeline.seek(idx)
+            assert timeline.convert("RGB").getpixel((4, 4))[channel] > 220
+            assert timeline.info["duration"] == duration
+
+
+def test_animation_pixel_budget_rejects_before_storing(core, monkeypatch):
+    raw = io.BytesIO()
+    Image.new("RGB", (32, 32), "red").save(raw, "GIF", save_all=True,
+        append_images=[Image.new("RGB", (32, 32), "blue")], duration=100)
+    monkeypatch.setattr(avatar, "MAX_DECODED_PIXELS", 1024)
+    with pytest.raises(CoreError, match="AVATAR_TOO_LARGE"):
+        upload(core, raw.getvalue(), "image/gif")
+    assert avatar.available(core.store) == []
