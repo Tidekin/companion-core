@@ -468,6 +468,15 @@ def messages(store, settings, job, now, principles, *, data=None, prior_contacts
         from companion.life_topics import RULES as LIFE_RULES
 
         rules = LIFE_RULES
+        if "allowed_actions" in data:
+            rules += (
+                "\n这是你自己读完并给了正分的内容。只选 allowed_actions 中的动作。"
+                "你的评分不代表主人喜欢。按 sources 中的实际阅读深度和自己的看法决定是否分享。"
+                '愿意分享选 SHARE，destination 填 PRIVATE_MESSAGE_DRAFT，'
+                'source_event_ids 引用实际来源。'
+                '没有值得分享的内容选 SKIP，destination 填 NONE，text 留空。'
+                '只有给出的待办确实会带来新证据且允许 DEFER 时才能暂缓。'
+            )
         from companion import moment_images
 
         if moment_images.offered_now(store, settings, data["allowed_destinations"], now):

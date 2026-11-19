@@ -869,6 +869,13 @@ def purpose_revision(old, new):
             and {k: v for k, v in before.items() if k != "native_devices"}
             == {k: v for k, v in after.items() if k != "native_devices"}):
         return
+    if old.life_shadow and new.life_shadow and old.life_shadow.share_own_readings != (
+        new.life_shadow.share_own_readings
+    ):
+        scope = old.life_shadow.model_copy(update={
+            "share_own_readings": new.life_shadow.share_own_readings})
+        if old.model_copy(update={"life_shadow": scope}) == new:
+            return
     if (old.life_shadow is not None and new.life_shadow is not None
         and old.life_shadow.source_scope == "owner_private_history"
         and old.life_shadow.conversation_id != new.life_shadow.conversation_id
