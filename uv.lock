@@ -411,6 +411,7 @@ dependencies = [
     { name = "psycopg-pool" },
     { name = "pydantic" },
     { name = "pydantic-ai-slim" },
+    { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "tokenizers" },
     { name = "tzdata" },
@@ -474,6 +475,7 @@ requires-dist = [
     { name = "psycopg-pool", specifier = "==3.3.3" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pydantic-ai-slim", specifier = "==2.60.0" },
+    { name = "python-multipart", specifier = ">=0.0.27,<1" },
     { name = "schedule", marker = "extra == 'onebot'", specifier = ">=1.2,<2" },
     { name = "silk-python", marker = "extra == 'onebot'", specifier = "==0.2.8" },
     { name = "sqlalchemy", specifier = ">=2.1,<3" },
@@ -2509,6 +2511,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a9/f7/eddfe33871520adab45aaa1a71f0402a2252050c14c7e3009446c8f4701c/python_docx-1.2.0.tar.gz", hash = "sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce", size = 5723256, upload-time = "2025-06-16T20:46:27.921Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl", hash = "sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7", size = 252987, upload-time = "2025-06-16T20:46:22.506Z" },
+]
+
+[[package]]
+name = "python-multipart"
+version = "0.0.34"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7e/c0/c753d487a83d873f6946cee6cbc26cea3fe59a476ad0de99a14938a2fbd8/python_multipart-0.0.34.tar.gz", hash = "sha256:b998ae90ca6e1e363261ce2e0e230281b8af53867b757970abd69ee9edcd843a", size = 52456, upload-time = "2026-11-16T10:40:38.261Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/0e/090c52b122d8ec5fa37942c1410fea9cf04ce98bca0c84dde7f0aa11594d/python_multipart-0.0.34-py3-none-any.whl", hash = "sha256:ebacd224bd686eee2f9aa1066a657affe07435a185834e05e5235e2e59173e91", size = 32585, upload-time = "2026-11-16T10:40:37.119Z" },
 ]
 
 [[package]]

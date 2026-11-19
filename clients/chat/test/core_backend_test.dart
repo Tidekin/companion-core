@@ -62,6 +62,7 @@ class Wire implements HttpClientAdapter {
         login
             ? {'csrf_token': 'csrf-$name'}
             : {
+                'event_id': 'accepted',
                 'registered': true,
                 'authority': {'revision': requests.length, 'for': name},
                 'capture_identity': ?captureIdentity,
@@ -372,6 +373,23 @@ void main() {
         jsonEncode(prepared.packet),
         original,
       ); // no silent re-sign under a new grant revision
+      final attached = await backends[0].prepare(
+        'picture',
+        'b' * 32,
+        DateTime.utc(2026),
+        images: [
+          (bytes: Uint8List.fromList([1, 2, 3]), mimeType: 'image/png'),
+        ],
+      );
+      final saved = jsonEncode(attached.packet);
+      expect(await backends[0].submit(attached), 'accepted');
+      final form = wires[0].requests.last.data as FormData;
+      final meta = jsonDecode(form.fields.single.value) as Map;
+      expect(meta['capture'], attached.packet['capture']);
+      expect(meta.containsKey('images'), isFalse);
+      expect(form.files.single.key, 'images');
+      expect(form.files.single.value.contentType.toString(), 'image/png');
+      expect(jsonEncode(attached.packet), saved);
       wires[0].redirect = true;
       await expectLater(backends[0].history(), throwsA(isA<BackendError>()));
       for (final backend in backends) {

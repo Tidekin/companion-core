@@ -267,12 +267,17 @@ class CoreBackend implements ChatBackend {
       (await _request(
             'POST',
             '/v1/console/chat/profile/avatars',
-            body: {
-              'mime_type': mimeType,
-              'data_base64': base64Encode(bytes),
-              'operation_id': operationId,
-              'expected_revision': expectedRevision,
-            },
+            body: FormData()
+              ..fields.add(
+                MapEntry(
+                  'profile',
+                  jsonEncode({
+                    'expected_revision': expectedRevision,
+                    'operation_id': operationId,
+                  }),
+                ),
+              )
+              ..files.add(MapEntry('image', _imageFile(bytes, mimeType))),
           ))['profile']
           as Map,
     ),
@@ -658,14 +663,42 @@ class CoreBackend implements ChatBackend {
     );
   }
 
+  MultipartFile _imageFile(Uint8List bytes, String mime) =>
+      MultipartFile.fromBytes(
+        bytes,
+        filename: 'image.${mime.split('/').last}',
+        contentType: DioMediaType.parse(mime),
+      );
+
   @override
-  Future<String> submit(PendingMessage message) async =>
-      (await _request(
-            'POST',
-            '/v1/console/chat/messages',
-            body: message.packet,
-          ))['event_id']
-          as String;
+  Future<String> submit(PendingMessage message) async {
+    final packet = Map<String, dynamic>.of(message.packet);
+    final images = packet['images'] as List?;
+    Object body = packet;
+    if (images != null && images.isNotEmpty) {
+      packet.remove('images');
+      final form = FormData()
+        ..fields.add(MapEntry('message', jsonEncode(packet)));
+      for (final image in images) {
+        form.files.add(
+          MapEntry(
+            'images',
+            _imageFile(
+              base64Decode(image['data_base64'] as String),
+              image['mime_type'] as String,
+            ),
+          ),
+        );
+      }
+      body = form;
+    }
+    return (await _request(
+          'POST',
+          '/v1/console/chat/messages',
+          body: body,
+        ))['event_id']
+        as String;
+  }
 
   @override
   Future<void> refresh() async {

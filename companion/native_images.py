@@ -36,21 +36,28 @@ class NativeImage(StrictModel):
 
 
 def decode(settings, images):
-    """Exact bytes, MIME and SHA-256 per slot; every image must really be its claimed type."""
-    if len(images) > MAX_IMAGES:
+    try:
+        files = [(image.mime_type, base64.b64decode(image.data_base64, validate=True))
+                 for image in images]
+    except (binascii.Error, ValueError):
+        raise CoreError("NATIVE_IMAGE_INVALID", 400) from None
+    return check_files(settings, files)
+
+
+def check_files(settings, files):
+    """Verify exact bytes, declared image format and signed order for either HTTP encoding."""
+    if len(files) > MAX_IMAGES:
         raise CoreError("NATIVE_IMAGE_COUNT_EXCEEDED", 400)
     limit = min(settings.content.max_image_bytes, MAX_TOTAL_BYTES)
     decoded, total = [], 0
-    for image in images:
-        try:
-            data = base64.b64decode(image.data_base64, validate=True)
-        except (binascii.Error, ValueError):
-            raise CoreError("NATIVE_IMAGE_INVALID", 400) from None
+    for mime, data in files:
         total += len(data)
         if not data or len(data) > limit or total > MAX_TOTAL_BYTES:
             raise CoreError("NATIVE_IMAGE_TOO_LARGE", 413)
-        _check(data, image.mime_type)
-        decoded.append((image.mime_type, data, hashlib.sha256(data).hexdigest()))
+        if mime not in FORMATS:
+            raise CoreError("NATIVE_IMAGE_INVALID", 400)
+        _check(data, mime)
+        decoded.append((mime, data, hashlib.sha256(data).hexdigest()))
     return decoded
 
 

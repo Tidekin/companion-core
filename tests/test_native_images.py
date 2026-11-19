@@ -4,6 +4,7 @@ import base64
 import io
 import json
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from PIL import Image
 
@@ -45,8 +46,9 @@ def authorize(core, tmp_path):
     activate(core, policy)
 
 
+@pytest.mark.parametrize("multipart", [False, True])
 def test_a_native_image_reaches_the_model_and_its_preview_follows_the_message(
-    client, core, tmp_path,
+    client, core, tmp_path, multipart,
 ):
     from tests.sdk_reader_fixture import answer, response, worker_for
 
@@ -63,9 +65,22 @@ def test_a_native_image_reaches_the_model_and_its_preview_follows_the_message(
 
     async def scenario():
         async with worker_for(core, provider) as worker:
-            sent = client.post('/v1/console/chat/messages', headers=headers,
-                               json=packet(core, key, authority, '你看',
-                                           images=[('image/png', original)]))
+            signed = packet(core, key, authority, '你看', images=[('image/png', original)])
+            endpoint = '/v1/console/chat/messages'
+            if multipart:
+                del signed['images']
+                fields = {'message': json.dumps(signed)}
+                files = {'images': ('photo.png', original, 'image/png')}
+                denied = client.post(endpoint, data=fields, files=files,
+                                     headers={**headers, 'X-CSRF-Token': 'wrong'})
+                assert denied.status_code == 403
+                swapped = client.post(endpoint, data=fields, headers=headers,
+                    files={'images': ('photo.png', photo('red'), 'image/png')})
+                assert swapped.status_code == 403
+                assert swapped.json()["error"] == "NATIVE_INPUT_CHANGED"
+                sent = client.post(endpoint, data=fields, headers=headers, files=files)
+            else:
+                sent = client.post(endpoint, headers=headers, json=signed)
             assert sent.status_code == 202, sent.text
             event_id, job_id = sent.json()['event_id'], sent.json()['job_id']
             assert await worker.run_once('native-image', job_id=job_id)
