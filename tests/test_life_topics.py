@@ -401,13 +401,62 @@ def test_long_owner_source_keeps_its_ending_and_decision_sees_current_time(core)
         "SELECT occurred_at FROM events WHERE event_id='evt_test_1'")["occurred_at"]
 
 
+def test_most_recently_due_topic_wins_over_old_backlog(core):
+    configure(core)
+    ingest(core, 1, "旧展览的入口问题")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.life_topics.synchronize()
+    core.clock.advance(8 * 3600)
+    ingest(core, 2, "明天去看海边的灯塔")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.clock.advance(86400)
+    job = core.life_topics.schedule()
+    assert job
+    sources = core.store.rows(
+        "SELECT ts.event_id FROM life_activity_results r JOIN life_topic_sources ts "
+        "USING(topic_id) WHERE r.job_id=%s", (job,))
+    assert sources == [{"event_id": "evt_test_2"}]
+
+
+@pytest.mark.parametrize("case", ["final", "extra_slot", "quiet", "closed"])
+def test_evening_topic_only_holds_the_final_usable_decision(core, case):
+    configure(core)
+    core.settings.timezone = "Asia/Shanghai"
+    core.settings.quiet_start = 20 if case == "quiet" else 23
+    core.settings.quiet_end = 8
+    core.settings.life_loop.max_daily_decisions = 2 if case == "extra_slot" else 1
+    ingest(core, 1, "旧展览的入口问题")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.life_topics.synchronize()
+    core.clock.advance(8 * 3600)  # 20:00 local, due tomorrow at 20:00
+    ingest(core, 2, "明天去看海边的灯塔")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.clock.advance(21 * 3600)  # 17:00 the following day
+    if case == "closed":
+        core.life_topics.synchronize()
+        future = core.store.one("SELECT topic_id FROM life_topic_sources WHERE event_id=%s",
+                                ("evt_test_2",))
+        core.life_topics.close(future["topic_id"], "evt_test_2")
+    job = core.life_topics.schedule()
+    if case == "final":
+        assert job is None
+        assert not core.store.rows("SELECT 1 FROM life_activity_results")
+        core.clock.advance(3 * 3600)
+        job = core.life_topics.schedule()
+    assert job
+    source = core.store.one(
+        "SELECT ts.event_id FROM life_topic_sources ts JOIN life_activity_results r "
+        "USING(topic_id) WHERE r.job_id=%s", (job,))
+    assert source["event_id"] == ("evt_test_2" if case == "final" else "evt_test_1")
+
+
 def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
     topic = bug(core)
     proposal(core)
     core.clock.advance(86400)
     core.life_topics.synchronize()
     assert core.store.one("SELECT state FROM life_topics")["state"] == "DUE"
-    # Twenty earlier synthetic candidates whose material is unavailable this round.
+    # Twenty candidates tied on due time sort before the available topic by ID.
     for index in range(20):
         core.store.execute(
             (
@@ -415,7 +464,7 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
                 "g','DUE',%s,expires_at,reason_code,revision,0,NULL,created_a"
                 't,updated_at FROM life_topics WHERE topic_id=%s'
             ),
-            (f"blocked_{index:02d}", f"blocked:{index}", f"2000-01-01T00:00:{index:02d}+00:00",
+            (f"blocked_{index:02d}", f"blocked:{index}", core.clock(),
              topic["topic_id"]))
     monkeypatch.setattr(core.life_topics, "synchronize", lambda: None)
     material = core.life_topics.material
