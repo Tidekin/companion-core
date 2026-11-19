@@ -61,6 +61,7 @@ class BotSession {
   Future<void>? _syncFlight;
   int _generation = 0;
   int _publication = 0;
+  int _outboxVersion = 0;
   TurnWindow? _turnWindow;
   StreamSubscription<Map<String, dynamic>>? _events;
   Timer? _reconnect;
@@ -133,7 +134,13 @@ class BotSession {
   String? _draft;
   String get draft => _draft ?? state.draft;
 
-  Stream<ChatState> watch() => _updates.stream;
+  Stream<ChatState> watch() => Stream.multi((sink) {
+    final subscription = _updates.stream.listen(sink.addSync, onDone: sink.closeSync);
+    sink.onCancel = subscription.cancel;
+    sink.onPause = subscription.pause;
+    sink.onResume = subscription.resume;
+    sink.add(state);
+  });
 
   Future<void> _publish(String status) async {
     final publication = ++_publication;
@@ -234,7 +241,10 @@ class BotSession {
       return;
     }
     _guard(generation);
-    await _syncNow(full: true, generation: generation);
+    _connected = true;
+    await _publish('已连接，正在同步聊天记录');
+    _guard(generation);
+    await _syncNow(full: true, generation: generation, deviceVerified: true);
   });
 
   Future<void> approve() {
@@ -268,6 +278,7 @@ class BotSession {
       images: images,
     );
     await repository.enqueue(bot.id, packet);
+    _outboxVersion++;
     await _publish('消息已在本机入队');
     if (_active) unawaited(sync());
   }
@@ -313,11 +324,7 @@ class BotSession {
     ).whenComplete(() => _syncFlight = null);
   }
 
-  Future<void> _syncNow({required bool full, required int generation}) async {
-    _guard(generation);
-    _lastSync = clock();
-    await backend.refresh();
-    _guard(generation);
+  Future<void> _drainOutbox(int generation, {Set<String>? seen}) async {
     for (final message in await repository.queue(bot.id)) {
       _guard(generation);
       if (message.error != null) continue;
@@ -329,13 +336,29 @@ class BotSession {
         }
         _guard(generation);
         if (eventId != null) {
-          await repository.merge(bot.id, await backend.status(eventId));
+          final items = await backend.status(eventId);
+          _guard(generation);
+          await repository.merge(bot.id, items);
+          seen?.addAll(items.map((item) => item['event_id'] as String));
         }
       } on BackendError catch (error) {
         if (!error.rejected) rethrow;
         await repository.rejected(bot.id, message.requestId, error.code);
       }
     }
+  }
+
+  Future<void> _syncNow({
+    required bool full,
+    required int generation,
+    bool deviceVerified = false,
+  }) async {
+    _guard(generation);
+    _lastSync = clock();
+    if (!deviceVerified) await backend.refresh();
+    _guard(generation);
+    var outboxVersion = _outboxVersion;
+    await _drainOutbox(generation);
     _guard(generation);
     final seen = <String>{};
     int? before;
@@ -349,7 +372,15 @@ class BotSession {
       await repository.merge(bot.id, items);
       seen.addAll(items.map((item) => item['event_id'] as String));
       before = page['next_before'] as int?;
+      if (full && outboxVersion != _outboxVersion) {
+        // Send newly queued messages between pages. They may be newer than
+        // the history cursor; keep turns confirmed by their own status read.
+        _guard(generation);
+        outboxVersion = _outboxVersion;
+        await _drainOutbox(generation, seen: seen);
+      }
     } while (full && before != null);
+    _guard(generation);
     if (full) await repository.reconcile(bot.id, seen);
     _guard(generation);
     if (!_active) return;
