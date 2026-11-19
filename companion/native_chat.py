@@ -73,7 +73,7 @@ def recover_authorization(context, body):
     return None
 
 
-def submit(context, body, *, content_options):
+def submit(context, body, *, content_options, files=None):
     device_id, view = device_view(context)
     if body.moment and "moments" not in view.policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
@@ -83,7 +83,8 @@ def submit(context, body, *, content_options):
         raise CoreError("NATIVE_SOURCE_IDENTITY_REQUIRED", 403) from error
     if body.capture.kind != KIND or original_device != device_id:
         raise CoreError("NATIVE_DEVICE_SESSION_MISMATCH", 403)
-    images = native_images.decode(context.settings, body.images) if body.images else []
+    images = (native_images.check_files(context.settings, files) if files is not None
+              else native_images.decode(context.settings, body.images))
     rich = native_images.image_rich(body.text, [sha for _, _, sha in images])
     moment = body.moment.model_dump() if body.moment else None
     if ((not body.text.strip() and not rich) or body.capture.input_sha256

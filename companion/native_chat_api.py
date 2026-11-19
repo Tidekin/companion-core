@@ -9,10 +9,19 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 from fastapi import Request
-from pydantic import Field
+from fastapi.exceptions import RequestValidationError
+from pydantic import Field, ValidationError
+from starlette.datastructures import UploadFile
 from starlette.responses import Response, StreamingResponse
 
-from companion import companion_avatar, companion_profile, moments, native_chat, native_devices
+from companion import (
+    companion_avatar,
+    companion_profile,
+    moments,
+    native_chat,
+    native_devices,
+    native_images,
+)
 from companion.console_api import _operation, _request_fields
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger
@@ -36,14 +45,17 @@ class ProfileRestore(StrictModel):
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
 
 
-class AvatarUpload(StrictModel):
+class AvatarMetadata(StrictModel):
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
+    # When set, the owner's upload becomes the avatar in the same transaction.
+    expected_revision: int | None = Field(default=None, ge=0, strict=True)
+
+
+class AvatarUpload(AvatarMetadata):
     mime_type: str = Field(pattern=r"^image/(png|jpeg|webp|gif)$")
     # Base64 of at most MAX_UPLOAD_BYTES; Core checks the decoded bytes again.
     data_base64: str = Field(min_length=4, max_length=(companion_avatar.MAX_UPLOAD_BYTES + 2)
                              // 3 * 4)
-    operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
-    # When set, the owner's upload becomes the avatar in the same transaction.
-    expected_revision: int | None = Field(default=None, ge=0, strict=True)
 
 
 class AvatarChoice(StrictModel):
@@ -69,6 +81,38 @@ def _decoded(text):
         return base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError) as error:
         raise CoreError("AVATAR_IMAGE_INVALID", 400) from error
+
+
+async def _upload_body(request, *, json_model, metadata_model, field, file_field, count, limit):
+    """Both encodings enter the same authenticated operation with ordered originals."""
+    media = request.headers.get("content-type", "application/json").split(";", 1)[0].strip().lower()
+    try:
+        if media == "application/json" or media.endswith("+json"):
+            return json_model.model_validate_json(await request.body()), None
+        if media != "multipart/form-data":
+            raise CoreError("UNSUPPORTED_MEDIA_TYPE", 415)
+        async with request.form(max_files=count, max_fields=1, max_part_size=128 * 1024) as form:
+            values = form.getlist(field)
+            uploads = form.getlist(file_field)
+            if (set(form) != {field, file_field} or len(values) != 1
+                    or not isinstance(values[0], str) or not 1 <= len(uploads) <= count):
+                raise CoreError("INVALID_CONTRACT", 400)
+            metadata = metadata_model.model_validate_json(values[0])
+            files = []
+            remaining = limit
+            for part in uploads:
+                if not isinstance(part, UploadFile):
+                    raise CoreError("INVALID_CONTRACT", 400)
+                if part.size is None or part.size > remaining:
+                    raise CoreError("BODY_TOO_LARGE", 413)
+                data = await part.read(remaining + 1)
+                if len(data) > remaining:
+                    raise CoreError("BODY_TOO_LARGE", 413)
+                files.append((part.content_type, data))
+                remaining -= len(data)
+            return metadata, files
+    except ValidationError as error:
+        raise RequestValidationError(error.errors(include_input=False)) from None
 
 
 def _feed_snapshot(store, previous=None):
@@ -123,10 +167,15 @@ def register_routes(app, settings, prefix, auth, authenticate):
         return await execute(request, apply)
 
     @app.post(prefix + "/messages", dependencies=auth, status_code=202)
-    async def submit(body: native_chat.Submit, request: Request):
+    async def submit(request: Request):
+        body, files = await _upload_body(request, json_model=native_chat.Submit,
+            metadata_model=native_chat.Submit, field="message", file_field="images",
+            count=native_images.MAX_IMAGES, limit=native_images.MAX_TOTAL_BYTES)
+        if files is not None and "images" in body.model_fields_set:
+            raise CoreError("INVALID_CONTRACT", 400)
         options = app.state.core.content.options
         return await execute(request, lambda ctx, check: native_chat.submit(
-            ctx, body, content_options=options))
+            ctx, body, content_options=options, files=files))
 
     @app.post(prefix + '/devices/{device_id}/revoke', dependencies=auth)
     async def revoke_device(device_id: str, body: DeviceRevocation, request: Request):
@@ -289,8 +338,11 @@ def register_routes(app, settings, prefix, auth, authenticate):
             "avatars": companion_avatar.available(ctx.store)}, readonly=True)
 
     @app.post(prefix + "/profile/avatars", dependencies=auth)
-    async def profile_avatar_upload(body: AvatarUpload, request: Request):
-        data = _decoded(body.data_base64)
+    async def profile_avatar_upload(request: Request):
+        body, files = await _upload_body(request, json_model=AvatarUpload,
+            metadata_model=AvatarMetadata, field="profile", file_field="image",
+            count=1, limit=companion_avatar.MAX_UPLOAD_BYTES)
+        mime, data = files[0] if files else (body.mime_type, _decoded(body.data_base64))
 
         def upload(ctx):
             if body.expected_revision is not None and companion_profile.current(
@@ -298,7 +350,7 @@ def register_routes(app, settings, prefix, auth, authenticate):
                 # Refuse before any bytes reach disk; a rollback cannot remove a file.
                 raise CoreError("PROFILE_REVISION_CONFLICT", 409)
             asset = companion_avatar.create(ctx.store, ctx.clock(), data=data,
-                                            mime=body.mime_type,
+                                            mime=mime,
                                             operation_id=body.operation_id)
             result = {"asset": {key: asset[key] for key in (
                 "asset_id", "width", "height", "created_at")}}
