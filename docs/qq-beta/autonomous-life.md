@@ -24,6 +24,23 @@ It grants no QZone source purpose or channel action. Reading results still requi
 successful, settled Life/Goal/Reader proof under this approval; ordinary historical observations
 do not inherit Life permission.
 
+An instance owner can separately enable `life_shadow.share_own_readings` in the existing
+OwnerAuthority preview and activation flow. The policy must name the owner's private
+conversation and include `PRIVATE_MESSAGE_DRAFT`. The field defaults to false and is omitted
+from old policy fingerprints. An opted-in instance can consider an actual retained Bilibili,
+Heybox or web text read from a completed self goal with a settled positive watch review.
+The read and its goal evidence must have no owner-message ancestry.
+
+The review time determines where the item ranks among due topics. The existing daily decision
+cap, cooldown, quiet hours and delivery consent apply. The model receives the reading depth
+and its own take. For a finished item it can choose SHARE to the owner's private conversation
+or SKIP. A related unfinished goal in the current decision material also permits DEFER.
+Re-reading the same watch entry keeps one topic identity. The original observation and the
+current review are rechecked when accepting and consuming a draft. Automatic delivery
+additionally requires the existing proactive channel authorization.
+For an existing paid carry, a reviewed STOP/preview/activate revision can toggle this field
+alone while retaining the paid terms and the rest of the owner's policy.
+
 Private Web reading material uses the completed Reader v3 receipt, its frozen source context,
 original URL hash and result membership. This includes query-bearing pages admitted by that
 receipt. The private view validates the typed evidence and text hash and pins the reading

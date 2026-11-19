@@ -10,7 +10,14 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, job_queue, owner_authority, private_life, reply_revision
+from companion import (
+    budget,
+    job_queue,
+    life_reading_share,
+    owner_authority,
+    private_life,
+    reply_revision,
+)
 from companion.contracts import CoreError
 from companion.diary import DiaryDraft, is_management_command, render_draft
 from companion.life_protocol import (
@@ -374,6 +381,8 @@ def _source(store, settings, event_id, now):
 
 def _scope_source(store, settings, source, scope, now, authority_sha256, *, seen=frozenset()):
     """Selected consent or the independently verified owner-history source contract."""
+    if "own_reading" in source:
+        return scope.share_own_readings
     if scope.source_scope == "selected" and source["event_id"] in scope.source_event_ids:
         return True
     if (
@@ -451,6 +460,9 @@ def _completed_goal_source(
 def authority(store, settings, conversation_id, sources, now, *, topic_id=None, check_limit=True):
     """Current approval only. Model output and existing share consent cannot fill this in."""
     social_sources = any(source["kind"] == "social_content" for source in sources)
+    own_reading = any("own_reading" in source for source in sources)
+    if own_reading and (len(sources) != 1 or not owner_authority.required(store, settings)):
+        raise CoreError("LIFE_SHADOW_SCOPE_REQUIRED", 403)
     if social_sources and (
         not all(source["kind"] == "social_content" for source in sources)
         or not owner_authority.required(store, settings)
@@ -504,6 +516,9 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
         if not qzone:
             raise CoreError("LIFE_SOCIAL_DRAFT_SCOPE_REQUIRED", 403)
     destinations = [] if social_sources else list(scope.purposes)
+    if own_reading:
+        destinations = ["PRIVATE_MESSAGE_DRAFT"]
+        qzone = []
     if "PRIVATE_MOMENT" in destinations and "moments" not in view.policy.purposes:
         destinations.remove("PRIVATE_MOMENT")
     if "PRIVATE_CREATION" in destinations:
@@ -602,12 +617,19 @@ class LifeTopics:
         self.store, self.settings, self.clock = store, settings, clock
 
     def sources(self, topic_id):
-        ids = {
-            row["event_id"]
-            for row in self.store.rows(
-                "SELECT event_id FROM life_topic_sources WHERE topic_id = %s", (topic_id,)
-            )
-        }
+        rows = self.store.rows(
+            "SELECT ts.event_id, t.source_key, t.conversation_id FROM life_topic_sources ts "
+            "JOIN life_topics t USING(topic_id) WHERE ts.topic_id=%s", (topic_id,),
+        )
+        if rows and rows[0]["source_key"].startswith(life_reading_share.PREFIX):
+            if len(rows) != 1:
+                raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409)
+            row, now = rows[0], self.clock()
+            review = life_reading_share.current(self.store, self.settings, now, row,
+                                                row["event_id"])
+            source = _source(self.store, self.settings, row["event_id"], now)
+            return [life_reading_share.with_judgement(source, review, self.settings)]
+        ids = {row["event_id"] for row in rows}
         # Original Life read results retain their causal roots as decision evidence.
         # This also makes every private root visible to destination/erasure checks.
         for goal in self.store.rows(
@@ -1476,14 +1498,19 @@ class LifeTopics:
                 and bool(rows)
                 and permitted(s, self.settings, now, "affect")
             )
+            rows.extend(life_reading_share.candidates(s, self.settings, now))
             for row in reversed(rows):
                 try:
                     source = _source(s, self.settings, row["event_id"], now)
+                    if "share_conversation" in row:
+                        source = life_reading_share.with_judgement(source, row, self.settings)
                 except CoreError:
                     continue
                 conversation = source["conversation_id"]
                 kind = "conversation" if source["kind"] == "owner_message" else "reading"
-                if kind == "reading":
+                if "own_reading" in source:
+                    conversation = row["share_conversation"]
+                elif kind == "reading":
                     parent = s.one(
                         (
                             'WITH RECURSIVE ancestors(event_id) AS (SELECT %s::text '
@@ -1597,6 +1624,8 @@ class LifeTopics:
                     )
                     continue
                 key = "life:" + row["event_id"]
+                if "own_reading" in source:
+                    key = life_reading_share.PREFIX + row["entry_id"]
                 topic_id = "topic_" + sha(key)
                 if s.one("SELECT 1 FROM life_topics WHERE source_key = %s", (key,)):
                     continue
@@ -1605,6 +1634,8 @@ class LifeTopics:
                     if kind == "conversation"
                     else now
                 )
+                if "own_reading" in source:
+                    due = row["judged_at"]
                 expires = min(
                     source["expires_at"], after(source["occurred_at"], cfg.topic_ttl_seconds)
                 )
@@ -1808,7 +1839,9 @@ class LifeTopics:
             "WHERE conversations.conversation_id = %s",
             (topic["conversation_id"],),
         )
-        if conversation["last_event_at"] > after(now, -self.settings.proactive_idle_seconds):
+        if conversation["last_event_at"] and conversation["last_event_at"] > after(
+            now, -self.settings.proactive_idle_seconds
+        ):
             raise CoreError(reply_revision.SUPERSEDED, 409)
         latest_owner = s.one(
             "SELECT event_id FROM events WHERE conversation_id = %s AND source IN "
@@ -1843,7 +1876,9 @@ class LifeTopics:
             destinations = [
                 d for d in destinations if d not in {"PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT"}
             ]
-            if not destinations and not self.settings.life_loop.read_goals_enabled:
+            if not destinations and (
+                not self.settings.life_loop.read_goals_enabled or "own_reading" in sources[0]
+            ):
                 raise CoreError("LIFE_PRIVATE_DELIVERY_PAUSED", 409)
         goals = s.rows(
             "SELECT DISTINCT g.goal_id, g.state, g.topic, g.scope_json, g.authority_json FROM "
@@ -1901,6 +1936,7 @@ class LifeTopics:
             raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
 
         social_only = any(source["kind"] == "social_content" for source in sources)
+        own_reading = "own_reading" in sources[0]
         deferred = s.one(
             "SELECT reason FROM life_activity_results WHERE topic_id = %s AND state = 'DEFERRED' "
             "AND topic_revision = %s AND authority_sha256 = %s AND source_fingerprints_json = %s",
@@ -1912,6 +1948,8 @@ class LifeTopics:
             ),
         )
         return {
+            **({"allowed_actions": ["SHARE", "SKIP", "DEFER"] if goals else ["SHARE", "SKIP"]}
+               if own_reading else {}),
             **({"previous_defer_reason": deferred["reason"]} if deferred else {}),
             "kind": "life",
             "topic_id": topic_id,
@@ -1924,8 +1962,10 @@ class LifeTopics:
             "sources": sources,
             "text": "",
             "goals": [] if social_only else goals,
-            "read_goals_enabled": self.settings.life_loop.read_goals_enabled and not social_only,
-            "read_targets": [] if social_only else read_targets(self.settings, sources),
+            "read_goals_enabled": self.settings.life_loop.read_goals_enabled
+            and not (social_only or own_reading),
+            "read_targets": [] if social_only or own_reading
+            else read_targets(self.settings, sources),
             "allowed_destinations": destinations,
             "authority_sha256": approved["sha256"],
             "qzone_grants": approved["qzone"],
@@ -1952,7 +1992,8 @@ class LifeTopics:
             failure.safe_detail = failure_detail(error)
             raise failure from error
         if (
-            not set(decision.source_event_ids) <= set(data["source_events"])
+            ("allowed_actions" in data and decision.action not in data["allowed_actions"])
+            or not set(decision.source_event_ids) <= set(data["source_events"])
             or (
                 decision.destination != "NONE"
                 and decision.destination not in data["allowed_destinations"]

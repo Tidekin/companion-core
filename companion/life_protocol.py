@@ -55,9 +55,12 @@ class LifeShadowApproval(StrictModel):
     automatic_actions: list[LifeChannelAction] = Field(
         default_factory=list, max_length=5, exclude_if=lambda value: not value,
     )
+    share_own_readings: bool = Field(default=False, exclude_if=lambda enabled: not enabled)
 
     @model_validator(mode="after")
     def unique_scope(self):
+        if self.share_own_readings and "PRIVATE_MESSAGE_DRAFT" not in self.purposes:
+            raise ValueError("Sharing own readings requires the private message draft purpose")
         if self.source_scope == "selected" and not self.source_event_ids:
             raise ValueError("Selected Life sources require exact event IDs")
         if self.source_scope == "owner_private_history" and (
