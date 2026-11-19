@@ -135,7 +135,10 @@ class BotSession {
   String get draft => _draft ?? state.draft;
 
   Stream<ChatState> watch() => Stream.multi((sink) {
-    final subscription = _updates.stream.listen(sink.addSync, onDone: sink.closeSync);
+    final subscription = _updates.stream.listen(
+      sink.addSync,
+      onDone: sink.closeSync,
+    );
     sink.onCancel = subscription.cancel;
     sink.onPause = subscription.pause;
     sink.onResume = subscription.resume;
