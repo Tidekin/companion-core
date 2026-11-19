@@ -30,7 +30,8 @@ from companion.turn_taking import excerpt
 RULES = """依据真实来源作一次有界生活判断，只输出JSON，不执行工具或发送。
 action只能是SKIP/CONTINUE/EXPLORE/FOLLOW_UP/SHARE/DEFER。
 destination只能选给定allowed_destinations；不表达时为NONE。
-输出source_event_ids、reason(160字内)、text(500字内)。
+输出source_event_ids（从sources的event_id中选择）、reason(160字内)、text(500字内)。
+没有值得表达的内容可以输出 {"action":"SKIP","source_event_ids":[],"reason":"没有新进展"}。
 CONTINUE必须提供给定的goal_id；DEFER提供60到86400秒的defer_seconds；其他可选字段省略。
 EXPLORE可提供goal，使用原生目标结构：topic、source_event_ids、scope和priority。
 scope只能是{operation:read_content,url:HTTPS地址}、{operation:investigate,url:""}，
@@ -1349,13 +1350,17 @@ class LifeTopics:
             return
 
         def project():
-            # A known supersession retires only the old wording attempt. Recheck
-            # the same item once under the new conversation revision and daily cap.
+            # Reconsider superseded wording or a settled, rejected proposal once.
+            # Keep the original attempt and its charge attached to the old revision.
             for interrupted in s.rows(
                 "SELECT t.topic_id, t.decision_count, r.job_id FROM life_topics AS t JOIN "
                 "life_activity_results AS r ON r.topic_id = t.topic_id AND r.topic_revision = "
                 "t.revision JOIN jobs AS j USING (job_id) WHERE t.state = 'DUE' AND r.state = "
-                "'PENDING' AND j.state = 'CANCELLED' AND j.last_error_code = %s AND NOT "
+                "'PENDING' AND ((j.state = 'CANCELLED' AND j.last_error_code = %s) OR "
+                "(j.state = 'FAILED' AND j.last_error_code = 'LIFE_INVALID_PROPOSAL' "
+                "AND EXISTS (SELECT 1 FROM model_usage u WHERE u.job_id=j.job_id "
+                "AND u.scenario='activity' AND u.state='SETTLED') AND NOT EXISTS "
+                "(SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id))) AND NOT "
                 "EXISTS(SELECT 1 FROM model_usage AS u WHERE u.job_id = j.job_id AND u.state <> "
                 "'SETTLED') LIMIT 20",
                 (reply_revision.SUPERSEDED,),
