@@ -37,7 +37,7 @@ class ProfileRestore(StrictModel):
 
 
 class AvatarUpload(StrictModel):
-    mime_type: str = Field(pattern=r"^image/(png|jpeg|webp)$")
+    mime_type: str = Field(pattern=r"^image/(png|jpeg|webp|gif)$")
     # Base64 of at most MAX_UPLOAD_BYTES; Core checks the decoded bytes again.
     data_base64: str = Field(min_length=4, max_length=(companion_avatar.MAX_UPLOAD_BYTES + 2)
                              // 3 * 4)
@@ -322,7 +322,7 @@ def register_routes(app, settings, prefix, auth, authenticate):
         data = await execute(request, lambda ctx, check: companion_avatar.read_bytes(
             ctx.store, asset_id), readonly=True)
         # Asset ids never change content; the session check above still runs each time.
-        return Response(data, media_type="image/png", headers={
+        return Response(data, media_type=companion_avatar.content_type(data), headers={
             "Cache-Control": "private, max-age=86400, immutable",
             "X-Content-Type-Options": "nosniff"})
 

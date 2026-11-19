@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -7,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:companion_chat/chat/models.dart';
 import 'package:companion_chat/dev/demo_backend.dart';
 import 'package:companion_chat/ui/avatar.dart';
+import 'package:companion_chat/ui/app.dart' show Bubble;
 import 'package:companion_chat/ui/profile.dart';
 import 'package:companion_chat/ui/providers.dart';
 import 'package:companion_chat/ui/theme.dart';
@@ -70,6 +73,56 @@ void main() {
       );
     });
   });
+
+  for (final extension in ['gif', 'webp']) {
+    testWidgets('a picked $extension plays both frames in a chat bubble', (
+      tester,
+    ) async {
+      final picked = (await tester.runAsync(() async {
+        final original = await File('test/fixtures/avatar.$extension')
+            .readAsBytes();
+        final result = await squareAvatar(original);
+        expect(result.mimeType, 'image/webp');
+        expect(
+          latin1.decode(result.bytes),
+          isNot(contains('owner-private-metadata')),
+        );
+        final codec = await ui.instantiateImageCodec(result.bytes);
+        expect(codec.frameCount, 2);
+        expect(codec.repetitionCount, -1);
+        for (final ms in [100, 200]) {
+          final frame = await codec.getNextFrame();
+          expect(frame.duration.inMilliseconds, ms);
+          frame.image.dispose();
+        }
+        codec.dispose();
+        return result;
+      }))!;
+      await tester.pumpWidget(
+        host(
+          Bubble(bot: bot, text: 'hello'),
+          profile(avatar: asset),
+          picked.bytes,
+        ),
+      );
+      final colors = <String>{};
+      for (int i = 0; i < 50 && colors.length < 2; i++) {
+        await tester.pump(const Duration(milliseconds: 30));
+        final snapshots = tester.widgetList<RawImage>(find.byType(RawImage));
+        final frame = snapshots.firstOrNull?.image;
+        final color = await tester.runAsync(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 4));
+          return frame?.toByteData(format: ui.ImageByteFormat.rawRgba);
+        });
+        if (color != null) {
+          if (color.getUint8(0) > 210) colors.add('red');
+          if (color.getUint8(2) > 210) colors.add('blue');
+        }
+      }
+      expect(colors, {'red', 'blue'});
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
 
   testWidgets('the committed avatar replaces the initial; a missing asset '
       'falls back to it', (tester) async {
