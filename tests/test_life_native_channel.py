@@ -1,11 +1,15 @@
 """Signed native input reaches Life's independent worker and native publication."""
 
+import json
+from unittest.mock import AsyncMock
+
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import SecretStr
 
-from companion import owner_authority, paid_budget
+from companion import native_push, owner_authority, paid_budget
+from companion.autonomous_selector import native_selector
+from companion.core import Core
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.reply_segments import SegmentedReplyConfig
@@ -25,13 +29,17 @@ from tests.support.paid_model import approved_live
 from tests.support.social_owner_authority import stop
 
 
-@pytest.mark.parametrize("erased", [False, True])
+@pytest.mark.parametrize("outcome", ["share", "erase-before", "erase-after", "timeout", "limited"])
 def test_native_input_life_draft_publishes_once_or_stops_after_erasure(
-    client, core, tmp_path, erased,
+    client, core, tmp_path, outcome, monkeypatch,
 ):
     captured(core, tmp_path)
     key = Ed25519PrivateKey.generate()
     headers, authority = enroll(client, key)
+    core.settings.native_push_project_id = "demo-companion-push"
+    registration = {"token": "synthetic-registration-token", "route": "3" * 32}
+    registered = client.put("/v1/console/chat/push", json=registration, headers=headers)
+    assert registered.status_code == 200, registered.text
     incoming = client.post('/v1/console/chat/messages', headers=headers,
         json=packet(core, key, authority, text='自研客户端的导出问题明天再看。'))
     assert incoming.status_code == 202, incoming.text
@@ -50,12 +58,11 @@ def test_native_input_life_draft_publishes_once_or_stops_after_erasure(
         expires_at=after(core.clock(), 3 * 86400))
     approved_live(core, tmp_path, max_output_tokens=4096)
     policy = OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id,
-        purposes=['life', 'proactive'], authorization_sha256='d' * 64,
+        purposes=['life', 'proactive', 'chat'], authorization_sha256='d' * 64,
         paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
         life_shadow=scope)
     authority = activate(core, policy, revision=revision,
                          operation='native-life-grant')[0]['authority']
-    core.settings.control_token = SecretStr('synthetic-native-life-control')
     core.clock.advance(86400)
 
     async def exercise():
@@ -64,7 +71,7 @@ def test_native_input_life_draft_publishes_once_or_stops_after_erasure(
         assert observed['provider_calls'] == 1
         result = core.store.one('SELECT * FROM life_activity_results')
         assert result['state'] == 'SHADOW', observed
-        if erased:
+        if outcome == "erase-before":
             with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [source], core.clock())
         async with real_core_http(core) as port, httpx.AsyncClient(
@@ -74,7 +81,7 @@ def test_native_input_life_draft_publishes_once_or_stops_after_erasure(
             body = request(core, result['job_id'], authority, 'qq.private.proactive')
             response = await http.post(f"/internal/v2/life/results/{result['job_id']}/consume",
                                        json=body.model_dump(mode='json'))
-            if erased:
+            if outcome == "erase-before":
                 assert response.status_code in {403, 409}, response.text
                 assert not core.store.rows('SELECT 1 FROM outbox')
                 return
@@ -89,6 +96,54 @@ def test_native_input_life_draft_publishes_once_or_stops_after_erasure(
             assert repeated.status_code == 200, repeated.text
             assert core.store.rows('SELECT conversation_id,action_type,state,content_json FROM '
                                    'outbox ORDER BY segment_index') == rows
+        deliveries = core.store.rows("SELECT * FROM native_push_deliveries")
+        assert len(deliveries) == 1 and deliveries[0]["state"] == "PENDING"
+        if outcome == "erase-after":
+            with core.store.transaction(control_write=True):
+                core.ledger.expire_events(core.store, [source], core.clock())
+        sent = []
+
+        def provider(request):
+            assert core.store.one("SELECT state FROM native_push_deliveries")["state"] == "UNKNOWN"
+            assert request.url == "https://fcm.googleapis.com/v1/projects/demo-companion-push/messages:send"
+            message = json.loads(request.content)["message"]
+            sent.append(message)
+            assert message["token"] == registration["token"]
+            assert message["data"] == {"route": registration["route"]}
+            assert message["notification"] == {"title": "Companion", "body": "有新消息"}
+            assert message["android"]["notification"]["channel_id"] == "companion_proactive"
+            if outcome == "timeout":
+                raise httpx.ReadTimeout("unconfirmed")
+            if outcome == "limited" and len(sent) == 1:
+                return httpx.Response(429, headers={"Retry-After": "180"},
+                                      json={"error": {"status": "RESOURCE_EXHAUSTED"}})
+            return httpx.Response(200, json={"name": "projects/demo-companion-push/messages/123"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as channel:
+            sender = native_push.FcmSender(channel)
+            sender.access_token = AsyncMock(return_value="synthetic-oauth")
+            monkeypatch.setattr(native_push, "FcmSender", lambda: sender)
+            with Core(core.settings, core.model, core.clock) as worker:
+                lane = next(lane for lane in native_selector(worker, "push-worker").lanes
+                            if lane.name == "native_push")
+                if outcome == "erase-after":
+                    await lane.run()
+                else:
+                    assert (await lane.run()).progressed
+                assert not (await lane.run()).progressed
+                if outcome == "limited":
+                    core.clock.advance(179)
+                    assert not (await lane.run()).progressed
+                    core.clock.advance(1)
+                    assert (await lane.run()).progressed
+                    assert not (await lane.run()).progressed
+        status = core.store.one("SELECT state,error_code FROM native_push_deliveries")
+        assert status["state"] == {"share": "ACCEPTED", "limited": "ACCEPTED", "timeout": "UNKNOWN",
+                                   "erase-after": "CANCELLED"}[outcome], status
+        assert len(sent) == int(outcome != "erase-after") + int(outcome == "limited")
+        assert len({m["android"]["notification"]["tag"] for m in sent}) <= 1
+        if outcome == "erase-after":
+            return
         restarted = await native_child(core, tmp_path, source, 'PRIVATE_MESSAGE_DRAFT', 2)
         assert restarted['provider_calls'] == 0
         assert owner_authority.current(core.store, core.settings, core.clock,

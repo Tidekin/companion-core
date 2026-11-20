@@ -21,6 +21,7 @@ from companion import (
     native_chat,
     native_devices,
     native_images,
+    native_push,
 )
 from companion.console_api import _operation, _request_fields
 from companion.contracts import CoreError, StrictModel
@@ -194,6 +195,14 @@ def register_routes(app, settings, prefix, auth, authenticate):
     async def history(request: Request, before: int | None = None, limit: int = 50):
         return await execute(request, lambda ctx, check: native_chat.history(
             ctx, before=before, limit=limit), readonly=True)
+
+    @app.put(prefix + "/push", dependencies=auth)
+    async def register_push(body: native_push.Registration, request: Request):
+        return await execute(request, lambda ctx, check: native_push.register(ctx, check, body))
+
+    @app.delete(prefix + "/push", dependencies=auth)
+    async def unregister_push(request: Request):
+        return await execute(request, lambda ctx, check: native_push.unregister(ctx, check))
 
     @app.get(prefix + "/events", dependencies=auth)
     async def events(request: Request):

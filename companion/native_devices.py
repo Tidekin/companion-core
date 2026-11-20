@@ -161,6 +161,7 @@ def revoke(context, device_id):
             operation_id='revoke_'+revision_id, created_at=now)
         store.execute('UPDATE native_devices SET revision_id=%s WHERE device_id=%s',
                       (revision_id, device_id))
+        store.execute('DELETE FROM native_push_registrations WHERE device_id=%s', (device_id,))
         sources = ("SELECT event_id FROM events WHERE source='native.chat' "
                    "AND source_event_id LIKE %s")
         prefix = 'native:'+device_id+':%'

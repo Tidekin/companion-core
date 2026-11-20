@@ -1,9 +1,11 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../chat/core_backend.dart';
 import '../chat/models.dart';
+import '../chat/push.dart';
 import '../chat/session.dart';
 import '../chat/stickers.dart';
 import '../persistence/repository.dart';
@@ -27,12 +29,16 @@ final registryProvider = Provider<SessionRegistry>((ref) {
   final registry = SessionRegistry(
     ref.watch(repositoryProvider),
     ref.watch(backendFactoryProvider),
+    androidPush: ref.watch(androidPushProvider),
   );
   ref.onDispose(() {
     registry.close();
   });
   return registry;
 });
+final androidPushProvider = Provider<AndroidPush?>(
+  (_) => Platform.isAndroid ? AndroidPush() : null,
+);
 final botsProvider = StreamProvider<List<BotProfile>>(
   (ref) => ref.watch(repositoryProvider).watchBots(),
 );

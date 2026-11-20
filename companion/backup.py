@@ -192,6 +192,9 @@ def _fence_restored(store, ledger):
         from companion.owner_authority import restore as restore_owner_authority
 
         restore_owner_authority(store)
+        store.execute("DELETE FROM native_push_registrations")
+        store.execute("UPDATE native_push_deliveries SET state='CANCELLED',error_code='RESTORED' "
+                      "WHERE state='PENDING'")
         from companion.gateway import restore as restore_gateway
 
         restore_gateway(store)

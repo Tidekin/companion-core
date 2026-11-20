@@ -87,7 +87,15 @@ Set-Location clients/chat
 
 凭据边界参考固定 DSH 实现的[独立凭据记录](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/credentials/credentials/src/types.ts)与[授权完成后原子提交](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/credentials/authorization/src/index.ts)：复用本项目原主人会话、CSRF、操作回执、修订记录和 Ed25519 字段，不引入 DSH 运行依赖。新代际使用原签名的 `protocol_epoch` / `identity_sha256` 绑定，历史证明不因撤销而消失。
 
-正式 Windows 构建使用 `flutter build windows --release`；需分发整个 `build/windows/x64/runner/Release` 目录，不能只复制 exe。Android 使用同一源码 `flutter build apk --debug` 进行开发安装；公开发布前另行配置自己的 release 签名、升级与分发渠道。Android 最低 API 24。Android 构建还需 JDK 17、Android SDK 36，以及各插件要求的 NDK；下载和构建缓存放在工作区 `.local`。
+Windows 正式构建使用 `flutter build windows --release`，需分发整个 `build/windows/x64/runner/Release` 目录。Android 开发安装使用 `flutter build apk --debug`，最低 API 24。Android 构建需 JDK 17 或更高版本、Android SDK 36、Build Tools 36.0.0 以及插件要求的 NDK，下载和缓存放在工作区 `.local`。
+
+**Android 覆盖升级。** 发布人在本机通过进程环境变量指定以往分发 APK 使用的签名密钥。将 `COMPANION_ANDROID_KEYSTORE` 设为密钥库的绝对路径，`COMPANION_ANDROID_KEY_ALIAS` 设为密钥别名，通过本机凭据管理工具注入 `COMPANION_ANDROID_STORE_PASSWORD` 和 `COMPANION_ANDROID_KEY_PASSWORD`。脚本默认将上次发布的 Android 版本码加一，支持同一天连续发版，也可通过 `-BuildNumber` 指定更大的版本码。在仓库根目录执行打包命令。
+
+```powershell
+./scripts/package-android.ps1 -PreviousApk .local/dist/previous.apk -OutputApk .local/dist/update.apk
+```
+
+`-PreviousApk` 指向上一次实际分发的安装包，`-OutputApk` 使用新文件名。打包脚本会校验两个 APK 的应用 ID 和分发签名证书，确认新版本码严格递增后写入成品。设备打开新 APK 选择“更新”，Android 会保留已有 Bot、登录凭据和聊天缓存。
 
 默认数据目录为系统应用支持目录；开发可用 `--dart-define=COMPANION_DATA_DIR=<工作区内目录>` 指定 SQLite 位置。`scripts/flutter.ps1` 将工具缓存限制在工作区；需要使用已有 Android/JDK 工具时按本机配置准备 `.local/android-sdk` 与 JAVA_HOME。含空格路径遇到原生 hook 的 SDK 兼容问题时，可以给同一工作区设置临时 `subst` 别名，并设 `COMPANION_FLUTTER_WORKSPACE` 为该别名，保持所有文件仍落在原工作区。目录联接辅助脚本用于当前 Windows 未启用开发者模式的环境，不修改系统设置。
 
@@ -101,9 +109,23 @@ Set-Location clients/chat
 
 登录及“同步全部历史”执行分页核对，日常同步最近页和未完成任务；界面显示最近 200 个输入轮次。本地已同步历史按 Bot 保存，远端删除标记在收到同步时清除正文。离线设备和未进入日常最近页的旧记录要在恢复连接并执行完整同步后完成核对。
 
-原生文本现已贯通供应商 SSE、原有 Agent/Worker、持久预览、Core HTTPS SSE 与 Flutter 界面。模型未结束即可显示正文，最终事务完成后由正式回复替换预览。每个 Bot 各自订阅；断开订阅不取消 Worker，重新登录恢复原任务。后台通知、多媒体、AstrBot / DSH 和群聊后续扩展。Android 后台常驻、真机兼容及公开发布验收单独进行。
+原生文本现已贯通供应商 SSE、原有 Agent/Worker、持久预览、Core HTTPS SSE 与 Flutter 界面。模型未结束即可显示正文，最终事务完成后由正式回复替换预览。每个 Bot 各自订阅；断开订阅不取消 Worker，重新登录恢复原任务。
 
 服务端需迁移到 `pg0004_native_stream`。反向代理应关闭 `/v1/console/chat/events` 的响应缓冲与缓存，并允许长连接；服务端发送约 10 秒心跳，客户端在 30 秒无数据时重连。订阅初始返回最近 100 轮快照，其后按变化推送；旧任务仍由原状态/历史接口补查。活跃预览每次读取都重新校验来源与租约，静止历史不会被每 250ms 全量重新投影。
+
+## Android 主动消息通知
+
+在 Android 客户端进入对应 Bot 的聊天，从“会话操作”选择“开启此 Bot 的消息通知”。首次开启时允许系统通知。每个 Bot 独立登记；同一次主动分享即使分成多个气泡，也只申请一条通知。后台提醒显示“Companion / 有新消息”。点开后，客户端用本机保存的随机标识找到对应会话，再通过原有登录和聊天同步取回消息。处于前台时继续使用聊天事件流。
+
+### 发布与验收
+
+1. 在同一个 Firebase 项目中为 `dev.tidekin.companion_chat` 注册 Android 应用，启用 Firebase Cloud Messaging API。把该应用的 `google-services.json` 放在 `clients/chat/android/app/`，沿用上文的覆盖安装流程。这个客户端配置与服务端发送凭据分别保管。[Android FCM 配置](https://firebase.google.com/docs/cloud-messaging/android/get-started)
+2. 各 Core 实例迁移到 `pg0020_native_push` 后，在根级配置中填写 `native_push_project_id = "<Firebase 项目 ID>"`。默认关闭。API 和 worker 使用同一实例配置。给执行发送的 Life worker 配置 Google Application Default Credentials，发送身份需对该项目拥有 `cloudmessaging.messages.create`。使用凭据文件时，将它只读挂载到该 worker，并把容器内路径设为 `GOOGLE_APPLICATION_CREDENTIALS`。[HTTP v1 服务端授权](https://firebase.google.com/docs/cloud-messaging/send/v1-api)
+3. 用已登记并登录的测试设备开启该 Bot 的通知。检验覆盖升级、锁屏、应用进程被系统回收后收到提醒，以及点开后是否回到正确的私聊。Android 系统设置中的“强行停止”需要先手动重新打开应用。通知的时效还取决于设备的 Google Play 服务和网络连接。[后台接收说明](https://firebase.google.com/docs/cloud-messaging/flutter/receive)
+
+验收时可按状态统计 `native_push_deliveries`。聊天记录的 `SENT` 表示服务器已发布，`ACCEPTED` 表示 FCM 已受理。手机显示和点击需要在设备上核验。关闭通知会撤销该设备在本实例的登记；重新启用只处理后续新分享。发送结果未知时保留 `UNKNOWN`，避免重复提醒。
+
+设备离线期间，FCM 可能将多条通知合并。重新连接后，客户端仍按会话历史同步所有有效分享。[FCM 消息合并行为](https://firebase.google.com/docs/cloud-messaging/customize-messages/collapsible-message-types)
 
 ## 表情面板
 

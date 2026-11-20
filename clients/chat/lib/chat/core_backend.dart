@@ -23,6 +23,8 @@ abstract interface class ChatBackend {
   Future<bool> resume();
   Future<ConnectionReview> login(String credential);
   Future<void> logout();
+  Future<void> registerPush({required String token, required String route});
+  Future<void> unregisterPush();
   Future<void> approve(ConnectionReview review);
   Future<bool> canPrepare();
   Future<PendingMessage> prepare(
@@ -552,6 +554,29 @@ class CoreBackend implements ChatBackend {
       _cookie = _csrf = null;
       await _saveSession(null, generation);
       return false;
+    }
+  }
+
+  @override
+  Future<void> registerPush({
+    required String token,
+    required String route,
+  }) async {
+    final result = await _request(
+      'PUT',
+      '/v1/console/chat/push',
+      body: {'token': token, 'route': route},
+    );
+    if (result['registered'] != true) {
+      throw const BackendError('PUSH_NOT_REGISTERED');
+    }
+  }
+
+  @override
+  Future<void> unregisterPush() async {
+    final result = await _request('DELETE', '/v1/console/chat/push');
+    if (result['registered'] != false) {
+      throw const BackendError('PUSH_DISABLE_PENDING');
     }
   }
 

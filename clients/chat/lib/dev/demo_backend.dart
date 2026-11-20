@@ -260,6 +260,13 @@ class DemoBackend implements ChatBackend {
   @override
   Future<void> logout() async {}
   @override
+  Future<void> registerPush({
+    required String token,
+    required String route,
+  }) async => throw const BackendError('NATIVE_PUSH_DISABLED', status: 409);
+  @override
+  Future<void> unregisterPush() async {}
+  @override
   Future<ConnectionReview> login(String credential) async =>
       const ConnectionReview(true, {});
   @override

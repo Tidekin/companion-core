@@ -4,6 +4,20 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+if (file("google-services.json").isFile) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
+dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
+    implementation("com.google.firebase:firebase-messaging")
+}
+
+val releaseKeystore = providers.environmentVariable("COMPANION_ANDROID_KEYSTORE").orNull
+val releaseAlias = providers.environmentVariable("COMPANION_ANDROID_KEY_ALIAS").orNull
+val releaseStorePassword = providers.environmentVariable("COMPANION_ANDROID_STORE_PASSWORD").orNull
+val releaseKeyPassword = providers.environmentVariable("COMPANION_ANDROID_KEY_PASSWORD").orNull
+
 android {
     namespace = "dev.tidekin.companion_chat"
     compileSdk = flutter.compileSdkVersion
@@ -15,7 +29,6 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "dev.tidekin.companion_chat"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
@@ -29,11 +42,22 @@ android {
         versionName = flutter.versionName
     }
 
-    buildTypes {
-        release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+    signingConfigs {
+        create("distribution") {
+            storeFile = releaseKeystore?.let { file(it) }
+            keyAlias = releaseAlias
+            storePassword = releaseStorePassword
+            keyPassword = releaseKeyPassword
+        }
+    }
+    buildTypes.getByName("release").signingConfig = signingConfigs.getByName("distribution")
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    doFirst {
+        require(!releaseKeystore.isNullOrBlank() && !releaseAlias.isNullOrBlank() &&
+                !releaseStorePassword.isNullOrEmpty() && !releaseKeyPassword.isNullOrEmpty()) {
+            "Set the four COMPANION_ANDROID signing variables documented in docs/native-chat-mvp.md."
         }
     }
 }

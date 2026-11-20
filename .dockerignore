@@ -4,6 +4,7 @@
 .env
 config.toml
 gateway.toml
+clients/chat/android/app/google-services.json
 data
 privacy
 backups

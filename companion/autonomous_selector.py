@@ -426,6 +426,18 @@ def native_selector(core, worker_id) -> RoundRobin:
             await warm_once(core.memory, core.clock, lambda: _allowed(core, ("memory",)))
         )
 
+    push_lanes = ()
+    if core.settings.native_push_project_id:
+        from companion.native_push import FcmSender, dispatch_one
+
+        push_sender = FcmSender()
+
+        async def push_notification():
+            return UnitResult(await dispatch_one(
+                core.store, core.settings, core.clock, push_sender))
+
+        push_lanes = (lane("native_push", push_notification),)
+
     return RoundRobin(
         (
             lane("retention", retention, interval=MAINTENANCE_SECONDS, maintenance=True),
@@ -463,6 +475,7 @@ def native_selector(core, worker_id) -> RoundRobin:
             lane("social", social, ("social",), interval=0.0,
                  idle_interval=MAINTENANCE_SECONDS),
             Lane("moment_image", moment_image),
+            *push_lanes,
         ),
         lambda: foreground_clear(core, hint),
     )

@@ -1,0 +1,4 @@
+<resources>
+    <string name="proactive_channel_id" translatable="false">companion_proactive</string>
+    <string name="proactive_channel_name">主动消息</string>
+</resources>

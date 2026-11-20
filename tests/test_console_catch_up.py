@@ -53,6 +53,20 @@ def test_configuration_view_shows_the_effective_policy(client, core):  # noqa: F
     assert fields["chat_thinking"]["group"] == "model"
 
 
+def test_fcm_project_is_bound_to_the_deployment(client, core):  # noqa: F811
+    core.settings.native_push_project_id = "original-project"
+    headers = {**login(client), "Idempotency-Key": "change-push-project"}
+    view = client.get("/v1/console/configuration").json()
+    assert "native_push_project_id" not in {field["key"] for field in view["fields"]}
+    response = client.put("/v1/console/configuration", headers=headers, json={
+        "expected_version": view["version"],
+        "changes": {"native_push_project_id": "other-project"},
+    })
+    assert response.status_code == 400
+    assert response.json() == {"error": "CONFIGURATION_FIELD_NOT_EDITABLE"}
+    assert not core.store.one("SELECT 1 FROM operator_configuration")
+
+
 def test_style_candidates_are_listed_without_source_text_and_approved_once(
         client, core, tmp_path):  # noqa: F811
     key = candidate(core, tmp_path)
