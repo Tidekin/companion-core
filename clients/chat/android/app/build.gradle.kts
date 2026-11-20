@@ -4,6 +4,15 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+if (file("google-services.json").isFile) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
+dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
+    implementation("com.google.firebase:firebase-messaging")
+}
+
 val releaseKeystore = providers.environmentVariable("COMPANION_ANDROID_KEYSTORE").orNull
 val releaseAlias = providers.environmentVariable("COMPANION_ANDROID_KEY_ALIAS").orNull
 val releaseStorePassword = providers.environmentVariable("COMPANION_ANDROID_STORE_PASSWORD").orNull

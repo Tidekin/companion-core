@@ -264,7 +264,11 @@ class Store:
 
     def schema_capabilities(self):
         required = {
-            "native_devices": {"device_id", "revision_id"},
+            "native_push_registrations": {"device_id", "binding_id", "session_hash",
+                                          "token_ciphertext", "device_revision", "project_id"},
+            "native_push_deliveries": {"notification_id", "group_id", "message_id",
+                                       "device_id", "binding_id", "state", "expires_at"},
+            "native_devices": {"device_id", "revision_id", "push_session_sequence"},
             "native_device_revisions": {"revision_id", "device_id", "version", "state",
                                         "identity_json", "grant_id", "restore_generation"},
             "companion_profile": {"singleton", "companion_id", "revision", "display_name",

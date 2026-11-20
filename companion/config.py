@@ -401,6 +401,9 @@ class LiveTextWindowApproval(BaseModel):
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    native_push_project_id: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+        exclude_if=lambda value: value is None)
     owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
     rem: RemConfig = Field(default_factory=RemConfig)
     # Owner private jargon, learned for understanding only; see companion/jargon.py.

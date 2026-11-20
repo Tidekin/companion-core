@@ -73,7 +73,7 @@ class Wire implements HttpClientAdapter {
             ? {'csrf_token': 'csrf-$name'}
             : {
                 'event_id': 'accepted',
-                'registered': true,
+                'registered': options.method != 'DELETE',
                 'authority': {'revision': requests.length, 'for': name},
                 'capture_identity': ?captureIdentity,
                 'items': [],
@@ -97,6 +97,50 @@ class Wire implements HttpClientAdapter {
 }
 
 void main() {
+  test(
+    'push registration uses the current device session and private origin',
+    () async {
+      final db = ChatDatabase(NativeDatabase.memory());
+      final bot = BotProfile(
+        id: 'one',
+        name: 'one',
+        endpoint: Uri.parse('https://one.test'),
+      );
+      final vault = MemoryVault();
+      final wire = Wire('one');
+      final repo = ChatRepository(db, CacheCipher(vault));
+      await repo.addBot(bot);
+      final backend = CoreBackend(
+        bot,
+        repo,
+        vault,
+        transport: Dio()..httpClientAdapter = wire,
+      );
+      addTearDown(() async {
+        backend.close();
+        await db.close();
+      });
+      await backend.login('owner');
+      wire.requests.clear();
+      final route = 'a' * 32;
+      await backend.registerPush(token: 'synthetic-token', route: route);
+      await backend.unregisterPush();
+      expect(wire.requests.map((r) => r.method), ['PUT', 'DELETE']);
+      for (final request in wire.requests) {
+        expect(request.uri.toString(), 'https://one.test/v1/console/chat/push');
+        expect(
+          request.headers['Cookie'],
+          'companion_owner_session=session-one',
+        );
+        expect(request.headers['X-CSRF-Token'], 'csrf-one');
+      }
+      expect(wire.requests.first.data, {
+        'token': 'synthetic-token',
+        'route': route,
+      });
+      expect(wire.requests.last.data, isNull);
+    },
+  );
   test('signed credential generation survives a client restart', () async {
     final db = ChatDatabase(NativeDatabase.memory());
     final vault = MemoryVault();

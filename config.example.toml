@@ -1,5 +1,8 @@
 # Copy to config.toml; secrets and QQ IDs are environment variables.
 mode = "live"
+# Optional Android push for published proactive messages. Use this APK's Firebase project.
+# The Life worker obtains its sending identity through Google Application Default Credentials.
+# native_push_project_id = "your-firebase-project-id"
 # Optional replacement for the selected conversation policy's expression guidance.
 # Only used for ENABLED chat policy; blank restores the built-in strategy (max 2000 chars).
 # conversation_guidance = "Respond to one concrete detail in your own words."

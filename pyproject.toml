@@ -14,6 +14,7 @@ dependencies = [
     "uvicorn>=0.34,<1",
     "httpx>=0.28,<1",
     "httpcore>=1,<2",
+    "google-auth[requests]>=2.38,<3",
     "pydantic>=2.10,<3",
     "pydantic-ai-slim==2.60.0",
     "tzdata>=2025.1",

@@ -3,6 +3,7 @@ import 'dart:async';
 import '../persistence/repository.dart';
 import 'core_backend.dart';
 import 'models.dart';
+import 'push.dart';
 
 class ChatState {
   const ChatState({
@@ -34,9 +35,16 @@ class BotSession {
     this.backend, {
     DateTime Function()? clock,
     bool autoPoll = true,
-  }) : clock = clock ?? DateTime.now {
-    loaded = _publish('登录后就可以聊天');
-    unawaited(_resume());
+    AndroidPush? androidPush,
+  }) : clock = clock ?? DateTime.now,
+       push = androidPush == null
+           ? null
+           : BotPush(bot.id, repository, backend, androidPush) {
+    loaded = Future.wait<void>([
+      _publish('登录后就可以聊天'),
+      if (push != null) push!.loaded,
+    ]);
+    unawaited(_resume().whenComplete(_finishInitialAuthorization));
     if (autoPoll) {
       _timer = Timer.periodic(const Duration(seconds: 2), (_) {
         final interval = state.pending.isEmpty ? 15 : 2;
@@ -50,8 +58,14 @@ class BotSession {
   final BotProfile bot;
   final ChatRepository repository;
   final ChatBackend backend;
+  final BotPush? push;
   final DateTime Function() clock;
   late final Future<void> loaded;
+  final _initialAuthorization = Completer<void>();
+  void _finishInitialAuthorization() {
+    if (!_initialAuthorization.isCompleted) _initialAuthorization.complete();
+  }
+
   ChatState state = const ChatState();
   final _updates = StreamController<ChatState>.broadcast();
   Timer? _timer;
@@ -109,11 +123,7 @@ class BotSession {
       _generation++;
       _turnWindow = null;
       _active = false;
-      unawaited(
-        repository
-            .withdrawPreviews(bot.id)
-            .then((_) => _publish('设备授权或登录已失效，请重新登录')),
-      );
+      unawaited(_withdraw(error).then((_) => _publish('设备授权或登录已失效，请重新登录')));
       return;
     }
     unawaited(_publish('连接中断；正在恢复原任务'));
@@ -129,6 +139,46 @@ class BotSession {
   }
 
   DateTime _lastSync = DateTime.fromMillisecondsSinceEpoch(0);
+  bool Function() _pushAuthorization() {
+    final generation = _generation;
+    return () => !_closed && _active && _connected && generation == _generation;
+  }
+
+  Future<void> setPushEnabled(bool enabled) async {
+    final subscription = push;
+    if (subscription == null) throw const BackendError('PUSH_UNAVAILABLE');
+    try {
+      await subscription.setEnabled(enabled, _pushAuthorization());
+    } finally {
+      if (!_closed) await _publish(state.status);
+    }
+  }
+
+  Future<void>? _refreshingPush;
+  void refreshPush({bool checkToken = false}) {
+    final subscription = push;
+    if (subscription == null || !_active || !_connected) return;
+    if (!checkToken && _refreshingPush != null) return;
+    // An unavailable notification transport must not delay ordinary chat sync.
+    final request = subscription
+        .refresh(_pushAuthorization(), checkToken: checkToken)
+        .catchError((Object _) {});
+    _refreshingPush = request;
+    unawaited(
+      request.whenComplete(() {
+        if (identical(_refreshingPush, request)) _refreshingPush = null;
+      }),
+    );
+  }
+
+  Future<void> _withdraw(BackendError error) async {
+    push?.sessionChanged();
+    if (error.status == 403 && push != null) {
+      unawaited(push!.forget().catchError((Object _) {}));
+    }
+    await repository.withdrawPreviews(bot.id);
+  }
+
   Future<void> _networkTail = Future.value();
   ConnectionReview? _review;
   String? _draft;
@@ -200,7 +250,7 @@ class BotSession {
           _turnWindow = null;
           _active = false;
           await _stopEvents();
-          await repository.withdrawPreviews(bot.id);
+          await _withdraw(error);
         }
         await _publish(
           error.code == 'CONNECTION_UNAVAILABLE'
@@ -218,6 +268,7 @@ class BotSession {
   }
 
   Future<void> login(String credential) {
+    push?.sessionChanged();
     unawaited(_stopEvents());
     final generation = ++_generation;
     _turnWindow = null;
@@ -245,6 +296,7 @@ class BotSession {
     }
     _guard(generation);
     _connected = true;
+    _finishInitialAuthorization();
     await _publish('已连接，正在同步聊天记录');
     _guard(generation);
     await _syncNow(full: true, generation: generation, deviceVerified: true);
@@ -390,6 +442,7 @@ class BotSession {
     _connected = true;
     await _publish('已连接');
     _startEvents(generation);
+    refreshPush();
   }
 
   Future<void> disconnect() async {
@@ -402,7 +455,11 @@ class BotSession {
     await _publish('正在退出登录，本地消息保留');
     var status = '已退出登录，本地消息保留';
     try {
-      await backend.logout();
+      await Future.wait<void>([
+        backend.logout(),
+        if (push != null) push!.prepareLogout(),
+      ]);
+      if (!_closed && generation == _generation) await push?.forget();
     } on BackendError {
       status = '已退出本机登录；服务器会话注销未确认';
     } catch (_) {
@@ -425,25 +482,54 @@ class BotSession {
 }
 
 class SessionRegistry {
-  SessionRegistry(this.repository, this.createBackend) {
+  SessionRegistry(this.repository, this.createBackend, {this.androidPush}) {
     _subscription = repository.watchBots().listen((bots) {
       for (final bot in bots) {
-        _sessions.putIfAbsent(
-          bot.id,
-          () => BotSession(bot, repository, createBackend(bot)),
-        );
+        session(bot);
       }
     });
   }
   final ChatRepository repository;
   final ChatBackend Function(BotProfile) createBackend;
+  final AndroidPush? androidPush;
   final Map<String, BotSession> _sessions = {};
   late final StreamSubscription<List<BotProfile>> _subscription;
   Future<void>? _closing;
   BotSession session(BotProfile bot) => _sessions.putIfAbsent(
     bot.id,
-    () => BotSession(bot, repository, createBackend(bot)),
+    () => BotSession(
+      bot,
+      repository,
+      createBackend(bot),
+      androidPush: androidPush,
+    ),
   );
+  void refreshPushTokens() {
+    for (final session in _sessions.values) {
+      session.refreshPush(checkToken: true);
+    }
+  }
+
+  Future<BotSession?> notificationTarget(String route) async {
+    if (androidPush == null || !RegExp(r'^[0-9a-f]{32}$').hasMatch(route)) {
+      return null;
+    }
+    for (final bot in await repository.bots()) {
+      if (_closing != null) return null;
+      final candidate = session(bot);
+      await candidate.push!.loaded;
+      if (candidate.push!.matches(route)) {
+        await candidate._initialAuthorization.future;
+        return !candidate._closed &&
+                candidate._active &&
+                candidate.push!.matches(route)
+            ? candidate
+            : null;
+      }
+    }
+    return null;
+  }
+
   Future<void> close() => _closing ??= Future.wait<void>([
     // Stop every Bot timer immediately, before waiting for stream cancellation.
     for (final session in _sessions.values) session.close(),

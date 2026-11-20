@@ -456,7 +456,13 @@ def revoke_deliveries(store, condition, params=(), *, erase_content=False, reaso
     if now is not None:
         updates.append('updated_at=%s')
         values.append(now)
-    store.execute(f"UPDATE outbox SET {','.join(updates)} WHERE {condition}", (*values, *params))
+    update = f"UPDATE outbox SET {','.join(updates)} WHERE {condition}"
+    if erase_content:
+        update = (f"WITH withdrawn AS ({update} RETURNING message_id) "
+                  "UPDATE native_push_deliveries SET state='CANCELLED',"
+                  "error_code='NATIVE_PUSH_SOURCE_ERASED' WHERE state='PENDING' "
+                  "AND message_id IN (SELECT message_id FROM withdrawn)")
+    store.execute(update, (*values, *params))
 
 
 def restore_deliveries(store):

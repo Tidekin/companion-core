@@ -22,14 +22,15 @@ export 'theme.dart' show Pressable;
 
 const _wideBreakpoint = 860.0;
 
-class ChatApplication extends StatefulWidget {
+class ChatApplication extends ConsumerStatefulWidget {
   const ChatApplication({super.key, this.developmentNotice});
   final String? developmentNotice;
   @override
-  State<ChatApplication> createState() => _ChatApplicationState();
+  ConsumerState<ChatApplication> createState() => _ChatApplicationState();
 }
 
-class _ChatApplicationState extends State<ChatApplication> {
+class _ChatApplicationState extends ConsumerState<ChatApplication>
+    with WidgetsBindingObserver {
   late final router = GoRouter(
     routes: [
       GoRoute(
@@ -45,6 +46,46 @@ class _ChatApplicationState extends State<ChatApplication> {
       ),
     ],
   );
+  late final push = ref.read(androidPushProvider);
+
+  @override
+  void initState() {
+    super.initState();
+    if (push == null) return;
+    WidgetsBinding.instance.addObserver(this);
+    push!.listen(refresh: _refreshPushTokens, open: _openNotification);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _openNotification());
+  }
+
+  void _refreshPushTokens() {
+    if (mounted) ref.read(registryProvider).refreshPushTokens();
+  }
+
+  Future<void> _openNotification() async {
+    if (!mounted) return;
+    final registry = ref.read(registryProvider);
+    try {
+      final route = await push?.takeRoute();
+      if (route == null || !mounted) return;
+      final session = await registry.notificationTarget(route);
+      if (!mounted || session == null) return;
+      router.go('/chat/${session.bot.id}');
+      unawaited(session.sync());
+    } on PlatformException {
+      // Chat history remains available after a platform service interruption.
+    } on MissingPluginException {
+      // A development embedder may run the Flutter UI without Firebase.
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && push != null) {
+      _refreshPushTokens();
+      unawaited(_openNotification());
+    }
+  }
+
   @override
   Widget build(BuildContext context) => MaterialApp.router(
     title: 'Companion',
@@ -54,6 +95,10 @@ class _ChatApplicationState extends State<ChatApplication> {
   );
   @override
   void dispose() {
+    if (push != null) {
+      WidgetsBinding.instance.removeObserver(this);
+      push!.stopListening();
+    }
     router.dispose();
     super.dispose();
   }
@@ -852,6 +897,34 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   Future<void> sessionAction(String value) async {
+    if (value == 'push') {
+      String message;
+      final enable = !(session.push!.enabled || session.push!.disabling);
+      try {
+        await session.setPushEnabled(enable);
+        message = enable ? '已开启此 Bot 的消息通知' : '已关闭此 Bot 的消息通知';
+      } catch (error) {
+        final code = switch (error) {
+          BackendError e => e.code,
+          PlatformException e => e.code,
+          _ => '',
+        };
+        message = switch (code) {
+          'PUSH_PERMISSION_DENIED' => '请在系统设置中允许 Companion 发送通知。',
+          'PUSH_NOT_CONFIGURED' => '此安装包尚未配置 Google 消息推送。',
+          'NATIVE_PUSH_DISABLED' || 'HTTP_404' => '此 Bot 的服务器尚未启用消息推送。',
+          'PUSH_LOGIN_REQUIRED' => '请登录此 Bot 后开启通知。',
+          'PUSH_TOKEN_UNAVAILABLE' => '暂时无法连接 Google Play 服务，请稍后再试。',
+          'PUSH_DISABLE_PENDING' || 'CONNECTION_UNAVAILABLE' =>
+            enable ? '服务器尚未确认通知登记，请在恢复连接后检查。' : '服务器尚未确认关闭，恢复连接后会重试。',
+          _ => '未能更新此 Bot 的消息通知。',
+        };
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(message)));
+      }
+    }
     if (value == 'sync') await session.sync(full: true);
     if (value == 'disconnect') await session.disconnect();
     if (value == 'discard') await session.discardRejected();
@@ -866,7 +939,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
-  static const _actions = [
+  List<(String, IconData, String)> get _actions => [
+    if (session.push != null)
+      (
+        'push',
+        Icons.notifications_outlined,
+        session.push!.disabling
+            ? '重试关闭此 Bot 的消息通知'
+            : session.push!.enabled
+            ? '关闭此 Bot 的消息通知'
+            : '开启此 Bot 的消息通知',
+      ),
     ('sync', Icons.sync_rounded, '同步全部历史'),
     ('identity', Icons.key_rounded, '复制设备公钥'),
     ('discard', Icons.delete_sweep_outlined, '移除被拒绝的待发送消息'),

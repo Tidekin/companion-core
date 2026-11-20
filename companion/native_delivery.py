@@ -28,3 +28,8 @@ def publish(store, settings, clock, message_ids):
                       (now, now, message_id, message_id))
         cumulative.send_result(store, message_id, "SENT", now)
         store.audit("native.message.available", message_id, "native-chat", now)
+        if (settings.native_push_project_id and row["action_type"] == "native.private.proactive"
+                and (row["segment_index"] or 0) == 0):
+            from companion.native_push import enqueue
+
+            enqueue(store, settings, row, now)

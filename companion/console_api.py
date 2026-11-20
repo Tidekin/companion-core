@@ -397,6 +397,10 @@ def register_console_routes(app, settings):
                 current = _check_owner(
                     SimpleNamespace(store=store, settings=settings, clock=clock), captured
                 )
+                if current["native_device_id"]:
+                    from companion.native_push import withdraw_session
+
+                    withdraw_session(store, current)
                 store.execute(
                     "DELETE FROM console_sessions WHERE token_sha256 = %s",
                     (current["token_sha256"],),
