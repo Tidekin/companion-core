@@ -67,7 +67,7 @@ EXCLUDED = frozenset({
     "live_text_window",
     "observation_adapters", "executive", "media", "cloud_budget", "timezone", "mode",
     "diary_auto_share", "reranker_model_dir",
-    "operator_hot_reload",
+    "operator_hot_reload", "native_push_project_id",  # Bound to the Android build and worker ADC.
 })
 LABELS = {
     "chat_thinking": "聊天思考强度", "chat_thinking_tokens": "思考额外输出（token）",
