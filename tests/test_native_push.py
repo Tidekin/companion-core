@@ -5,6 +5,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion import native_push
+from companion.console_api import COOKIE, digest
 from companion_delivery_protocol.native_chat import device_identity
 from tests.support.native_chat import enroll
 from tests.support.owner_console import client as client
@@ -60,13 +61,17 @@ def test_later_login_can_apply_offline_opt_out_and_fences_stale_put(client, core
     key = Ed25519PrivateKey.generate()
     earlier, _ = enroll(client, key)
     assert client.put(PUSH, headers=earlier, json=BODY).is_success
-    previous = httpx.Cookies(client.cookies)
+    previous = client.cookies.get(COOKIE)
+    client.cookies.clear()
     newer, _ = enroll(client, key)
     assert client.delete(PUSH, headers=newer).is_success
     assert not core.store.one("SELECT 1 FROM native_push_registrations")
     client.cookies.clear()
-    client.cookies.update(previous)
-    assert client.put(PUSH, headers=earlier, json=BODY).json() == {
+    assert core.store.one(
+        "SELECT 1 FROM console_sessions WHERE token_sha256=%s", (digest(previous),))
+    old_session = {**earlier, "Cookie": f"{COOKIE}={previous}"}
+    assert client.get("/v1/console/session", headers=old_session).is_success
+    assert client.put(PUSH, headers=old_session, json=BODY).json() == {
         "error": "NATIVE_PUSH_SESSION_CHANGED"}
 
 
