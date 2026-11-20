@@ -87,7 +87,15 @@ Set-Location clients/chat
 
 凭据边界参考固定 DSH 实现的[独立凭据记录](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/credentials/credentials/src/types.ts)与[授权完成后原子提交](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/credentials/authorization/src/index.ts)：复用本项目原主人会话、CSRF、操作回执、修订记录和 Ed25519 字段，不引入 DSH 运行依赖。新代际使用原签名的 `protocol_epoch` / `identity_sha256` 绑定，历史证明不因撤销而消失。
 
-正式 Windows 构建使用 `flutter build windows --release`；需分发整个 `build/windows/x64/runner/Release` 目录，不能只复制 exe。Android 使用同一源码 `flutter build apk --debug` 进行开发安装；公开发布前另行配置自己的 release 签名、升级与分发渠道。Android 最低 API 24。Android 构建还需 JDK 17、Android SDK 36，以及各插件要求的 NDK；下载和构建缓存放在工作区 `.local`。
+Windows 正式构建使用 `flutter build windows --release`，需分发整个 `build/windows/x64/runner/Release` 目录。Android 开发安装使用 `flutter build apk --debug`，最低 API 24。Android 构建需 JDK 17 或更高版本、Android SDK 36、Build Tools 36.0.0 以及插件要求的 NDK，下载和缓存放在工作区 `.local`。
+
+**Android 覆盖升级。** 发布人在本机通过进程环境变量指定以往分发 APK 使用的签名密钥。将 `COMPANION_ANDROID_KEYSTORE` 设为密钥库的绝对路径，`COMPANION_ANDROID_KEY_ALIAS` 设为密钥别名，通过本机凭据管理工具注入 `COMPANION_ANDROID_STORE_PASSWORD` 和 `COMPANION_ANDROID_KEY_PASSWORD`。脚本默认将上次发布的 Android 版本码加一，支持同一天连续发版，也可通过 `-BuildNumber` 指定更大的版本码。在仓库根目录执行打包命令。
+
+```powershell
+./scripts/package-android.ps1 -PreviousApk .local/dist/previous.apk -OutputApk .local/dist/update.apk
+```
+
+`-PreviousApk` 指向上一次实际分发的安装包，`-OutputApk` 使用新文件名。打包脚本会校验两个 APK 的应用 ID 和分发签名证书，确认新版本码严格递增后写入成品。设备打开新 APK 选择“更新”，Android 会保留已有 Bot、登录凭据和聊天缓存。
 
 默认数据目录为系统应用支持目录；开发可用 `--dart-define=COMPANION_DATA_DIR=<工作区内目录>` 指定 SQLite 位置。`scripts/flutter.ps1` 将工具缓存限制在工作区；需要使用已有 Android/JDK 工具时按本机配置准备 `.local/android-sdk` 与 JAVA_HOME。含空格路径遇到原生 hook 的 SDK 兼容问题时，可以给同一工作区设置临时 `subst` 别名，并设 `COMPANION_FLUTTER_WORKSPACE` 为该别名，保持所有文件仍落在原工作区。目录联接辅助脚本用于当前 Windows 未启用开发者模式的环境，不修改系统设置。
 
